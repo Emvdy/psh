@@ -748,9 +748,9 @@ $initialization = Initialize-PshInteractive
     $headObjectId = [string]$headOutput[0]
     Assert-PshGoal2Condition ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($headObjectId)) 'The large-ref fixture could not resolve HEAD.'
     $packedRefs = New-Object Text.StringBuilder
-    [void]$packedRefs.AppendLine('# pack-refs with: fully-peeled sorted')
+    [void]$packedRefs.Append("# pack-refs with: fully-peeled sorted`n")
     for ($refIndex = 0; $refIndex -lt 6000; $refIndex++) {
-        [void]$packedRefs.AppendLine(('{0} refs/heads/large-ref-{1:d5}' -f $headObjectId.Trim(), $refIndex))
+        [void]$packedRefs.Append(("{0} refs/heads/large-ref-{1:d5}`n" -f $headObjectId.Trim(), $refIndex))
     }
     [IO.File]::WriteAllText(
         (Join-Path $gitRepository '.git/packed-refs'),
