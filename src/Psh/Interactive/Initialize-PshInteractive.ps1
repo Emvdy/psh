@@ -166,6 +166,63 @@ function Get-PshFileSha256 {
     return [string](Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
 }
 
+function Get-PshDirectoryTreeFingerprint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Description
+    )
+
+    $rootPath = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+    if (-not [IO.Directory]::Exists($rootPath) -or [IO.File]::Exists($rootPath)) {
+        throw ('{0} is not a directory: {1}' -f $Description, $rootPath)
+    }
+    $rootAttributes = [IO.File]::GetAttributes($rootPath)
+    if (($rootAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw ('{0} must not be a reparse point: {1}' -f $Description, $rootPath)
+    }
+
+    $fingerprint = New-Object System.Collections.Generic.List[string]
+    foreach ($entry in @(Get-ChildItem -LiteralPath $rootPath -Recurse -Force -ErrorAction Stop)) {
+        if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw ('{0} contains a reparse point: {1}' -f $Description, $entry.FullName)
+        }
+        if ($entry.PSIsContainer) {
+            continue
+        }
+
+        $relativePath = $entry.FullName.Substring($rootPath.Length).TrimStart('\', '/').Replace('\', '/')
+        $fingerprint.Add(('{0}|{1}|{2}' -f $relativePath, [long]$entry.Length, (Get-PshFileSha256 -Path $entry.FullName)))
+    }
+    return @($fingerprint.ToArray() | Sort-Object)
+}
+
+function Test-PshDirectoryTreeFingerprintEqual {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$Left,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$Right
+    )
+
+    if ($Left.Count -ne $Right.Count) {
+        return $false
+    }
+    for ($index = 0; $index -lt $Left.Count; $index++) {
+        if (-not [string]::Equals($Left[$index], $Right[$index], [System.StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Get-PshCommandImplementationAssembly {
     [CmdletBinding()]
     param(
@@ -188,6 +245,48 @@ function Get-PshCommandImplementationAssembly {
         path = $assemblyPath
         hash = Get-PshFileSha256 -Path $assemblyPath
     }
+}
+
+function Get-PshLoadedAssemblyEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    return @(
+        foreach ($assembly in [AppDomain]::CurrentDomain.GetAssemblies()) {
+            if (-not [string]::Equals(
+                    [string]$assembly.GetName().Name,
+                    $Name,
+                    [System.StringComparison]::OrdinalIgnoreCase
+                )) {
+                continue
+            }
+
+            $location = $null
+            $hash = $null
+            $inspectionError = $null
+            try {
+                $location = [string]$assembly.Location
+                if ([string]::IsNullOrWhiteSpace($location)) {
+                    throw ('Loaded assembly {0} has no inspectable location.' -f $Name)
+                }
+                $location = [IO.Path]::GetFullPath($location)
+                $hash = Get-PshFileSha256 -Path $location
+            }
+            catch {
+                $inspectionError = [string]$_.Exception.Message
+            }
+
+            [PSCustomObject][ordered]@{
+                fullName        = [string]$assembly.FullName
+                location        = $location
+                sha256          = $hash
+                inspectionError = $inspectionError
+            }
+        }
+    )
 }
 
 function Import-PshBundledModule {
@@ -228,6 +327,15 @@ function Import-PshBundledModule {
         actualAssemblyHash = $null
         assemblyVerified = $false
         assemblyVerificationState = 'not-applicable'
+        expectedTreeFileCount = 0
+        expectedTreeFingerprint = @()
+        actualTreeFileCount = 0
+        actualTreeFingerprint = @()
+        treeVerified    = $false
+        treeVerificationState = 'not-applicable'
+        preloadedAssemblies = @()
+        restartRequired = $false
+        mutationSuppressed = $false
         importScope     = 'Global'
         integrationMode = 'ManifestImport'
         executionSuppressed = $false
@@ -283,11 +391,109 @@ function Import-PshBundledModule {
 
         if ([string]::Equals($Name, 'PSReadLine', [System.StringComparison]::OrdinalIgnoreCase)) {
             $result.assemblyVerificationState = 'pending'
+            $result.treeVerificationState = 'pending'
             $result.expectedAssemblyPath = Join-Path -Path $expectedBase -ChildPath 'Microsoft.PowerShell.PSReadLine.dll'
             $result.expectedAssemblyHash = Get-PshFileSha256 -Path $result.expectedAssemblyPath
+            $expectedTreeFingerprint = @(Get-PshDirectoryTreeFingerprint -Root $expectedBase -Description 'The fixed PSReadLine module tree')
+            if ($expectedTreeFingerprint.Count -ne 7) {
+                throw ('The fixed PSReadLine module tree contains {0} files instead of 7.' -f $expectedTreeFingerprint.Count)
+            }
+            $result.expectedTreeFileCount = $expectedTreeFingerprint.Count
+            $result.expectedTreeFingerprint = @($expectedTreeFingerprint)
         }
 
         $preexistingModules = @(Get-Module -Name $Name)
+
+        if ([string]::Equals($Name, 'PSReadLine', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $loadedAssemblyEvidence = @(Get-PshLoadedAssemblyEvidence -Name 'Microsoft.PowerShell.PSReadLine')
+            $result.preloadedAssemblies = @($loadedAssemblyEvidence)
+
+            if ($preexistingModules.Count -gt 0 -or $loadedAssemblyEvidence.Count -gt 0) {
+                $result.mutationSuppressed = $true
+                $result.restartRequired = $true
+                if ($preexistingModules.Count -ne 1) {
+                    throw ('A fresh process is required because {0} PSReadLine modules are loaded.' -f $preexistingModules.Count)
+                }
+                if ($loadedAssemblyEvidence.Count -ne 1) {
+                    throw ('A fresh process is required because {0} PSReadLine implementation assemblies are loaded.' -f $loadedAssemblyEvidence.Count)
+                }
+
+                $preloadedModule = $preexistingModules[0]
+                $preloadedAssembly = $loadedAssemblyEvidence[0]
+                $result.actualAssemblyPath = [string]$preloadedAssembly.location
+                $result.actualAssemblyHash = [string]$preloadedAssembly.sha256
+                if (-not [string]::IsNullOrWhiteSpace([string]$preloadedAssembly.inspectionError)) {
+                    throw ('A fresh process is required because the loaded PSReadLine assembly cannot be verified: {0}' -f $preloadedAssembly.inspectionError)
+                }
+                if ($preloadedModule.Version -ne $Version) {
+                    throw ('A fresh process is required because PSReadLine {0} is already loaded instead of {1}.' -f $preloadedModule.Version, $Version)
+                }
+                if (-not [string]::Equals(
+                        [string]$result.expectedAssemblyHash,
+                        [string]$result.actualAssemblyHash,
+                        [System.StringComparison]::OrdinalIgnoreCase
+                    )) {
+                    throw ('A fresh process is required because the loaded PSReadLine implementation uses different bytes: {0}' -f $result.actualAssemblyPath)
+                }
+
+                $preloadedBase = [IO.Path]::GetFullPath([string]$preloadedModule.ModuleBase).TrimEnd('\', '/')
+                $preloadedTreeFingerprint = @(Get-PshDirectoryTreeFingerprint -Root $preloadedBase -Description 'The preloaded PSReadLine module tree')
+                $result.actualTreeFileCount = $preloadedTreeFingerprint.Count
+                $result.actualTreeFingerprint = @($preloadedTreeFingerprint)
+                if (-not (Test-PshDirectoryTreeFingerprintEqual -Left $expectedTreeFingerprint -Right $preloadedTreeFingerprint)) {
+                    throw ('A fresh process is required because the preloaded PSReadLine module tree differs from the fixed seven-file tree: {0}' -f $preloadedBase)
+                }
+                $preloadedCommand = Get-Command -Name 'Set-PSReadLineOption' -All -ErrorAction Stop |
+                    Where-Object {
+                        $null -ne $_.Module -and
+                            [string]::Equals(
+                                [IO.Path]::GetFullPath([string]$_.Module.ModuleBase).TrimEnd('\', '/'),
+                                $preloadedBase,
+                                $pathComparison
+                            )
+                    } |
+                    Select-Object -First 1
+                if ($null -eq $preloadedCommand) {
+                    throw 'A fresh process is required because the preloaded PSReadLine module does not expose Set-PSReadLineOption.'
+                }
+
+                $preloadedCommandAssembly = Get-PshCommandImplementationAssembly -Command $preloadedCommand
+                if (-not [string]::Equals(
+                        [string]$result.expectedAssemblyHash,
+                        [string]$preloadedCommandAssembly.hash,
+                        [System.StringComparison]::OrdinalIgnoreCase
+                    )) {
+                    $result.actualAssemblyPath = [string]$preloadedCommandAssembly.path
+                    $result.actualAssemblyHash = [string]$preloadedCommandAssembly.hash
+                    throw ('A fresh process is required because Set-PSReadLineOption uses different implementation bytes: {0}' -f $result.actualAssemblyPath)
+                }
+
+                $result.imported = $true
+                $result.loadedVersion = [string]$preloadedModule.Version
+                $result.loadedPath = [string]$preloadedModule.Path
+                $result.loadedModuleBase = $preloadedBase
+                $result.loadAction = 'reused-preloaded-identical'
+                $result.actualAssemblyPath = [string]$preloadedCommandAssembly.path
+                $result.actualAssemblyHash = [string]$preloadedCommandAssembly.hash
+                $result.assemblyVerified = $true
+                $result.treeVerified = $true
+                $result.restartRequired = $false
+                if ([string]::Equals(
+                        [IO.Path]::GetFullPath([string]$result.expectedAssemblyPath),
+                        [IO.Path]::GetFullPath([string]$result.actualAssemblyPath),
+                        $pathComparison
+                    )) {
+                    $result.assemblyVerificationState = 'fixed-path'
+                    $result.treeVerificationState = 'fixed-path'
+                }
+                else {
+                    $result.assemblyVerificationState = 'reused-identical'
+                    $result.treeVerificationState = 'reused-identical'
+                }
+                return [PSCustomObject]$result
+            }
+        }
+
         $preexistingExpectedModules = @(
             $preexistingModules |
                 Where-Object {
@@ -417,6 +623,14 @@ function Import-PshBundledModule {
                 $result.assemblyVerificationState = 'reused-identical'
             }
             $result.assemblyVerified = $true
+            $loadedTreeFingerprint = @(Get-PshDirectoryTreeFingerprint -Root $loadedBase -Description 'The active PSReadLine module tree')
+            $result.actualTreeFileCount = $loadedTreeFingerprint.Count
+            $result.actualTreeFingerprint = @($loadedTreeFingerprint)
+            if (-not (Test-PshDirectoryTreeFingerprintEqual -Left $expectedTreeFingerprint -Right $loadedTreeFingerprint)) {
+                throw ('The active PSReadLine module tree changed during fixed-path import: {0}' -f $loadedBase)
+            }
+            $result.treeVerified = $true
+            $result.treeVerificationState = 'fixed-path'
         }
 
         $result.imported = $true
@@ -428,6 +642,9 @@ function Import-PshBundledModule {
         $result.error = [string]$_.Exception.Message
         if ($result.assemblyVerificationState -eq 'pending') {
             $result.assemblyVerificationState = 'failed'
+        }
+        if ($result.treeVerificationState -eq 'pending') {
+            $result.treeVerificationState = 'failed'
         }
         if (-not $result.imported -and
             ($introducedExpectedModule -or $removedModules.Count -gt 0)) {
@@ -689,7 +906,8 @@ function Initialize-PshInteractive {
     }
 
     $bindings = @()
-    if ($psReadLine.imported) {
+    $dependenciesReady = [bool]$psReadLine.imported -and [bool]$psCompletions.validated
+    if ($dependenciesReady) {
         $bindingSpecifications = @(
             [PSCustomObject]@{ Chord = 'Tab';       Function = 'MenuComplete' }
             [PSCustomObject]@{ Chord = 'Ctrl+r';    Function = 'ReverseSearchHistory' }
@@ -718,6 +936,62 @@ function Initialize-PshInteractive {
             }
             $warnings += $warning
         }
+
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:PshGitCompletionSourceLoadError)) {
+            $gitCompletion = [PSCustomObject][ordered]@{
+                registered        = $false
+                alreadyRegistered = $false
+                mode              = 'PshOfflineNativeCompleter'
+                commandNames      = @('git', 'git.exe')
+                gitAvailable      = $false
+                gitPath           = $null
+                registrar         = $null
+                registrationSyntax = $null
+                timeoutMs         = $GitTimeoutMilliseconds
+                error             = [string]$script:PshGitCompletionSourceLoadError
+            }
+        }
+        else {
+            $gitCompletion = Register-PshGitCompletion -TimeoutMilliseconds $GitTimeoutMilliseconds
+        }
+        if (-not $gitCompletion.registered) {
+            $errors += ('Git completion: {0}' -f [string]$gitCompletion.error)
+        }
+
+        if ($EnablePrompt) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$script:PshPromptSourceLoadError)) {
+                $prompt = [PSCustomObject][ordered]@{
+                    requested        = $true
+                    enabled          = $false
+                    replacedExisting = $false
+                    style            = 'PlainAscii'
+                    gitEnabled       = (-not [bool]$DisableGitPrompt)
+                    gitTimeoutMs     = $GitTimeoutMilliseconds
+                    error            = [string]$script:PshPromptSourceLoadError
+                }
+            }
+            else {
+                $prompt = Set-PshPrompt `
+                    -DisableGit:$DisableGitPrompt `
+                    -GitExecutablePath ([string]$gitCompletion.gitPath) `
+                    -GitTimeoutMilliseconds $GitTimeoutMilliseconds
+            }
+            if (-not $prompt.enabled) {
+                $errors += ('Prompt: {0}' -f [string]$prompt.error)
+            }
+        }
+        else {
+            $prompt = [PSCustomObject][ordered]@{
+                requested        = $false
+                enabled          = $false
+                replacedExisting = $false
+                style            = 'PlainAscii'
+                gitEnabled       = (-not [bool]$DisableGitPrompt)
+                gitAvailable     = [bool]$gitCompletion.gitAvailable
+                gitTimeoutMs     = $GitTimeoutMilliseconds
+                error            = $null
+            }
+        }
     }
     else {
         $prediction = [PSCustomObject][ordered]@{
@@ -725,14 +999,11 @@ function Initialize-PshInteractive {
             enabled   = $false
             source    = $null
             viewStyle = $null
-            reason    = 'PSReadLineUnavailable'
+            reason    = 'DependencyValidationFailed'
             implementationAssemblyPath = $null
             implementationAssemblyHash = $null
             error     = $null
         }
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace([string]$script:PshGitCompletionSourceLoadError)) {
         $gitCompletion = [PSCustomObject][ordered]@{
             registered        = $false
             alreadyRegistered = $false
@@ -743,46 +1014,15 @@ function Initialize-PshInteractive {
             registrar         = $null
             registrationSyntax = $null
             timeoutMs         = $GitTimeoutMilliseconds
-            error             = [string]$script:PshGitCompletionSourceLoadError
+            error             = $null
         }
-    }
-    else {
-        $gitCompletion = Register-PshGitCompletion -TimeoutMilliseconds $GitTimeoutMilliseconds
-    }
-    if (-not $gitCompletion.registered) {
-        $errors += ('Git completion: {0}' -f [string]$gitCompletion.error)
-    }
-
-    if ($EnablePrompt) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$script:PshPromptSourceLoadError)) {
-            $prompt = [PSCustomObject][ordered]@{
-                requested        = $true
-                enabled          = $false
-                replacedExisting = $false
-                style            = 'PlainAscii'
-                gitEnabled       = (-not [bool]$DisableGitPrompt)
-                gitTimeoutMs     = $GitTimeoutMilliseconds
-                error            = [string]$script:PshPromptSourceLoadError
-            }
-        }
-        else {
-            $prompt = Set-PshPrompt `
-                -DisableGit:$DisableGitPrompt `
-                -GitExecutablePath ([string]$gitCompletion.gitPath) `
-                -GitTimeoutMilliseconds $GitTimeoutMilliseconds
-        }
-        if (-not $prompt.enabled) {
-            $errors += ('Prompt: {0}' -f [string]$prompt.error)
-        }
-    }
-    else {
         $prompt = [PSCustomObject][ordered]@{
-            requested        = $false
+            requested        = [bool]$EnablePrompt
             enabled          = $false
             replacedExisting = $false
             style            = 'PlainAscii'
             gitEnabled       = (-not [bool]$DisableGitPrompt)
-            gitAvailable     = [bool]$gitCompletion.gitAvailable
+            gitAvailable     = $false
             gitTimeoutMs     = $GitTimeoutMilliseconds
             error            = $null
         }

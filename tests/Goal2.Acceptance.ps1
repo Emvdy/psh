@@ -94,7 +94,7 @@ function Get-PshGoal2TreeFingerprint {
     )
 
     return @(
-        Get-ChildItem -LiteralPath $Root -Recurse -File |
+        Get-ChildItem -LiteralPath $Root -Recurse -File -Force |
             ForEach-Object {
                 $relative = $_.FullName.Substring($Root.Length).TrimStart(
                     [IO.Path]::DirectorySeparatorChar,
@@ -371,12 +371,16 @@ $dependencyRoot = Join-Path -Path $repositoryRootPath -ChildPath 'src/Psh/Depend
 $dependencyVerifierPath = Join-Path -Path $repositoryRootPath -ChildPath 'scripts/Test-InteractiveDependencies.ps1'
 $installProfilePath = Join-Path -Path $repositoryRootPath -ChildPath 'src/profile/Install-PshProfile.ps1'
 $uninstallProfilePath = Join-Path -Path $repositoryRootPath -ChildPath 'src/profile/Uninstall-PshProfile.ps1'
+$installProjectionPath = Join-Path -Path $repositoryRootPath -ChildPath 'src/profile/Install-PshPSReadLineProjection.ps1'
+$uninstallProjectionPath = Join-Path -Path $repositoryRootPath -ChildPath 'src/profile/Uninstall-PshPSReadLineProjection.ps1'
 
 foreach ($requiredPath in @(
     $moduleManifestPath,
     $dependencyVerifierPath,
     $installProfilePath,
-    $uninstallProfilePath
+    $uninstallProfilePath,
+    $installProjectionPath,
+    $uninstallProjectionPath
 )) {
     Assert-PshGoal2Condition (Test-Path -LiteralPath $requiredPath -PathType Leaf) "Required file is missing: $requiredPath"
 }
@@ -441,9 +445,335 @@ Assert-PshGoal2Condition ($null -eq $globalPsCompletionsBefore) 'The acceptance 
 $originalPrompt = (Get-Item -LiteralPath 'Function:\prompt').ScriptBlock
 $interactiveTemporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("psh-goal2-interactive-{0}" -f [Guid]::NewGuid().ToString('N'))
 $profileTemporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("psh-goal2-profile-{0}" -f [Guid]::NewGuid().ToString('N'))
+$projectionTemporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("p2p-{0}" -f [Guid]::NewGuid().ToString('N').Substring(0, 12))
 $originalLocation = Get-Location
 
 try {
+    [IO.Directory]::CreateDirectory($projectionTemporaryRoot) | Out-Null
+    $projectionSourcePath = Join-Path $dependencyRoot 'PSReadLine/2.4.5'
+    $projectionSourceFingerprint = @(Get-PshGoal2TreeFingerprint -Root $projectionSourcePath)
+    Assert-PshGoal2Condition ($projectionSourceFingerprint.Count -eq 7) 'The projection source is not the exact seven-file PSReadLine tree.'
+    $expectedProjectionTreeHash = 'ba8c4b0064725aa107f024d243d9f8af8ab43791a4bdda39893d27b22ae6f79d'
+
+    $projectionLifecycleRoot = Join-Path $projectionTemporaryRoot 'lifecycle'
+    $projectionLifecycleRoots = @(
+        (Join-Path $projectionLifecycleRoot 'WindowsPowerShell/Modules'),
+        (Join-Path $projectionLifecycleRoot 'PowerShell/Modules')
+    )
+    $projectionLifecycleState = Join-Path $projectionLifecycleRoot 'state'
+    $projectionWhatIf = @(
+        & $installProjectionPath `
+            -SourcePath $projectionSourcePath `
+            -ModuleRoot $projectionLifecycleRoots `
+            -StateRoot $projectionLifecycleState `
+            -WhatIf
+    )
+    Assert-PshGoal2Condition ($projectionWhatIf.Count -eq 2) 'Projection install WhatIf did not report both targets.'
+    Assert-PshGoal2Condition (@($projectionWhatIf | Where-Object { [string]$_.Status -cne 'WouldCreate' }).Count -eq 0) 'Projection install WhatIf did not report WouldCreate for two absent targets.'
+    Assert-PshGoal2Condition (-not [IO.Directory]::Exists($projectionLifecycleState)) 'Projection install WhatIf created state.'
+    foreach ($moduleRoot in $projectionLifecycleRoots) {
+        $targetPath = Join-Path (Join-Path $moduleRoot 'PSReadLine') '2.4.5'
+        Assert-PshGoal2Condition (-not [IO.Directory]::Exists($targetPath) -and -not [IO.File]::Exists($targetPath)) 'Projection install WhatIf created a target.'
+    }
+
+    $projectionCreated = @(
+        & $installProjectionPath `
+            -SourcePath $projectionSourcePath `
+            -ModuleRoot $projectionLifecycleRoots `
+            -StateRoot $projectionLifecycleState
+    )
+    Assert-PshGoal2Condition ($projectionCreated.Count -eq 2) 'Projection install did not report both created targets.'
+    Assert-PshGoal2Condition (@($projectionCreated | Where-Object { [string]$_.Status -cne 'Created' -or -not [bool]$_.Owned -or -not [bool]$_.Changed }).Count -eq 0) 'Projection install reported incorrect created ownership.'
+    Assert-PshGoal2Condition (@($projectionCreated | Where-Object { [int]$_.FileCount -ne 7 -or [string]$_.TreeSha256 -cne $expectedProjectionTreeHash }).Count -eq 0) 'Projection install reported the wrong trusted fingerprint.'
+    foreach ($result in $projectionCreated) {
+        Assert-PshGoal2Condition ([IO.Directory]::Exists([string]$result.TargetPath)) "Projection target is missing: $($result.TargetPath)"
+        Assert-PshGoal2Condition (@(Compare-Object $projectionSourceFingerprint @(Get-PshGoal2TreeFingerprint -Root ([string]$result.TargetPath))).Count -eq 0) "Projection target differs from the source: $($result.TargetPath)"
+    }
+    $projectionManifestPath = Join-Path $projectionLifecycleState 'manifest.json'
+    Assert-PshGoal2Condition ([IO.File]::Exists($projectionManifestPath)) 'Projection install did not create its ownership manifest.'
+    $projectionManifest = Get-Content -LiteralPath $projectionManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+    Assert-PshGoal2Condition ([string]$projectionManifest.state -ceq 'complete' -and [string]$projectionManifest.operation -ceq 'install') 'Projection install did not commit a complete install manifest.'
+    Assert-PshGoal2Condition ([string]$projectionManifest.treeSha256 -ceq $expectedProjectionTreeHash -and @($projectionManifest.files).Count -eq 7) 'Projection manifest lost the trusted seven-file fingerprint.'
+    Assert-PshGoal2Condition (@($projectionManifest.targets).Count -eq 2 -and @($projectionManifest.targets | Where-Object { [string]$_.disposition -cne 'created' }).Count -eq 0) 'Projection manifest has the wrong target ownership.'
+
+    $projectionRepeat = @(
+        & $installProjectionPath `
+            -SourcePath $projectionSourcePath `
+            -ModuleRoot $projectionLifecycleRoots `
+            -StateRoot $projectionLifecycleState
+    )
+    Assert-PshGoal2Condition ($projectionRepeat.Count -eq 2 -and @($projectionRepeat | Where-Object { [string]$_.Status -cne 'AlreadyCreated' -or [bool]$_.Changed }).Count -eq 0) 'Projection reinstall was not idempotent.'
+
+    [byte[]]$projectionManifestBeforeWhatIf = [IO.File]::ReadAllBytes($projectionManifestPath)
+    $projectionUninstallWhatIf = @(
+        & $uninstallProjectionPath `
+            -ModuleRoot $projectionLifecycleRoots `
+            -StateRoot $projectionLifecycleState `
+            -WhatIf
+    )
+    Assert-PshGoal2Condition ($projectionUninstallWhatIf.Count -eq 2 -and @($projectionUninstallWhatIf | Where-Object { [string]$_.Status -cne 'WouldRemove' }).Count -eq 0) 'Projection uninstall WhatIf did not report both owned targets.'
+    Assert-PshGoal2Condition (Test-PshGoal2ByteArrayEqual -Left $projectionManifestBeforeWhatIf -Right ([IO.File]::ReadAllBytes($projectionManifestPath))) 'Projection uninstall WhatIf changed its manifest.'
+    foreach ($result in $projectionCreated) {
+        Assert-PshGoal2Condition (@(Compare-Object $projectionSourceFingerprint @(Get-PshGoal2TreeFingerprint -Root ([string]$result.TargetPath))).Count -eq 0) 'Projection uninstall WhatIf changed an owned target.'
+    }
+
+    $projectionRemoved = @(
+        & $uninstallProjectionPath `
+            -ModuleRoot $projectionLifecycleRoots `
+            -StateRoot $projectionLifecycleState
+    )
+    Assert-PshGoal2Condition ($projectionRemoved.Count -eq 2 -and @($projectionRemoved | Where-Object { [string]$_.Status -cne 'Removed' -or -not [bool]$_.Changed }).Count -eq 0) 'Projection uninstall did not remove both owned targets.'
+    foreach ($result in $projectionRemoved) {
+        Assert-PshGoal2Condition (-not [IO.Directory]::Exists([string]$result.TargetPath) -and -not [IO.File]::Exists([string]$result.TargetPath)) 'Projection uninstall left an owned target.'
+    }
+    Assert-PshGoal2Condition (-not [IO.File]::Exists($projectionManifestPath)) 'Projection uninstall left its ownership manifest.'
+    $projectionNotInstalled = @(
+        & $uninstallProjectionPath `
+            -ModuleRoot $projectionLifecycleRoots `
+            -StateRoot $projectionLifecycleState
+    )
+    Assert-PshGoal2Condition ($projectionNotInstalled.Count -eq 2 -and @($projectionNotInstalled | Where-Object { [string]$_.Status -cne 'NotInstalled' }).Count -eq 0) 'Projection repeat uninstall was not idempotent.'
+
+    $projectionMixedRoot = Join-Path $projectionTemporaryRoot 'mixed-ownership'
+    $projectionMixedRoots = @(
+        (Join-Path $projectionMixedRoot 'WindowsPowerShell/Modules'),
+        (Join-Path $projectionMixedRoot 'PowerShell/Modules')
+    )
+    $projectionMixedState = Join-Path $projectionMixedRoot 'state'
+    $preexistingProjectionTarget = Join-Path (Join-Path $projectionMixedRoots[0] 'PSReadLine') '2.4.5'
+    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($preexistingProjectionTarget)) | Out-Null
+    Copy-Item -LiteralPath $projectionSourcePath -Destination $preexistingProjectionTarget -Recurse
+    $projectionMixedInstall = @(
+        & $installProjectionPath `
+            -SourcePath $projectionSourcePath `
+            -ModuleRoot $projectionMixedRoots `
+            -StateRoot $projectionMixedState
+    )
+    Assert-PshGoal2Condition ($projectionMixedInstall.Count -eq 2) 'Mixed-ownership projection install did not report both targets.'
+    Assert-PshGoal2Condition ([string]$projectionMixedInstall[0].Status -ceq 'Reused' -and -not [bool]$projectionMixedInstall[0].Owned -and -not [bool]$projectionMixedInstall[0].Changed) 'An identical pre-existing projection was not reused without ownership.'
+    Assert-PshGoal2Condition ([string]$projectionMixedInstall[1].Status -ceq 'Created' -and [bool]$projectionMixedInstall[1].Owned -and [bool]$projectionMixedInstall[1].Changed) 'The missing mixed-ownership projection was not created and owned.'
+    $projectionMixedRemove = @(
+        & $uninstallProjectionPath `
+            -ModuleRoot $projectionMixedRoots `
+            -StateRoot $projectionMixedState
+    )
+    Assert-PshGoal2Condition ([string]$projectionMixedRemove[0].Status -ceq 'RetainedReused' -and -not [bool]$projectionMixedRemove[0].Changed) 'Projection uninstall removed or changed reused user content.'
+    Assert-PshGoal2Condition ([string]$projectionMixedRemove[1].Status -ceq 'Removed' -and [bool]$projectionMixedRemove[1].Changed) 'Projection uninstall retained a Psh-owned mixed target.'
+    Assert-PshGoal2Condition (@(Compare-Object $projectionSourceFingerprint @(Get-PshGoal2TreeFingerprint -Root $preexistingProjectionTarget)).Count -eq 0) 'Projection uninstall changed the reused pre-existing tree.'
+    $mixedCreatedTarget = Join-Path (Join-Path $projectionMixedRoots[1] 'PSReadLine') '2.4.5'
+    Assert-PshGoal2Condition (-not [IO.Directory]::Exists($mixedCreatedTarget)) 'Projection uninstall left the Psh-owned mixed target.'
+
+    foreach ($conflictMode in @('different-bytes', 'extra-file', 'higher-version', 'unversioned-file')) {
+        $conflictRoot = Join-Path $projectionTemporaryRoot ("conflict-{0}" -f $conflictMode)
+        $conflictModuleRoots = @(
+            (Join-Path $conflictRoot 'WindowsPowerShell/Modules'),
+            (Join-Path $conflictRoot 'PowerShell/Modules')
+        )
+        $conflictState = Join-Path $conflictRoot 'state'
+        $conflictContainer = Join-Path $conflictModuleRoots[0] 'PSReadLine'
+        [IO.Directory]::CreateDirectory($conflictContainer) | Out-Null
+        switch ($conflictMode) {
+            'different-bytes' {
+                $conflictTarget = Join-Path $conflictContainer '2.4.5'
+                Copy-Item -LiteralPath $projectionSourcePath -Destination $conflictTarget -Recurse
+                $conflictFile = Join-Path $conflictTarget 'PSReadLine.psm1'
+                [byte[]]$conflictBytes = [IO.File]::ReadAllBytes($conflictFile)
+                $conflictBytes[$conflictBytes.Length - 1] = $conflictBytes[$conflictBytes.Length - 1] -bxor 1
+                [IO.File]::WriteAllBytes($conflictFile, $conflictBytes)
+            }
+            'extra-file' {
+                $conflictTarget = Join-Path $conflictContainer '2.4.5'
+                Copy-Item -LiteralPath $projectionSourcePath -Destination $conflictTarget -Recurse
+                [IO.File]::WriteAllText((Join-Path $conflictTarget 'user-extra.txt'), 'pre-existing user content', (New-Object Text.UTF8Encoding($false)))
+            }
+            'higher-version' {
+                $conflictTarget = Join-Path $conflictContainer '9.0.0'
+                [IO.Directory]::CreateDirectory($conflictTarget) | Out-Null
+                [IO.File]::WriteAllText((Join-Path $conflictTarget 'user.txt'), 'higher version', (New-Object Text.UTF8Encoding($false)))
+            }
+            'unversioned-file' {
+                $conflictTarget = Join-Path $conflictContainer 'PSReadLine.psd1'
+                [IO.File]::WriteAllText($conflictTarget, '@{ ModuleVersion = ''1.0.0'' }', (New-Object Text.UTF8Encoding($false)))
+            }
+        }
+        $conflictFingerprintBefore = @(Get-PshGoal2TreeFingerprint -Root $conflictRoot)
+        Assert-PshGoal2ExpectedFailure -Action {
+            & $installProjectionPath `
+                -SourcePath $projectionSourcePath `
+                -ModuleRoot $conflictModuleRoots `
+                -StateRoot $conflictState
+        } -Message "Projection conflict was accepted: $conflictMode"
+        Assert-PshGoal2Condition (@(Compare-Object $conflictFingerprintBefore @(Get-PshGoal2TreeFingerprint -Root $conflictRoot)).Count -eq 0) "Projection conflict preflight changed user content: $conflictMode"
+        Assert-PshGoal2Condition (-not [IO.Directory]::Exists($conflictState) -and -not [IO.File]::Exists((Join-Path $conflictState 'manifest.json'))) "Projection conflict preflight wrote state: $conflictMode"
+        $conflictSecondTarget = Join-Path (Join-Path $conflictModuleRoots[1] 'PSReadLine') '2.4.5'
+        Assert-PshGoal2Condition (-not [IO.Directory]::Exists($conflictSecondTarget) -and -not [IO.File]::Exists($conflictSecondTarget)) "Projection conflict preflight wrote the second target: $conflictMode"
+    }
+
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $reparseRoot = Join-Path $projectionTemporaryRoot 'conflict-reparse'
+        $reparseModuleRoots = @(
+            (Join-Path $reparseRoot 'WindowsPowerShell/Modules'),
+            (Join-Path $reparseRoot 'PowerShell/Modules')
+        )
+        $reparseState = Join-Path $reparseRoot 'state'
+        $reparseTarget = Join-Path $reparseRoot 'junction-target'
+        $reparseContainer = Join-Path $reparseModuleRoots[0] 'PSReadLine'
+        [IO.Directory]::CreateDirectory($reparseModuleRoots[0]) | Out-Null
+        [IO.Directory]::CreateDirectory($reparseTarget) | Out-Null
+        $null = New-Item -ItemType Junction -Path $reparseContainer -Target $reparseTarget -ErrorAction Stop
+        try {
+            Assert-PshGoal2ExpectedFailure -Action {
+                & $installProjectionPath `
+                    -SourcePath $projectionSourcePath `
+                    -ModuleRoot $reparseModuleRoots `
+                    -StateRoot $reparseState
+            } -Message 'A reparse-point PSReadLine container was accepted.'
+            Assert-PshGoal2Condition (-not [IO.Directory]::Exists($reparseState)) 'Reparse-point conflict wrote projection state.'
+            Assert-PshGoal2Condition (@(Get-ChildItem -LiteralPath $reparseTarget -Force).Count -eq 0) 'Reparse-point conflict changed its target.'
+        }
+        finally {
+            if ([IO.Directory]::Exists($reparseContainer)) {
+                [IO.Directory]::Delete($reparseContainer, $false)
+            }
+        }
+
+        $installRollbackRoot = Join-Path $projectionTemporaryRoot 'install-rollback'
+        $installRollbackRoots = @(
+            (Join-Path $installRollbackRoot 'WindowsPowerShell/Modules'),
+            (Join-Path $installRollbackRoot 'PowerShell/Modules')
+        )
+        $installRollbackState = Join-Path $installRollbackRoot 'state'
+        foreach ($moduleRoot in $installRollbackRoots) {
+            [IO.Directory]::CreateDirectory($moduleRoot) | Out-Null
+        }
+        $currentUserSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $denyCreateRule = New-Object Security.AccessControl.FileSystemAccessRule -ArgumentList @(
+            $currentUserSid,
+            [Security.AccessControl.FileSystemRights]::CreateDirectories,
+            [Security.AccessControl.InheritanceFlags]::None,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Deny
+        )
+        $installRollbackAcl = Get-Acl -LiteralPath $installRollbackRoots[1]
+        [void]$installRollbackAcl.AddAccessRule($denyCreateRule)
+        Set-Acl -LiteralPath $installRollbackRoots[1] -AclObject $installRollbackAcl
+        try {
+            Assert-PshGoal2ExpectedFailure -Action {
+                & $installProjectionPath `
+                    -SourcePath $projectionSourcePath `
+                    -ModuleRoot $installRollbackRoots `
+                    -StateRoot $installRollbackState
+            } -Message 'A denied second projection target did not trigger install rollback.'
+        }
+        finally {
+            $installRollbackAcl = Get-Acl -LiteralPath $installRollbackRoots[1]
+            [void]$installRollbackAcl.RemoveAccessRuleSpecific($denyCreateRule)
+            Set-Acl -LiteralPath $installRollbackRoots[1] -AclObject $installRollbackAcl
+        }
+        foreach ($moduleRoot in $installRollbackRoots) {
+            $targetPath = Join-Path (Join-Path $moduleRoot 'PSReadLine') '2.4.5'
+            Assert-PshGoal2Condition (-not [IO.Directory]::Exists($targetPath) -and -not [IO.File]::Exists($targetPath)) 'Projection install rollback left a target behind.'
+        }
+        Assert-PshGoal2Condition (-not [IO.File]::Exists((Join-Path $installRollbackState 'manifest.json'))) 'Projection install rollback left a manifest behind.'
+
+        $uninstallRollbackRoot = Join-Path $projectionTemporaryRoot 'uninstall-rollback'
+        $uninstallRollbackRoots = @(
+            (Join-Path $uninstallRollbackRoot 'WindowsPowerShell/Modules'),
+            (Join-Path $uninstallRollbackRoot 'PowerShell/Modules')
+        )
+        $uninstallRollbackState = Join-Path $uninstallRollbackRoot 'state'
+        $uninstallRollbackInstall = @(
+            & $installProjectionPath `
+                -SourcePath $projectionSourcePath `
+                -ModuleRoot $uninstallRollbackRoots `
+                -StateRoot $uninstallRollbackState
+        )
+        [byte[]]$uninstallRollbackManifestBytes = [IO.File]::ReadAllBytes((Join-Path $uninstallRollbackState 'manifest.json'))
+        $denyDeleteRule = New-Object Security.AccessControl.FileSystemAccessRule -ArgumentList @(
+            $currentUserSid,
+            [Security.AccessControl.FileSystemRights]::Delete,
+            [Security.AccessControl.InheritanceFlags]::None,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Deny
+        )
+        $denyDeleteChildRule = New-Object Security.AccessControl.FileSystemAccessRule -ArgumentList @(
+            $currentUserSid,
+            [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles,
+            [Security.AccessControl.InheritanceFlags]::None,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Deny
+        )
+        $uninstallRollbackTarget = [string]$uninstallRollbackInstall[1].TargetPath
+        $uninstallRollbackContainer = [IO.Path]::GetDirectoryName($uninstallRollbackTarget)
+        $uninstallRollbackTargetAcl = Get-Acl -LiteralPath $uninstallRollbackTarget
+        [void]$uninstallRollbackTargetAcl.AddAccessRule($denyDeleteRule)
+        Set-Acl -LiteralPath $uninstallRollbackTarget -AclObject $uninstallRollbackTargetAcl
+        $uninstallRollbackContainerAcl = Get-Acl -LiteralPath $uninstallRollbackContainer
+        [void]$uninstallRollbackContainerAcl.AddAccessRule($denyDeleteChildRule)
+        Set-Acl -LiteralPath $uninstallRollbackContainer -AclObject $uninstallRollbackContainerAcl
+        try {
+            Assert-PshGoal2ExpectedFailure -Action {
+                $null = @(
+                    & $uninstallProjectionPath `
+                        -ModuleRoot $uninstallRollbackRoots `
+                        -StateRoot $uninstallRollbackState
+                )
+            } -Message 'A denied second projection target did not trigger uninstall rollback.'
+        }
+        finally {
+            if ([IO.Directory]::Exists($uninstallRollbackTarget)) {
+                $uninstallRollbackTargetAcl = Get-Acl -LiteralPath $uninstallRollbackTarget
+                [void]$uninstallRollbackTargetAcl.RemoveAccessRuleSpecific($denyDeleteRule)
+                Set-Acl -LiteralPath $uninstallRollbackTarget -AclObject $uninstallRollbackTargetAcl
+            }
+            if ([IO.Directory]::Exists($uninstallRollbackContainer)) {
+                $uninstallRollbackContainerAcl = Get-Acl -LiteralPath $uninstallRollbackContainer
+                [void]$uninstallRollbackContainerAcl.RemoveAccessRuleSpecific($denyDeleteChildRule)
+                Set-Acl -LiteralPath $uninstallRollbackContainer -AclObject $uninstallRollbackContainerAcl
+            }
+        }
+        Assert-PshGoal2Condition (Test-PshGoal2ByteArrayEqual -Left $uninstallRollbackManifestBytes -Right ([IO.File]::ReadAllBytes((Join-Path $uninstallRollbackState 'manifest.json'))) ) 'Projection uninstall rollback did not restore the complete manifest.'
+        foreach ($result in $uninstallRollbackInstall) {
+            Assert-PshGoal2Condition (@(Compare-Object $projectionSourceFingerprint @(Get-PshGoal2TreeFingerprint -Root ([string]$result.TargetPath))).Count -eq 0) 'Projection uninstall rollback did not restore an owned target.'
+        }
+        $null = @(
+            & $uninstallProjectionPath `
+                -ModuleRoot $uninstallRollbackRoots `
+                -StateRoot $uninstallRollbackState
+        )
+    }
+
+    $projectionTamperRoot = Join-Path $projectionTemporaryRoot 'tamper'
+    $projectionTamperRoots = @(
+        (Join-Path $projectionTamperRoot 'WindowsPowerShell/Modules'),
+        (Join-Path $projectionTamperRoot 'PowerShell/Modules')
+    )
+    $projectionTamperState = Join-Path $projectionTamperRoot 'state'
+    $projectionTamperInstall = @(
+        & $installProjectionPath `
+            -SourcePath $projectionSourcePath `
+            -ModuleRoot $projectionTamperRoots `
+            -StateRoot $projectionTamperState
+    )
+    $projectionTamperManifest = Join-Path $projectionTamperState 'manifest.json'
+    [byte[]]$projectionTamperManifestBytes = [IO.File]::ReadAllBytes($projectionTamperManifest)
+    $projectionUserFile = Join-Path ([string]$projectionTamperInstall[1].TargetPath) 'user-added-after-install.txt'
+    [IO.File]::WriteAllText($projectionUserFile, 'must survive refused uninstall', (New-Object Text.UTF8Encoding($false)))
+    Assert-PshGoal2ExpectedFailure -Action {
+        & $uninstallProjectionPath `
+            -ModuleRoot $projectionTamperRoots `
+            -StateRoot $projectionTamperState
+    } -Message 'Projection uninstall accepted a user-modified owned tree.'
+    Assert-PshGoal2Condition ([IO.File]::Exists($projectionUserFile)) 'Projection uninstall deleted a user-added file.'
+    Assert-PshGoal2Condition (Test-PshGoal2ByteArrayEqual -Left $projectionTamperManifestBytes -Right ([IO.File]::ReadAllBytes($projectionTamperManifest))) 'Projection uninstall modified state after user-content refusal.'
+    Assert-PshGoal2Condition (@(Compare-Object $projectionSourceFingerprint @(Get-PshGoal2TreeFingerprint -Root ([string]$projectionTamperInstall[0].TargetPath))).Count -eq 0) 'Projection uninstall changed the first target before refusing the modified second target.'
+    [IO.File]::Delete($projectionUserFile)
+    $null = @(
+        & $uninstallProjectionPath `
+            -ModuleRoot $projectionTamperRoots `
+            -StateRoot $projectionTamperState
+    )
+
     Remove-Module Psh -Force -ErrorAction Ignore
     Remove-Module PSReadLine -Force -ErrorAction Ignore
     $expectedPsReadLineBase = [IO.Path]::GetFullPath((Join-Path $dependencyRoot 'PSReadLine/2.4.5')).TrimEnd('\', '/')
@@ -471,6 +801,9 @@ try {
     Assert-PshGoal2Condition ([string]::Equals([string]$diagnostic.dependencies.psReadLine.loadedModuleBase, $expectedPsReadLineBase, $modulePathComparison)) 'The PSReadLine diagnostic reports the wrong module base.'
     Assert-PshGoal2Condition ([bool]$diagnostic.dependencies.psReadLine.assemblyVerified) 'The active PSReadLine implementation assembly was not verified.'
     Assert-PshGoal2Condition (@('fixed-path', 'reused-identical') -contains [string]$diagnostic.dependencies.psReadLine.assemblyVerificationState) 'The PSReadLine assembly verification state is invalid.'
+    Assert-PshGoal2Condition ([bool]$diagnostic.dependencies.psReadLine.treeVerified) 'The active PSReadLine seven-file tree was not verified.'
+    Assert-PshGoal2Condition ([string]$diagnostic.dependencies.psReadLine.treeVerificationState -ceq 'fixed-path') 'The cold fixed PSReadLine tree reported the wrong verification state.'
+    Assert-PshGoal2Condition ([int]$diagnostic.dependencies.psReadLine.expectedTreeFileCount -eq 7 -and [int]$diagnostic.dependencies.psReadLine.actualTreeFileCount -eq 7) 'The cold PSReadLine import did not retain two seven-file fingerprints.'
     Assert-PshGoal2Condition ([string]::Equals([string]$diagnostic.dependencies.psReadLine.expectedAssemblyPath, $expectedPsReadLineAssemblyPath, $modulePathComparison)) 'The PSReadLine diagnostic reports the wrong expected assembly path.'
     Assert-PshGoal2Condition ([string]$diagnostic.dependencies.psReadLine.expectedAssemblyHash -ceq $expectedPsReadLineAssemblyHash) 'The PSReadLine diagnostic reports the wrong expected assembly hash.'
     Assert-PshGoal2Condition ([string]$diagnostic.dependencies.psReadLine.actualAssemblyHash -ceq $expectedPsReadLineAssemblyHash) 'The active PSReadLine implementation bytes differ from the bundle.'
@@ -519,12 +852,60 @@ Import-Module `
     -Name (Join-Path $RepositoryRoot 'src/Psh/Psh.psd1') `
     -Force `
     -ErrorAction Stop
-$initialization = Initialize-PshInteractive
+$moduleBasesBefore = @(
+    Get-Module -Name PSReadLine |
+        ForEach-Object { [IO.Path]::GetFullPath([string]$_.ModuleBase) }
+)
+$assemblyLocationsBefore = @(
+    [AppDomain]::CurrentDomain.GetAssemblies() |
+        Where-Object { [string]$_.GetName().Name -ceq 'Microsoft.PowerShell.PSReadLine' } |
+        ForEach-Object { [IO.Path]::GetFullPath([string]$_.Location) }
+)
+$promptBefore = (Get-Item -LiteralPath 'Function:\prompt').ScriptBlock.ToString()
+$handlersBefore = @(
+    foreach ($chord in @('Tab', 'Ctrl+r', 'UpArrow', 'DownArrow')) {
+        $handler = Get-PSReadLineKeyHandler -Chord $chord -ErrorAction Stop
+        '{0}|{1}' -f $chord, [string]$handler.Function
+    }
+)
+$initialization = Initialize-PshInteractive -EnablePrompt
 [PSCustomObject][ordered]@{
     success = [bool]$initialization.success
     dependency = $initialization.dependencies.psReadLine
+    keyBindingCount = @($initialization.keyBindings).Count
+    predictionReason = [string]$initialization.prediction.reason
+    gitCompletionRegistered = [bool]$initialization.gitCompletion.registered
+    promptEnabled = [bool]$initialization.prompt.enabled
     mismatchedPath = [IO.Path]::GetFullPath($copiedAssembly)
     mismatchedHash = $mismatchedHash
+    moduleSetPreserved = @(
+        Compare-Object `
+            -ReferenceObject $moduleBasesBefore `
+            -DifferenceObject @(
+                Get-Module -Name PSReadLine |
+                    ForEach-Object { [IO.Path]::GetFullPath([string]$_.ModuleBase) }
+            )
+    ).Count -eq 0
+    assemblySetPreserved = @(
+        Compare-Object `
+            -ReferenceObject $assemblyLocationsBefore `
+            -DifferenceObject @(
+                [AppDomain]::CurrentDomain.GetAssemblies() |
+                    Where-Object { [string]$_.GetName().Name -ceq 'Microsoft.PowerShell.PSReadLine' } |
+                    ForEach-Object { [IO.Path]::GetFullPath([string]$_.Location) }
+            )
+    ).Count -eq 0
+    promptPreserved = (Get-Item -LiteralPath 'Function:\prompt').ScriptBlock.ToString() -ceq $promptBefore
+    handlersPreserved = @(
+        Compare-Object `
+            -ReferenceObject $handlersBefore `
+            -DifferenceObject @(
+                foreach ($chord in @('Tab', 'Ctrl+r', 'UpArrow', 'DownArrow')) {
+                    $handler = Get-PSReadLineKeyHandler -Chord $chord -ErrorAction Stop
+                    '{0}|{1}' -f $chord, [string]$handler.Function
+                }
+            )
+    ).Count -eq 0
     loadedModuleBases = @(
         Get-Module -Name PSReadLine |
             ForEach-Object { [IO.Path]::GetFullPath([string]$_.ModuleBase) }
@@ -555,12 +936,198 @@ $initialization = Initialize-PshInteractive
     Assert-PshGoal2Condition (-not [bool]$mismatchResult.dependency.imported) 'The mismatched PSReadLine dependency was reported as imported.'
     Assert-PshGoal2Condition (-not [bool]$mismatchResult.dependency.assemblyVerified) 'Different PSReadLine bytes were reported as verified.'
     Assert-PshGoal2Condition ([string]$mismatchResult.dependency.assemblyVerificationState -ceq 'failed') 'Different PSReadLine bytes did not produce the failed verification state.'
+    Assert-PshGoal2Condition ([bool]$mismatchResult.dependency.restartRequired) 'Different preloaded PSReadLine bytes did not require a fresh process.'
+    Assert-PshGoal2Condition ([bool]$mismatchResult.dependency.mutationSuppressed) 'Different preloaded PSReadLine bytes were not refused before mutation.'
+    Assert-PshGoal2Condition (@($mismatchResult.dependency.removedConflicts).Count -eq 0) 'Mismatch refusal removed a preloaded PSReadLine module.'
+    Assert-PshGoal2Condition (@($mismatchResult.dependency.restoredConflicts).Count -eq 0) 'Mismatch refusal claimed to restore a module after zero-mutation preflight.'
     Assert-PshGoal2Condition ([string]$mismatchResult.dependency.expectedAssemblyHash -ceq $expectedPsReadLineAssemblyHash) 'The mismatch test lost the bundled expected hash.'
     Assert-PshGoal2Condition ([string]$mismatchResult.dependency.actualAssemblyHash -ceq [string]$mismatchResult.mismatchedHash) 'The mismatch diagnostic did not report the active implementation hash.'
     Assert-PshGoal2Condition ([string]$mismatchResult.dependency.actualAssemblyHash -cne $expectedPsReadLineAssemblyHash) 'The altered PSReadLine fixture did not have different bytes.'
     Assert-PshGoal2Condition ([string]::Equals([string]$mismatchResult.dependency.actualAssemblyPath, [string]$mismatchResult.mismatchedPath, $modulePathComparison)) 'The mismatch diagnostic reported the wrong active implementation path.'
-    Assert-PshGoal2Condition (@($mismatchResult.loadedModuleBases).Count -eq 1) 'The mismatch rollback did not restore exactly the preloaded PSReadLine module.'
-    Assert-PshGoal2Condition ([string]::Equals([string]$mismatchResult.loadedModuleBases[0], (Split-Path -Parent ([string]$mismatchResult.mismatchedPath)), $modulePathComparison)) 'The mismatch rollback did not restore the original PSReadLine module base.'
+    Assert-PshGoal2Condition (@($mismatchResult.loadedModuleBases).Count -eq 1) 'Mismatch refusal did not retain exactly the preloaded PSReadLine module.'
+    Assert-PshGoal2Condition ([string]::Equals([string]$mismatchResult.loadedModuleBases[0], (Split-Path -Parent ([string]$mismatchResult.mismatchedPath)), $modulePathComparison)) 'Mismatch refusal changed the original PSReadLine module base.'
+    Assert-PshGoal2Condition ([bool]$mismatchResult.moduleSetPreserved) 'Mismatch refusal changed the loaded PSReadLine module set.'
+    Assert-PshGoal2Condition ([bool]$mismatchResult.assemblySetPreserved) 'Mismatch refusal changed the PSReadLine AppDomain assembly set.'
+    Assert-PshGoal2Condition ([bool]$mismatchResult.promptPreserved) 'Mismatch refusal changed the prompt.'
+    Assert-PshGoal2Condition ([bool]$mismatchResult.handlersPreserved) 'Mismatch refusal changed a PSReadLine key handler.'
+    Assert-PshGoal2Condition ([int]$mismatchResult.keyBindingCount -eq 0) 'Mismatch refusal reported configured key bindings.'
+    Assert-PshGoal2Condition ([string]$mismatchResult.predictionReason -ceq 'DependencyValidationFailed') 'Mismatch refusal did not skip prediction configuration.'
+    Assert-PshGoal2Condition (-not [bool]$mismatchResult.gitCompletionRegistered) 'Mismatch refusal registered Git completion.'
+    Assert-PshGoal2Condition (-not [bool]$mismatchResult.promptEnabled) 'Mismatch refusal enabled the Psh prompt.'
+
+    $identicalPreloadScript = Join-Path $interactiveTemporaryRoot 'Test-PSReadLineIdenticalPreload.ps1'
+    $identicalPreloadRoot = Join-Path $interactiveTemporaryRoot 'psreadline-identical-preload'
+    $identicalPreloadSource = @'
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$RepositoryRoot,
+
+    [Parameter(Mandatory = $true)]
+    [string]$WorkingRoot,
+
+    [Parameter()]
+    [AllowNull()]
+    [string]$TamperRelativePath,
+
+    [switch]$AddExtraFile
+)
+
+$ErrorActionPreference = 'Stop'
+$sourceDirectory = Join-Path $RepositoryRoot 'src/Psh/Dependencies/PSReadLine/2.4.5'
+$copyDirectory = Join-Path $WorkingRoot 'PSReadLine/2.4.5'
+[IO.Directory]::CreateDirectory((Split-Path $copyDirectory -Parent)) | Out-Null
+Copy-Item -LiteralPath $sourceDirectory -Destination $copyDirectory -Recurse
+Import-Module `
+    -Name (Join-Path $copyDirectory 'PSReadLine.psd1') `
+    -Global `
+    -Force `
+    -ErrorAction Stop `
+    -WarningAction SilentlyContinue
+if (-not [string]::IsNullOrWhiteSpace($TamperRelativePath)) {
+    $tamperPath = Join-Path $copyDirectory $TamperRelativePath
+    [byte[]]$tamperBytes = [IO.File]::ReadAllBytes($tamperPath)
+    [byte[]]$changedBytes = New-Object byte[] ($tamperBytes.Length + 1)
+    [Array]::Copy($tamperBytes, $changedBytes, $tamperBytes.Length)
+    $changedBytes[$changedBytes.Length - 1] = 0x0A
+    [IO.File]::WriteAllBytes($tamperPath, $changedBytes)
+}
+if ($AddExtraFile) {
+    [IO.File]::WriteAllText(
+        (Join-Path $copyDirectory 'user-extra-after-load.txt'),
+        'preloaded tree must be exact',
+        (New-Object Text.UTF8Encoding($false))
+    )
+}
+$moduleBasesBefore = @(
+    Get-Module -Name PSReadLine |
+        ForEach-Object { [IO.Path]::GetFullPath([string]$_.ModuleBase) }
+)
+$assemblyLocationsBefore = @(
+    [AppDomain]::CurrentDomain.GetAssemblies() |
+        Where-Object { [string]$_.GetName().Name -ceq 'Microsoft.PowerShell.PSReadLine' } |
+        ForEach-Object { [IO.Path]::GetFullPath([string]$_.Location) }
+)
+Import-Module `
+    -Name (Join-Path $RepositoryRoot 'src/Psh/Psh.psd1') `
+    -Force `
+    -ErrorAction Stop
+$promptBefore = (Get-Item -LiteralPath 'Function:\prompt').ScriptBlock.ToString()
+$handlersBefore = @(
+    foreach ($chord in @('Tab', 'Ctrl+r', 'UpArrow', 'DownArrow')) {
+        $handler = Get-PSReadLineKeyHandler -Chord $chord -ErrorAction Stop
+        '{0}|{1}' -f $chord, [string]$handler.Function
+    }
+)
+$initialization = Initialize-PshInteractive
+[PSCustomObject][ordered]@{
+    success = [bool]$initialization.success
+    dependency = $initialization.dependencies.psReadLine
+    keyBindingCount = @($initialization.keyBindings).Count
+    predictionReason = [string]$initialization.prediction.reason
+    gitCompletionRegistered = [bool]$initialization.gitCompletion.registered
+    promptEnabled = [bool]$initialization.prompt.enabled
+    expectedPreloadBase = [IO.Path]::GetFullPath($copyDirectory)
+    moduleSetPreserved = @(
+        Compare-Object `
+            -ReferenceObject $moduleBasesBefore `
+            -DifferenceObject @(
+                Get-Module -Name PSReadLine |
+                    ForEach-Object { [IO.Path]::GetFullPath([string]$_.ModuleBase) }
+            )
+    ).Count -eq 0
+    assemblySetPreserved = @(
+        Compare-Object `
+            -ReferenceObject $assemblyLocationsBefore `
+            -DifferenceObject @(
+                [AppDomain]::CurrentDomain.GetAssemblies() |
+                    Where-Object { [string]$_.GetName().Name -ceq 'Microsoft.PowerShell.PSReadLine' } |
+                    ForEach-Object { [IO.Path]::GetFullPath([string]$_.Location) }
+            )
+    ).Count -eq 0
+    promptPreserved = (Get-Item -LiteralPath 'Function:\prompt').ScriptBlock.ToString() -ceq $promptBefore
+    handlersPreserved = @(
+        Compare-Object `
+            -ReferenceObject $handlersBefore `
+            -DifferenceObject @(
+                foreach ($chord in @('Tab', 'Ctrl+r', 'UpArrow', 'DownArrow')) {
+                    $handler = Get-PSReadLineKeyHandler -Chord $chord -ErrorAction Stop
+                    '{0}|{1}' -f $chord, [string]$handler.Function
+                }
+            )
+    ).Count -eq 0
+} | ConvertTo-Json -Depth 8 -Compress
+'@
+    [IO.File]::WriteAllText(
+        $identicalPreloadScript,
+        $identicalPreloadSource,
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $identicalPreloadOutput = @(
+        & $currentPowerShellPath `
+            -NoLogo `
+            -NoProfile `
+            -NonInteractive `
+            -File $identicalPreloadScript `
+            -RepositoryRoot $repositoryRootPath `
+            -WorkingRoot $identicalPreloadRoot
+    )
+    $identicalPreloadExitCode = $LASTEXITCODE
+    Assert-PshGoal2Condition ($identicalPreloadExitCode -eq 0) ("The identical PSReadLine preload child test failed: {0}" -f ($identicalPreloadOutput -join ' '))
+    $identicalPreloadResult = [string]$identicalPreloadOutput[$identicalPreloadOutput.Count - 1] | ConvertFrom-Json
+    Assert-PshGoal2Condition ([bool]$identicalPreloadResult.success) 'An identical preloaded PSReadLine 2.4.5 was rejected.'
+    Assert-PshGoal2Condition ([bool]$identicalPreloadResult.dependency.imported) 'An identical preloaded PSReadLine was not reported as active.'
+    Assert-PshGoal2Condition ([string]$identicalPreloadResult.dependency.loadAction -ceq 'reused-preloaded-identical') 'An identical preloaded PSReadLine was not reused in place.'
+    Assert-PshGoal2Condition ([bool]$identicalPreloadResult.dependency.mutationSuppressed) 'Identical preload reuse did not suppress module replacement.'
+    Assert-PshGoal2Condition (-not [bool]$identicalPreloadResult.dependency.restartRequired) 'An identical preloaded PSReadLine incorrectly required a restart.'
+    Assert-PshGoal2Condition ([string]$identicalPreloadResult.dependency.assemblyVerificationState -ceq 'reused-identical') 'Identical preload reuse reported the wrong assembly state.'
+    Assert-PshGoal2Condition ([bool]$identicalPreloadResult.dependency.treeVerified) 'Identical preload reuse did not verify the complete module tree.'
+    Assert-PshGoal2Condition ([string]$identicalPreloadResult.dependency.treeVerificationState -ceq 'reused-identical') 'Identical preload reuse reported the wrong tree state.'
+    Assert-PshGoal2Condition ([int]$identicalPreloadResult.dependency.expectedTreeFileCount -eq 7 -and [int]$identicalPreloadResult.dependency.actualTreeFileCount -eq 7) 'Identical preload reuse did not compare two seven-file trees.'
+    Assert-PshGoal2Condition ([string]$identicalPreloadResult.dependency.actualAssemblyHash -ceq $expectedPsReadLineAssemblyHash) 'Identical preload reuse reported the wrong implementation hash.'
+    Assert-PshGoal2Condition ([string]::Equals([string]$identicalPreloadResult.dependency.loadedModuleBase, [string]$identicalPreloadResult.expectedPreloadBase, $modulePathComparison)) 'Identical preload reuse changed the active module base.'
+    Assert-PshGoal2Condition (@($identicalPreloadResult.dependency.removedConflicts).Count -eq 0) 'Identical preload reuse removed a module.'
+    Assert-PshGoal2Condition ([bool]$identicalPreloadResult.moduleSetPreserved) 'Identical preload reuse changed the module set.'
+    Assert-PshGoal2Condition ([bool]$identicalPreloadResult.assemblySetPreserved) 'Identical preload reuse changed the AppDomain assembly set.'
+
+    $preloadTreeMismatchCases = @(
+        [PSCustomObject]@{ Name = 'modified-psm1'; RelativePath = 'PSReadLine.psm1'; AddExtra = $false },
+        [PSCustomObject]@{ Name = 'modified-psd1'; RelativePath = 'PSReadLine.psd1'; AddExtra = $false },
+        [PSCustomObject]@{ Name = 'extra-file'; RelativePath = $null; AddExtra = $true }
+    )
+    foreach ($preloadTreeMismatchCase in $preloadTreeMismatchCases) {
+        $preloadTreeMismatchRoot = Join-Path $interactiveTemporaryRoot ("psreadline-tree-{0}" -f $preloadTreeMismatchCase.Name)
+        $preloadTreeMismatchArguments = @(
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-File',
+            $identicalPreloadScript,
+            '-RepositoryRoot',
+            $repositoryRootPath,
+            '-WorkingRoot',
+            $preloadTreeMismatchRoot
+        )
+        if (-not [string]::IsNullOrWhiteSpace([string]$preloadTreeMismatchCase.RelativePath)) {
+            $preloadTreeMismatchArguments += @('-TamperRelativePath', [string]$preloadTreeMismatchCase.RelativePath)
+        }
+        if ([bool]$preloadTreeMismatchCase.AddExtra) {
+            $preloadTreeMismatchArguments += '-AddExtraFile'
+        }
+        $preloadTreeMismatchOutput = @(& $currentPowerShellPath @preloadTreeMismatchArguments)
+        $preloadTreeMismatchExitCode = $LASTEXITCODE
+        Assert-PshGoal2Condition ($preloadTreeMismatchExitCode -eq 0) ("The {0} preload-tree child test failed: {1}" -f $preloadTreeMismatchCase.Name, ($preloadTreeMismatchOutput -join ' '))
+        $preloadTreeMismatchResult = [string]$preloadTreeMismatchOutput[$preloadTreeMismatchOutput.Count - 1] | ConvertFrom-Json
+        Assert-PshGoal2Condition (-not [bool]$preloadTreeMismatchResult.success) "A $($preloadTreeMismatchCase.Name) PSReadLine preload was accepted."
+        Assert-PshGoal2Condition (-not [bool]$preloadTreeMismatchResult.dependency.imported) "A $($preloadTreeMismatchCase.Name) PSReadLine preload was reported as active."
+        Assert-PshGoal2Condition (-not [bool]$preloadTreeMismatchResult.dependency.treeVerified -and [string]$preloadTreeMismatchResult.dependency.treeVerificationState -ceq 'failed') "A $($preloadTreeMismatchCase.Name) preload did not fail complete-tree verification."
+        Assert-PshGoal2Condition ([bool]$preloadTreeMismatchResult.dependency.restartRequired -and [bool]$preloadTreeMismatchResult.dependency.mutationSuppressed) "A $($preloadTreeMismatchCase.Name) preload was not refused before mutation."
+        Assert-PshGoal2Condition (@($preloadTreeMismatchResult.dependency.removedConflicts).Count -eq 0 -and @($preloadTreeMismatchResult.dependency.restoredConflicts).Count -eq 0) "A $($preloadTreeMismatchCase.Name) preload triggered module replacement or rollback."
+        Assert-PshGoal2Condition ([bool]$preloadTreeMismatchResult.moduleSetPreserved -and [bool]$preloadTreeMismatchResult.assemblySetPreserved) "A $($preloadTreeMismatchCase.Name) preload changed the module or AppDomain assembly set."
+        Assert-PshGoal2Condition ([bool]$preloadTreeMismatchResult.promptPreserved -and [bool]$preloadTreeMismatchResult.handlersPreserved) "A $($preloadTreeMismatchCase.Name) preload changed the prompt or key handlers."
+        Assert-PshGoal2Condition ([int]$preloadTreeMismatchResult.keyBindingCount -eq 0 -and [string]$preloadTreeMismatchResult.predictionReason -ceq 'DependencyValidationFailed') "A $($preloadTreeMismatchCase.Name) preload configured PSReadLine interaction."
+        Assert-PshGoal2Condition (-not [bool]$preloadTreeMismatchResult.gitCompletionRegistered -and -not [bool]$preloadTreeMismatchResult.promptEnabled) "A $($preloadTreeMismatchCase.Name) preload configured Git completion or the prompt."
+    }
     Assert-PshGoal2Condition ([bool]$diagnostic.dependencies.psCompletions.validated) 'Bundled PSCompletions metadata was not validated.'
     Assert-PshGoal2Condition (-not [bool]$diagnostic.dependencies.psCompletions.imported) 'The unsafe PSCompletions ScriptsToProcess path was executed.'
     Assert-PshGoal2Condition ([bool]$diagnostic.dependencies.psCompletions.executionSuppressed) 'PSCompletions execution suppression was not reported.'
@@ -575,6 +1142,9 @@ $initialization = Initialize-PshInteractive
     $warmStopwatch.Stop()
     Assert-PshGoal2Condition ($warmOutput.Count -eq 1 -and [bool]$warmOutput[0].success) 'Repeated interactive initialization was not idempotent.'
     Assert-PshGoal2Condition ($warmStopwatch.ElapsedMilliseconds -lt 2000) ("Warm interactive initialization took $($warmStopwatch.ElapsedMilliseconds) ms.")
+    Assert-PshGoal2Condition ([string]$warmOutput[0].dependencies.psReadLine.loadAction -ceq 'reused-preloaded-identical') 'Repeated initialization did not reuse PSReadLine in place.'
+    Assert-PshGoal2Condition ([bool]$warmOutput[0].dependencies.psReadLine.treeVerified -and [string]$warmOutput[0].dependencies.psReadLine.treeVerificationState -ceq 'fixed-path') 'Repeated initialization did not reverify the fixed seven-file tree.'
+    Assert-PshGoal2Condition (-not [bool]$warmOutput[0].dependencies.psReadLine.restartRequired -and [bool]$warmOutput[0].dependencies.psReadLine.mutationSuppressed) 'Repeated initialization reported an invalid preload-mutation state.'
     Assert-PshGoal2Condition ([bool]$warmOutput[0].gitCompletion.alreadyRegistered) 'Repeated initialization did not reuse the Git completion registration.'
 
     $rollbackConflictRoot = Join-Path $interactiveTemporaryRoot 'psreadline-rollback-conflict'
@@ -607,39 +1177,38 @@ $initialization = Initialize-PshInteractive
             Sort-Object
     )
     Assert-PshGoal2Condition ($rollbackModulesBefore.Count -eq 2) 'The mixed PSReadLine rollback precondition was not established.'
+    $rollbackAssembliesBefore = @(
+        [AppDomain]::CurrentDomain.GetAssemblies() |
+            Where-Object { [string]$_.GetName().Name -ceq 'Microsoft.PowerShell.PSReadLine' } |
+            ForEach-Object { [IO.Path]::GetFullPath([string]$_.Location) }
+    )
     $rollbackResult = & $module {
         param($fixedDependencyRoot)
-        $originalAssemblyInspector = ${function:Get-PshCommandImplementationAssembly}
-        Set-Item `
-            -Path 'Function:script:Get-PshCommandImplementationAssembly' `
-            -Value { throw 'Forced post-removal verification failure.' } `
-            -Force
-        try {
-            Import-PshBundledModule `
-                -Name 'PSReadLine' `
-                -Version ([version]'2.4.5') `
-                -DependencyRoot $fixedDependencyRoot `
-                -ReplaceLoadedConflicts
-        }
-        finally {
-            Set-Item `
-                -Path 'Function:script:Get-PshCommandImplementationAssembly' `
-                -Value $originalAssemblyInspector `
-                -Force
-        }
+        Import-PshBundledModule `
+            -Name 'PSReadLine' `
+            -Version ([version]'2.4.5') `
+            -DependencyRoot $fixedDependencyRoot `
+            -ReplaceLoadedConflicts
     } $dependencyRoot
     $rollbackModulesAfter = @(
         Get-Module -Name PSReadLine |
             ForEach-Object { [IO.Path]::GetFullPath([string]$_.ModuleBase) } |
             Sort-Object
     )
-    Assert-PshGoal2Condition (-not [bool]$rollbackResult.imported) 'A forced post-import verification failure was reported as successful.'
-    Assert-PshGoal2Condition ([string]$rollbackResult.loadAction -ceq 'reused') 'The rollback test re-imported the pre-existing bundled module.'
-    Assert-PshGoal2Condition ([string]$rollbackResult.assemblyVerificationState -ceq 'failed') 'The rollback test did not report failed assembly verification.'
-    Assert-PshGoal2Condition (@($rollbackResult.removedConflicts).Count -eq 1) 'The rollback test did not remove exactly one conflict.'
-    Assert-PshGoal2Condition (@($rollbackResult.restoredConflicts).Count -eq 1) 'The rollback test did not restore exactly one conflict.'
-    Assert-PshGoal2Condition (@($rollbackResult.restorationErrors).Count -eq 0) 'The rollback test reported a restoration error.'
-    Assert-PshGoal2Condition (@(Compare-Object $rollbackModulesBefore $rollbackModulesAfter).Count -eq 0) 'A failed mixed-module import did not restore the complete pre-call module set.'
+    $rollbackAssembliesAfter = @(
+        [AppDomain]::CurrentDomain.GetAssemblies() |
+            Where-Object { [string]$_.GetName().Name -ceq 'Microsoft.PowerShell.PSReadLine' } |
+            ForEach-Object { [IO.Path]::GetFullPath([string]$_.Location) }
+    )
+    Assert-PshGoal2Condition (-not [bool]$rollbackResult.imported) 'A mixed-module PSReadLine state was reported as successful.'
+    Assert-PshGoal2Condition ([string]$rollbackResult.assemblyVerificationState -ceq 'failed') 'Mixed-module refusal did not report failed assembly verification.'
+    Assert-PshGoal2Condition ([bool]$rollbackResult.restartRequired) 'Mixed-module refusal did not require a fresh process.'
+    Assert-PshGoal2Condition ([bool]$rollbackResult.mutationSuppressed) 'Mixed-module refusal was not completed before mutation.'
+    Assert-PshGoal2Condition (@($rollbackResult.removedConflicts).Count -eq 0) 'Mixed-module refusal removed a conflict.'
+    Assert-PshGoal2Condition (@($rollbackResult.restoredConflicts).Count -eq 0) 'Mixed-module refusal claimed to restore a conflict.'
+    Assert-PshGoal2Condition (@($rollbackResult.restorationErrors).Count -eq 0) 'Mixed-module refusal reported a restoration error.'
+    Assert-PshGoal2Condition (@(Compare-Object $rollbackModulesBefore $rollbackModulesAfter).Count -eq 0) 'Mixed-module refusal changed the complete pre-call module set.'
+    Assert-PshGoal2Condition (@(Compare-Object $rollbackAssembliesBefore $rollbackAssembliesAfter).Count -eq 0) 'Mixed-module refusal changed the AppDomain assembly set.'
     $rollbackConflictModule = Get-Module -Name PSReadLine |
         Where-Object {
             [string]::Equals(
@@ -1368,6 +1937,7 @@ finally {
     Remove-Module PSReadLine -Force -ErrorAction Ignore
     Remove-PshGoal2TemporaryTree -Path $interactiveTemporaryRoot
     Remove-PshGoal2TemporaryTree -Path $profileTemporaryRoot
+    Remove-PshGoal2TemporaryTree -Path $projectionTemporaryRoot
 }
 
-Write-Output 'Goal 2 acceptance passed: fixed dependencies, offline interaction, Git completion, prompt behavior, and lossless profile transactions.'
+Write-Output 'Goal 2 acceptance passed: fixed dependencies, safe PSReadLine projection, offline interaction, Git completion, prompt behavior, and lossless profile transactions.'

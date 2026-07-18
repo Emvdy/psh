@@ -70,6 +70,24 @@ function Test-PshVmSessionPathEqual {
     )
 }
 
+function Get-PshVmSessionTreeFingerprint {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root
+    )
+
+    $rootPath = Get-PshVmSessionNormalizedPath -Path $Root
+    return @(
+        Get-ChildItem -LiteralPath $rootPath -Recurse -File -Force |
+            ForEach-Object {
+                $relative = $_.FullName.Substring($rootPath.Length).TrimStart('\', '/').Replace('\', '/')
+                $hash = [string](Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                '{0}|{1}|{2}' -f $relative, $_.Length, $hash
+            } |
+            Sort-Object
+    )
+}
+
 function Get-PshVmSessionPromptEvidence {
     param(
         [Parameter(Mandatory = $true)]
@@ -224,11 +242,23 @@ $initializeCommands = @(Get-Command -Name Initialize-PshInteractive -CommandType
 Assert-PshVmSessionCondition ($initializeCommands.Count -eq 1) 'Psh does not expose exactly one Initialize-PshInteractive function.'
 $initializeCommand = $initializeCommands[0]
 
-$expectedPsReadLineBase = Join-Path -Path (Join-Path -Path $expectedPshModuleBase -ChildPath 'Dependencies') -ChildPath 'PSReadLine\2.4.5'
-$expectedPsReadLineAssemblyPath = Join-Path -Path $expectedPsReadLineBase -ChildPath 'Microsoft.PowerShell.PSReadLine.dll'
+$expectedPsReadLineSourceBase = Join-Path -Path (Join-Path -Path $expectedPshModuleBase -ChildPath 'Dependencies') -ChildPath 'PSReadLine\2.4.5'
+$expectedProjectionModuleRoot = if ($edition -ceq 'Desktop') {
+    Join-Path -Path $documents -ChildPath 'WindowsPowerShell\Modules'
+}
+else {
+    Join-Path -Path $documents -ChildPath 'PowerShell\Modules'
+}
+$expectedPsReadLineBase = Join-Path -Path (Join-Path -Path $expectedProjectionModuleRoot -ChildPath 'PSReadLine') -ChildPath '2.4.5'
+$expectedPsReadLineAssemblyPath = Join-Path -Path $expectedPsReadLineSourceBase -ChildPath 'Microsoft.PowerShell.PSReadLine.dll'
+$expectedActivePsReadLineAssemblyPath = Join-Path -Path $expectedPsReadLineBase -ChildPath 'Microsoft.PowerShell.PSReadLine.dll'
 $expectedPsReadLineAssemblyHash = 'f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2'
 Assert-PshVmSessionCondition ([IO.File]::Exists($expectedPsReadLineAssemblyPath)) "Bundled PSReadLine assembly is missing: $expectedPsReadLineAssemblyPath"
+Assert-PshVmSessionCondition ([IO.File]::Exists($expectedActivePsReadLineAssemblyPath)) "Projected PSReadLine assembly is missing: $expectedActivePsReadLineAssemblyPath"
 Assert-PshVmSessionCondition ([string](Get-FileHash -LiteralPath $expectedPsReadLineAssemblyPath -Algorithm SHA256).Hash.ToLowerInvariant() -ceq $expectedPsReadLineAssemblyHash) 'The bundled PSReadLine assembly hash is wrong.'
+$sourcePsReadLineFingerprint = @(Get-PshVmSessionTreeFingerprint -Root $expectedPsReadLineSourceBase)
+$projectedPsReadLineFingerprint = @(Get-PshVmSessionTreeFingerprint -Root $expectedPsReadLineBase)
+Assert-PshVmSessionCondition (@(Compare-Object $sourcePsReadLineFingerprint $projectedPsReadLineFingerprint).Count -eq 0) 'The CurrentUser PSReadLine projection differs from the bundled seven-file tree.'
 
 $psReadLineModules = @(Get-Module -Name PSReadLine)
 Assert-PshVmSessionCondition ($psReadLineModules.Count -eq 1) 'PSReadLine was not already loaded exactly once by the profile.'
@@ -249,12 +279,44 @@ $activeAssemblyPath = [IO.Path]::GetFullPath([string]$activeSetOption.Implementi
 Assert-PshVmSessionCondition ([IO.File]::Exists($activeAssemblyPath)) "The active PSReadLine assembly is missing: $activeAssemblyPath"
 $activeAssemblyHash = [string](Get-FileHash -LiteralPath $activeAssemblyPath -Algorithm SHA256).Hash.ToLowerInvariant()
 Assert-PshVmSessionCondition ($activeAssemblyHash -ceq $expectedPsReadLineAssemblyHash) 'The active PSReadLine implementation assembly hash is wrong.'
+Assert-PshVmSessionCondition (Test-PshVmSessionPathEqual -Left $activeAssemblyPath -Right $expectedActivePsReadLineAssemblyPath) 'The active PSReadLine implementation assembly is not the CurrentUser projection.'
 $assemblyState = if (Test-PshVmSessionPathEqual -Left $activeAssemblyPath -Right $expectedPsReadLineAssemblyPath) {
     'fixed-path'
 }
 else {
     'reused-identical'
 }
+Assert-PshVmSessionCondition ($assemblyState -ceq 'reused-identical') 'The interactive host did not preload the CurrentUser PSReadLine projection.'
+
+$loadedPsReadLineAssemblies = @(
+    [AppDomain]::CurrentDomain.GetAssemblies() |
+        Where-Object { [string]$_.GetName().Name -ceq 'Microsoft.PowerShell.PSReadLine' } |
+        ForEach-Object {
+            $path = [IO.Path]::GetFullPath([string]$_.Location)
+            [ordered]@{
+                fullName = [string]$_.FullName
+                path     = $path
+                sha256   = [string](Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+        }
+)
+Assert-PshVmSessionCondition ($loadedPsReadLineAssemblies.Count -eq 1) 'The VS Code process contains more than one PSReadLine implementation assembly.'
+Assert-PshVmSessionCondition ([string]$loadedPsReadLineAssemblies[0].sha256 -ceq $expectedPsReadLineAssemblyHash) 'The VS Code AppDomain contains different PSReadLine implementation bytes.'
+Assert-PshVmSessionCondition (Test-PshVmSessionPathEqual -Left ([string]$loadedPsReadLineAssemblies[0].path) -Right $activeAssemblyPath) 'Set-PSReadLineOption and the AppDomain use different PSReadLine assemblies.'
+
+$vscodeStateVariable = Get-Variable -Name '__VSCodeState' -Scope Global -ErrorAction Stop
+Assert-PshVmSessionCondition ($null -ne $vscodeStateVariable.Value) 'VS Code shell integration state is unavailable.'
+$consoleReadLineFunctions = @(Get-Command -Name PSConsoleHostReadLine -CommandType Function -All -ErrorAction Stop)
+$vscodeReadLineWrapper = @(
+    $consoleReadLineFunctions |
+        Where-Object { [string]$_.Definition -like '*__VSCodeState*' }
+)
+Assert-PshVmSessionCondition ($vscodeReadLineWrapper.Count -eq 1) 'VS Code did not install exactly one PSConsoleHostReadLine wrapper around the fixed implementation.'
+$shellIntegrationPath = [string]$vscodeReadLineWrapper[0].ScriptBlock.File
+$expectedShellIntegrationHash = '7d27a8cce8c3b9a7e6cb0045a2035f303c34d228b23b6619fed1934a4027a4db'
+Assert-PshVmSessionCondition ([IO.File]::Exists($shellIntegrationPath)) "VS Code shellIntegration.ps1 is missing: $shellIntegrationPath"
+$shellIntegrationHash = [string](Get-FileHash -LiteralPath $shellIntegrationPath -Algorithm SHA256).Hash.ToLowerInvariant()
+Assert-PshVmSessionCondition ($shellIntegrationHash -ceq $expectedShellIntegrationHash) 'VS Code shellIntegration.ps1 changed from the accepted 1.126.0 build.'
 
 $expectedBindings = [ordered]@{
     Tab       = 'MenuComplete'
@@ -367,7 +429,14 @@ Assert-PshVmSessionCondition ([bool]$warmDiagnostic.dependencies.psReadLine.impo
 Assert-PshVmSessionCondition ([string]$warmDiagnostic.dependencies.psReadLine.loadedVersion -ceq '2.4.5') 'Warm initialization reported the wrong PSReadLine version.'
 Assert-PshVmSessionCondition ([bool]$warmDiagnostic.dependencies.psReadLine.assemblyVerified) 'Warm initialization did not verify the PSReadLine assembly.'
 Assert-PshVmSessionCondition (@('fixed-path', 'reused-identical') -ccontains [string]$warmDiagnostic.dependencies.psReadLine.assemblyVerificationState) 'Warm initialization reported an invalid PSReadLine assembly state.'
+Assert-PshVmSessionCondition ([bool]$warmDiagnostic.dependencies.psReadLine.treeVerified) 'Warm initialization did not verify the complete PSReadLine tree.'
+Assert-PshVmSessionCondition ([string]$warmDiagnostic.dependencies.psReadLine.treeVerificationState -ceq 'reused-identical') 'Warm initialization reported the wrong projected-tree state.'
+Assert-PshVmSessionCondition ([int]$warmDiagnostic.dependencies.psReadLine.expectedTreeFileCount -eq 7 -and [int]$warmDiagnostic.dependencies.psReadLine.actualTreeFileCount -eq 7) 'Warm initialization did not compare two seven-file PSReadLine trees.'
 Assert-PshVmSessionCondition ([string]$warmDiagnostic.dependencies.psReadLine.actualAssemblyHash -ceq $expectedPsReadLineAssemblyHash) 'Warm initialization reported the wrong PSReadLine implementation hash.'
+Assert-PshVmSessionCondition ([string]$warmDiagnostic.dependencies.psReadLine.loadAction -ceq 'reused-preloaded-identical') 'Warm initialization did not reuse the preloaded CurrentUser projection in place.'
+Assert-PshVmSessionCondition ([bool]$warmDiagnostic.dependencies.psReadLine.mutationSuppressed) 'Warm initialization did not suppress PSReadLine module replacement.'
+Assert-PshVmSessionCondition (-not [bool]$warmDiagnostic.dependencies.psReadLine.restartRequired) 'Warm initialization unexpectedly requires a fresh process.'
+Assert-PshVmSessionCondition (Test-PshVmSessionPathEqual -Left ([string]$warmDiagnostic.dependencies.psReadLine.loadedModuleBase) -Right $expectedPsReadLineBase) 'Warm initialization reported a different PSReadLine module base.'
 Assert-PshVmSessionCondition ([bool]$warmDiagnostic.prediction.enabled) 'Warm initialization did not enable prediction.'
 Assert-PshVmSessionCondition ([string]$warmDiagnostic.prediction.source -ceq 'History') 'Warm initialization did not select History prediction.'
 Assert-PshVmSessionCondition ([string]$warmDiagnostic.prediction.viewStyle -ceq 'ListView') 'Warm initialization did not select ListView prediction.'
@@ -427,6 +496,8 @@ $sessionEvidence = [ordered]@{
         version              = [string]$psReadLineModule.Version
         moduleBase           = [string]$psReadLineModule.ModuleBase
         modulePath           = [string]$psReadLineModule.Path
+        bundledModuleBase    = $expectedPsReadLineSourceBase
+        projectedTree        = $projectedPsReadLineFingerprint
         implementingDllPath  = $activeAssemblyPath
         implementingDllHash  = $activeAssemblyHash
         assemblyState        = $assemblyState
@@ -438,6 +509,13 @@ $sessionEvidence = [ordered]@{
         psCompletionsCount   = $psCompletionsModules.Count
         jobCountBeforeWarm   = $jobsBeforeWarm.Count
         jobCountAfterWarm    = $jobsAfterWarm.Count
+        appDomainAssemblies  = $loadedPsReadLineAssemblies
+        vscodeWrapper        = [ordered]@{
+            functionCount        = $consoleReadLineFunctions.Count
+            shellIntegrationPath = $shellIntegrationPath
+            shellIntegrationHash = $shellIntegrationHash
+            stateType            = [string]$vscodeStateVariable.Value.GetType().FullName
+        }
     }
     warmInitialization = $warmDiagnostic
     profiles           = [ordered]@{

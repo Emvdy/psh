@@ -151,6 +151,9 @@ function Invoke-PshVmProfileStartupProbe {
         [string]$Name,
 
         [Parameter(Mandatory = $true)]
+        [string]$ExpectedModuleBase,
+
+        [Parameter(Mandatory = $true)]
         [string]$LogRoot
     )
 
@@ -160,18 +163,40 @@ $psh = @(Get-Module -Name Psh)
 $psReadLine = @(Get-Module -Name PSReadLine)
 $psCompletions = @(Get-Module -Name PSCompletions)
 $jobs = @(Get-Job)
+$setOption = @(Get-Command -Name Set-PSReadLineOption -CommandType Cmdlet -All -ErrorAction Stop)
+$activeSetOption = $setOption | Select-Object -First 1
+$activeAssemblyPath = [IO.Path]::GetFullPath([string]$activeSetOption.ImplementingType.Assembly.Location)
+$activeAssemblyHash = [string](Get-FileHash -LiteralPath $activeAssemblyPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$assemblies = @(
+    [AppDomain]::CurrentDomain.GetAssemblies() |
+        Where-Object { [string]$_.GetName().Name -ceq 'Microsoft.PowerShell.PSReadLine' } |
+        ForEach-Object {
+            $path = [IO.Path]::GetFullPath([string]$_.Location)
+            [ordered]@{
+                fullName = [string]$_.FullName
+                path = $path
+                sha256 = [string](Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+        }
+)
 [ordered]@{
     pshCount = $psh.Count
     pshModuleBase = if ($psh.Count -eq 1) { [string]$psh[0].ModuleBase } else { $null }
     psReadLineCount = $psReadLine.Count
     psReadLineVersion = if ($psReadLine.Count -eq 1) { [string]$psReadLine[0].Version } else { $null }
+    psReadLineModuleBase = if ($psReadLine.Count -eq 1) { [string]$psReadLine[0].ModuleBase } else { $null }
+    implementingDllPath = $activeAssemblyPath
+    implementingDllHash = $activeAssemblyHash
+    assemblies = $assemblies
     psCompletionsCount = $psCompletions.Count
     jobCount = $jobs.Count
     profile = [string]$PROFILE.CurrentUserAllHosts
 } | ConvertTo-Json -Depth 5 -Compress
+exit 0
 '@
+    $encodedProbeCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeCommand))
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-    $output = @(& $Executable -NoLogo -NonInteractive -Command $probeCommand 2>&1)
+    $output = @(& $Executable -NoLogo -NoExit -EncodedCommand $encodedProbeCommand 2>&1)
     $exitCode = $LASTEXITCODE
     $stopwatch.Stop()
     $durationMilliseconds = [long]$stopwatch.ElapsedMilliseconds
@@ -187,6 +212,12 @@ $jobs = @(Get-Job)
     $probe = [string]$output[0] | ConvertFrom-Json -ErrorAction Stop
     Assert-PshVmCondition ([int]$probe.pshCount -eq 1) "$Name did not load Psh exactly once from the profile."
     Assert-PshVmCondition ([int]$probe.psReadLineCount -eq 1 -and [string]$probe.psReadLineVersion -ceq '2.4.5') "$Name did not load fixed PSReadLine 2.4.5 exactly once."
+    Assert-PshVmCondition ([string]::Equals([IO.Path]::GetFullPath([string]$probe.psReadLineModuleBase).TrimEnd('\', '/'), [IO.Path]::GetFullPath($ExpectedModuleBase).TrimEnd('\', '/'), [StringComparison]::OrdinalIgnoreCase)) "$Name did not preload PSReadLine from the CurrentUser projection."
+    $expectedAssemblyHash = 'f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2'
+    Assert-PshVmCondition ([string]$probe.implementingDllHash -ceq $expectedAssemblyHash) "$Name resolved Set-PSReadLineOption to different implementation bytes."
+    Assert-PshVmCondition (@($probe.assemblies).Count -eq 1) "$Name loaded more than one PSReadLine implementation assembly."
+    Assert-PshVmCondition ([string]$probe.assemblies[0].sha256 -ceq $expectedAssemblyHash) "$Name loaded a different PSReadLine AppDomain assembly."
+    Assert-PshVmCondition ([string]::Equals([IO.Path]::GetFullPath([string]$probe.assemblies[0].path), [IO.Path]::GetFullPath([string]$probe.implementingDllPath), [StringComparison]::OrdinalIgnoreCase)) "$Name uses a different PSReadLine command assembly than the AppDomain preload."
     Assert-PshVmCondition ([int]$probe.psCompletionsCount -eq 0) "$Name imported the network-capable PSCompletions original."
     Assert-PshVmCondition ([int]$probe.jobCount -eq 0) "$Name created a background job during profile startup."
     Assert-PshVmCondition ($durationMilliseconds -lt 5000) "$Name profile startup took ${durationMilliseconds}ms, exceeding 5000ms."
@@ -262,6 +293,7 @@ $sourceBootstrap = Join-Path $repositoryRootPath 'src/install/bootstrap.ps1'
 $sourceConfig = Join-Path $repositoryRootPath 'src/install/config.psd1'
 $versionSetter = Join-Path $repositoryRootPath 'src/install/Set-PshCurrentVersion.ps1'
 $profileInstaller = Join-Path $repositoryRootPath 'src/profile/Install-PshProfile.ps1'
+$projectionInstaller = Join-Path $repositoryRootPath 'src/profile/Install-PshPSReadLineProjection.ps1'
 foreach ($requiredPath in @(
     $dependencyVerifier,
     $goal2Acceptance,
@@ -269,7 +301,8 @@ foreach ($requiredPath in @(
     $sourceBootstrap,
     $sourceConfig,
     $versionSetter,
-    $profileInstaller
+    $profileInstaller,
+    $projectionInstaller
 )) {
     Assert-PshVmCondition ([IO.File]::Exists($requiredPath)) "Required repository file is missing: $requiredPath"
 }
@@ -340,6 +373,11 @@ $evidenceRootPath = [IO.Path]::GetFullPath($EvidenceRoot)
 Assert-PshVmCondition (-not [IO.File]::Exists($evidenceRootPath) -and -not [IO.Directory]::Exists($evidenceRootPath)) "Evidence root already exists: $evidenceRootPath"
 [IO.Directory]::CreateDirectory($evidenceRootPath) | Out-Null
 $evidenceId = 'goal2-{0}-{1}' -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'), $SourceCommit.Substring(0, 8)
+
+$sourceProjectionPath = Join-Path -Path (Join-Path -Path (Join-Path -Path $sourceModuleRoot -ChildPath 'Dependencies') -ChildPath 'PSReadLine') -ChildPath '2.4.5'
+$projectionWhatIf = @(& $projectionInstaller -SourcePath $sourceProjectionPath -WhatIf)
+Assert-PshVmCondition ($projectionWhatIf.Count -eq 2) 'PSReadLine projection WhatIf did not report exactly two CurrentUser module roots.'
+Assert-PshVmCondition (@($projectionWhatIf | Where-Object { @('WouldCreate', 'WouldReuse') -cnotcontains [string]$_.Status }).Count -eq 0) 'PSReadLine projection WhatIf reported an unexpected status.'
 
 & $dependencyVerifier -RepositoryRoot $repositoryRootPath
 $ps51Log = Invoke-PshVmChildAcceptance `
@@ -430,10 +468,22 @@ if (-not [IO.File]::Exists($targetConfig)) {
     [IO.File]::Copy($sourceConfig, $targetConfig, $false)
 }
 & $versionSetter -Version $Version -InstallRoot $installRoot
+$installedProjectionSource = Join-Path -Path (Join-Path -Path (Join-Path -Path $targetModuleRoot -ChildPath 'Dependencies') -ChildPath 'PSReadLine') -ChildPath '2.4.5'
+$projectionResults = @(& $projectionInstaller -SourcePath $installedProjectionSource)
+Assert-PshVmCondition ($projectionResults.Count -eq 2) 'PSReadLine projection install did not report exactly two CurrentUser module roots.'
+Assert-PshVmCondition (@($projectionResults | Where-Object { @('Created', 'AlreadyCreated', 'Reused') -cnotcontains [string]$_.Status }).Count -eq 0) 'PSReadLine projection install reported an unexpected status.'
+$projectionManifestPaths = @($projectionResults | ForEach-Object { [string]$_.ManifestPath } | Sort-Object -Unique)
+Assert-PshVmCondition ($projectionManifestPaths.Count -eq 1 -and [IO.File]::Exists($projectionManifestPaths[0])) 'PSReadLine projection state manifest is missing or inconsistent.'
+$projectionManifestPath = $projectionManifestPaths[0]
+$projectionManifest = Get-Content -LiteralPath $projectionManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
 $profileResults = @(& $profileInstaller)
 Assert-PshVmCondition ($profileResults.Count -eq 2) 'Profile installer did not report exactly two targets.'
 
 $documents = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)
+$projectionModuleBases = [ordered]@{
+    windowsPowerShell = Join-Path -Path (Join-Path -Path (Join-Path -Path $documents -ChildPath 'WindowsPowerShell\Modules') -ChildPath 'PSReadLine') -ChildPath '2.4.5'
+    powerShell7 = Join-Path -Path (Join-Path -Path (Join-Path -Path $documents -ChildPath 'PowerShell\Modules') -ChildPath 'PSReadLine') -ChildPath '2.4.5'
+}
 $profilePaths = @(
     (Join-Path $documents 'WindowsPowerShell\profile.ps1'),
     (Join-Path $documents 'PowerShell\profile.ps1')
@@ -459,12 +509,12 @@ $profileEvidence = @(
 $windowsPowerShellExecutable = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 $startupEvidence = [ordered]@{
     windowsPowerShell = @(
-        Invoke-PshVmProfileStartupProbe -Executable $windowsPowerShellExecutable -Name 'winps51-cold' -LogRoot $evidenceRootPath
-        Invoke-PshVmProfileStartupProbe -Executable $windowsPowerShellExecutable -Name 'winps51-warm' -LogRoot $evidenceRootPath
+        Invoke-PshVmProfileStartupProbe -Executable $windowsPowerShellExecutable -Name 'winps51-cold' -ExpectedModuleBase $projectionModuleBases.windowsPowerShell -LogRoot $evidenceRootPath
+        Invoke-PshVmProfileStartupProbe -Executable $windowsPowerShellExecutable -Name 'winps51-warm' -ExpectedModuleBase $projectionModuleBases.windowsPowerShell -LogRoot $evidenceRootPath
     )
     powerShell7 = @(
-        Invoke-PshVmProfileStartupProbe -Executable $PwshPath -Name 'pwsh7-cold' -LogRoot $evidenceRootPath
-        Invoke-PshVmProfileStartupProbe -Executable $PwshPath -Name 'pwsh7-warm' -LogRoot $evidenceRootPath
+        Invoke-PshVmProfileStartupProbe -Executable $PwshPath -Name 'pwsh7-cold' -ExpectedModuleBase $projectionModuleBases.powerShell7 -LogRoot $evidenceRootPath
+        Invoke-PshVmProfileStartupProbe -Executable $PwshPath -Name 'pwsh7-warm' -ExpectedModuleBase $projectionModuleBases.powerShell7 -LogRoot $evidenceRootPath
     )
 }
 
@@ -511,6 +561,14 @@ $prepareEvidence = [ordered]@{
         moduleTree  = @(Get-PshVmTreeFingerprint -Root $targetModuleRoot)
         profiles    = $profileEvidence
         startup     = $startupEvidence
+        psReadLineProjection = [ordered]@{
+            whatIf       = $projectionWhatIf
+            results      = $projectionResults
+            moduleBases  = $projectionModuleBases
+            manifestPath = $projectionManifestPath
+            manifestHash = [string](Get-FileHash -LiteralPath $projectionManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            manifest     = $projectionManifest
+        }
     }
     tools               = [ordered]@{
         gitPath    = $GitPath
