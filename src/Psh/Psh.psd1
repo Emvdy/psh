@@ -15,6 +15,7 @@
         'psh'
         'Get-PshCapabilities'
         'Get-PshCommandSpecification'
+        'Initialize-PshInteractive'
     )
     CmdletsToExport = @()
     VariablesToExport = @()

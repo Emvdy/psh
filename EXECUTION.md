@@ -9,8 +9,8 @@ condition has direct evidence.
 | Goal | Status | Commit | Notes |
 | --- | --- | --- | --- |
 | Goal 0 | COMPLETE | `1f87695` | Safety baseline and repository |
-| Goal 1 | COMPLETE | `6e5641c` | Module and machine-readable specification |
-| Goal 2 | PENDING | - | Blocked on Goal 1 DoneWhen |
+| Goal 1 | COMPLETE | `83ed21f` | Module and machine-readable specification |
+| Goal 2 | IN_PROGRESS | pending | Interactive experience |
 | Goal 3 | PENDING | - | Blocked on Goal 2 DoneWhen |
 | Goal 4 | PENDING | - | Blocked on Goal 3 DoneWhen |
 | Goal 5 | PENDING | - | Blocked on Goal 4 DoneWhen |
@@ -191,3 +191,121 @@ Started: 2026-07-18 (Asia/Shanghai)
 None. All Goal 1 StopIf conditions were checked and not hit, and all Goal 1
 DoneWhen conditions have direct evidence. Goal 2 may start after this evidence
 commit is merged to `main` and the resulting `main` workflow is green.
+
+- Goal 1 completion evidence commit: `83ed21f99793508d8112e429c8486869f5c97869`.
+- Default-branch CI: <https://github.com/Emvdy/psh/actions/runs/29636062661>,
+  conclusion `success` for the same completion head on `main`.
+
+## Goal 2: Interactive Experience
+
+Started: 2026-07-18 (Asia/Shanghai)
+
+### Prerequisite
+
+- [x] Goal 1 is complete on `main`; clean Windows PowerShell 5.1 and
+  PowerShell 7 jobs passed import, generated-artifact, capability, completion,
+  and current-user layout acceptance.
+
+### Implementation Checklist
+
+- [x] Pin and bundle PSReadLine `2.4.5` from an official immutable package.
+- [x] Pin and bundle PSCompletions `6.10.0` from an official immutable package.
+- [x] Record source URLs and SHA256 values and retain both upstream licenses.
+- [x] Import fixed bundled PSReadLine only; validate the fixed PSCompletions
+  manifest without executing its network-capable `ScriptsToProcess`, and use a
+  Psh-owned offline Git completion adapter.
+- [x] Bind Tab to `MenuComplete` and Ctrl+R to reverse history search.
+- [x] Bind Up/Down arrows to prefix history search.
+- [x] Configure prediction source `History` and view style `ListView` when the
+  host supports it, with a safe documented fallback.
+- [x] Add a compact ASCII prompt with path, previous status, and optional Git
+  branch without requiring a Nerd Font.
+- [x] Provide a safe non-VT fallback and verify no startup blocking path.
+- [x] Validate profile markers strictly and stop on malformed marker state.
+- [x] Back up and losslessly update both Windows PowerShell and PowerShell 7
+  CurrentUserAllHosts profiles using one marked loader block.
+- [x] Make profile update idempotent and restore exact pre-existing bytes on
+  removal.
+- [x] Add PS5.1-compatible automated tests for dependency pins, key bindings,
+  prompt behavior, Unicode/space paths, profile backup/restore, malformed
+  markers, and startup timing.
+- [ ] Run the Goal 2 automated matrix in Windows PowerShell 5.1 and PowerShell
+  7 CI.
+- [ ] Verify Tab, ListView, Ctrl+R, Chinese/space paths, and Git completion in
+  VS Code on the real Windows 11 ARM64 VM.
+- [x] Review the Goal 2 diff for secrets, caches, binaries, and unrelated files.
+- [ ] Commit Goal 2, push it, and record commit, CI, VM logs, and screenshots.
+
+### StopIf Checks
+
+| Condition | State | Evidence / action |
+| --- | --- | --- |
+| Existing profile markers are malformed | NOT HIT (local PS7) | Five unmatched, duplicated, reversed, inline, or modified variants caused whole-batch refusal with zero profile/state writes. Windows matrix remains pending. |
+| VT is unavailable with no safe fallback | NOT HIT (local PS7) | Redirected output disabled prediction with a structured reason while keys and the ANSI-free ASCII prompt remained available. Real VS Code validation remains pending. |
+| Shell startup becomes noticeably blocked | NOT HIT (local PS7) | Fresh fixed-bundle initialization measured 229 ms cold and 73 ms warm, created zero jobs, did not import PSCompletions, and left the dependency tree byte-identical. Windows/VM timing remains pending. |
+
+### Known Environment Gate
+
+- The real VM currently has all execution-policy scopes `Undefined`, yielding
+  effective `Restricted`. Normal profile/module script loading is blocked.
+  No GPO or policy was changed and no bypass was used. Automated implementation
+  can proceed, but VM interactive acceptance will require a user-approved
+  execution-policy/deployment path before Goal 2 can complete.
+
+### DoneWhen Audit
+
+- [ ] VS Code shows completions below the prompt.
+- [ ] History view acceptance passes.
+- [ ] Chinese paths pass interactive acceptance.
+- [ ] Paths with spaces pass interactive acceptance.
+- [ ] Git completion passes interactive acceptance.
+
+### Local Evidence
+
+- Dependency verifier output: `2 fixed components, 14 independently pinned`
+  `runtime files, and 2 verified licenses`. A negative fixture that changed a
+  vendored file and its lock entry together was still rejected by the
+  independent trusted manifest.
+- Package SHA256: PSReadLine `2.4.5`
+  `cb9390e9733208456c234a7971d1ec4a917886c239502aab68f4b71aa4bba235`;
+  PSCompletions `6.10.0`
+  `9f2bf9c6d143d2dc0c50a531b964f9f6ff30393077405914ca7d746ef8e38cb7`.
+- Local runtime: official portable PowerShell `7.6.3` for macOS ARM64,
+  archive SHA256
+  `f0263c2072fe7d0953781c60497a574bea99b37237f2554a59ce4bad07de8d36`.
+- Goal 1 regression passed after bundling the managed PSReadLine assemblies.
+- Goal 2 acceptance passed dependency isolation, actual PSReadLine
+  implementation-assembly hash verification, exact handlers, engine-native Git
+  command/ref completion in a Chinese and space-containing path, the real
+  PSReadLine `GetCompletions` path, a 6,000-ref pipe-drain case capped at 4,096
+  results, prompt status, Git branch, `LASTEXITCODE`, missing-prompt
+  degradation, and profile tests.
+- Assembly conflict coverage preserved a pre-existing correct bundled module
+  while restoring a second conflict after forced verification failure. A fresh
+  child process preloaded a one-byte-altered PSReadLine DLL and verified
+  structured refusal plus exact module rollback.
+- Profile coverage passed UTF-8 LF/no-BOM, UTF-8 BOM/CRLF, UTF-16LE/CRLF,
+  empty and originally absent files; repeat install; exact uninstall; outside
+  edits; marker conflicts; modified backup; modified managed block; real
+  bootstrap scope isolation; `WarningPreference=Stop`; relative paths; atomic
+  displaced-byte compare/exchange; unread recovery interleavings; and a
+  cross-process state-root mutex with trailing-separator normalization. Windows
+  CI additionally runs two system-ANSI round trips.
+- Fresh local timing: 229 ms cold, 73 ms warm, zero jobs, PSReadLine assembly
+  state `fixed-path`, and Git registrar `NativeArgumentCompleter` using the
+  explicit native switch.
+- Diff review found no cache, temporary, credential, or unrelated files and no
+  common private-key/token signatures. No dedicated secret-scanner executable
+  was installed locally; later Goal 6 CI retains the mandatory scanner gate.
+- The PSCompletions Gallery original is retained byte-for-byte and audited. Its
+  import is intentionally suppressed because isolated review confirmed module
+  directory mutation, startup output, global state, and a network-capable
+  update job. `Test-ModuleManifest` metadata validation caused zero writes,
+  modules, variables, aliases, or jobs.
+
+### Remaining Work
+
+Windows PowerShell 5.1 and PowerShell 7 CI, diff/secret review, a Goal 2 commit,
+and real Windows 11 ARM64 VS Code acceptance remain. The VM execution-policy
+gate still requires an approved deployment path. Goal 3 must not start until
+every Goal 2 DoneWhen check has direct evidence.

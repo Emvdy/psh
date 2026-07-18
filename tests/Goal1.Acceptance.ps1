@@ -104,8 +104,27 @@ Assert-PshCondition (@($generatedSpecification.Commands).Count -eq 64) 'Generate
 Assert-PshCondition (@(Compare-Object ($expectedCommands | Sort-Object) (@($generatedSpecification.Commands.Name) | Sort-Object)).Count -eq 0) 'Generated commands.json command names drifted from PLAN.md.'
 
 $sourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $RepositoryRoot 'src') -Recurse -File)
-$unexpectedBinaries = @($sourceFiles | Where-Object { $_.Extension -in @('.exe', '.dll', '.com', '.msi') })
-Assert-PshCondition ($unexpectedBinaries.Count -eq 0) 'Goal 1 Core source unexpectedly contains executable binaries.'
+$allowedManagedDependencyRoot = [IO.Path]::GetFullPath(
+    (Join-Path $RepositoryRoot 'src/Psh/Dependencies/PSReadLine/2.4.5')
+).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+$allowedManagedDependencyPrefix = $allowedManagedDependencyRoot + [IO.Path]::DirectorySeparatorChar
+$pathComparison = [StringComparison]::Ordinal
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $pathComparison = [StringComparison]::OrdinalIgnoreCase
+}
+$unexpectedBinaries = @(
+    $sourceFiles |
+        Where-Object {
+            if ($_.Extension -in @('.exe', '.com', '.msi')) {
+                return $true
+            }
+            if ($_.Extension -ne '.dll') {
+                return $false
+            }
+            return -not $_.FullName.StartsWith($allowedManagedDependencyPrefix, $pathComparison)
+        }
+)
+Assert-PshCondition ($unexpectedBinaries.Count -eq 0) 'Core source contains an executable binary outside the fixed managed dependency directory.'
 
 $unsafePatterns = @(
     'Invoke-WebRequest',

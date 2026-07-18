@@ -1,0 +1,301 @@
+{
+  "schemaVersion": 1,
+  "dependencyRoot": "src/Psh/Dependencies",
+  "components": [
+    {
+      "name": "PSReadLine",
+      "version": "2.4.5",
+      "package": {
+        "source": "PowerShell Gallery",
+        "galleryPageUrl": "https://www.powershellgallery.com/packages/PSReadLine/2.4.5",
+        "metadataUrl": "https://www.powershellgallery.com/api/v2/Packages(Id='PSReadLine',Version='2.4.5')",
+        "downloadUrl": "https://www.powershellgallery.com/api/v2/package/PSReadLine/2.4.5",
+        "resolvedUrl": "https://cdn.powershellgallery.com/packages/psreadline.2.4.5.nupkg",
+        "sha256": "cb9390e9733208456c234a7971d1ec4a917886c239502aab68f4b71aa4bba235",
+        "sha512Base64": "JA10h9IfnO9Bn9TgS2E63hxchq3jezV9WsurjsY9DAtrrRZ2qsEf0Wir0M/Q9N5NH9wd48HEgom1e1o/BdciLA==",
+        "galleryHashAlgorithm": "SHA512",
+        "galleryHashVerified": true,
+        "size": 234360,
+        "created": "2025-10-22T20:27:07.903Z",
+        "published": "2025-10-22T20:27:07.903Z",
+        "embeddedSignatureEntry": true,
+        "signatureCmsParsed": true,
+        "signatureTrustVerified": false
+      },
+      "repository": {
+        "url": "https://github.com/PowerShell/PSReadLine",
+        "tag": "v2.4.5",
+        "tagObject": "da9e153e3185ed333926cc6da5834f29f03ddc14",
+        "commit": "98d5610f7210924b79f553d982e10a9bd64dd52f",
+        "packageRepositoryMetadataPresent": false
+      },
+      "module": {
+        "manifest": "PSReadLine/2.4.5/PSReadLine.psd1",
+        "moduleVersion": "2.4.5",
+        "guid": "5714753b-2afd-4492-a5fd-01d9e2cff8b5",
+        "rootModule": "PSReadLine.psm1",
+        "scriptsToProcess": [],
+        "nestedModules": [
+          "Microsoft.PowerShell.PSReadLine.dll"
+        ],
+        "powerShellVersion": "5.1",
+        "compatiblePSEditions": [],
+        "compatiblePSEditionsDeclared": false,
+        "requiredModules": [],
+        "windowsPowerShell51Entry": "PSReadLine/2.4.5/PSReadLine.psd1",
+        "powerShell7Entry": "PSReadLine/2.4.5/PSReadLine.psd1",
+        "runtimeImportVerified": false,
+        "runtimeImportVerificationNote": "Manifest and syntax were inspected; import still requires supported Windows PowerShell 5.1 and PowerShell 7 tests."
+      },
+      "selection": {
+        "rule": "Retain the manifest, root script module, format data, main managed module, pager dependency, and both runtime-specific polyfiller assemblies. Relocate the package license; exclude samples, changelog, NuGet container metadata, nuspec, and package signature because they are not runtime inputs.",
+        "includedPackagePaths": [
+          "Microsoft.PowerShell.PSReadLine.dll",
+          "Microsoft.PowerShell.Pager.dll",
+          "PSReadLine.format.ps1xml",
+          "PSReadLine.psd1",
+          "PSReadLine.psm1",
+          "net6plus/Microsoft.PowerShell.PSReadLine.Polyfiller.dll",
+          "netstd/Microsoft.PowerShell.PSReadLine.Polyfiller.dll"
+        ],
+        "excludedPackagePaths": [
+          ".signature.p7s",
+          "Changes.txt",
+          "License.txt",
+          "PSReadLine.nuspec",
+          "SamplePSReadLineProfile.ps1",
+          "[Content_Types].xml",
+          "_rels/.rels",
+          "package/services/metadata/core-properties/0a75684263af4ef49be98091fe8b6bfd.psmdcp"
+        ]
+      },
+      "license": {
+        "spdxId": "BSD-2-Clause",
+        "packageEmbedded": true,
+        "packagePath": "License.txt",
+        "vendoredPath": "licenses/PSReadLine-2.4.5/LICENSE.txt",
+        "sha256": "25c2fdfcdc653f65629233f5ef217a83287733d3c0299c207b0bca865508c463",
+        "size": 1324,
+        "fixedSourceUrl": "https://raw.githubusercontent.com/PowerShell/PSReadLine/98d5610f7210924b79f553d982e10a9bd64dd52f/License.txt",
+        "fixedSourceSha256": "577273b040bdddb01b02768d9ad07fcb40415479fc2e65c8287294c6abf56de6",
+        "sourceComparison": "Content-equal after CRLF-to-LF normalization",
+        "noticeFilePresent": false
+      },
+      "archiveAudit": {
+        "crcVerified": true,
+        "pathTraversalEntries": [],
+        "symlinkEntries": [],
+        "caseInsensitiveDuplicateEntries": [],
+        "encryptedEntries": [],
+        "unexpectedExeEntries": []
+      },
+      "managedAssemblies": [
+        {
+          "path": "PSReadLine/2.4.5/Microsoft.PowerShell.PSReadLine.dll",
+          "targetFramework": ".NETStandard,Version=v2.0",
+          "architecture": "AnyCPU managed IL",
+          "clrFlags": "ILONLY; no 32BITREQUIRED; no 32BITPREFERRED",
+          "purpose": "Nested binary module implementing PSReadLine cmdlets"
+        },
+        {
+          "path": "PSReadLine/2.4.5/Microsoft.PowerShell.Pager.dll",
+          "targetFramework": ".NETStandard,Version=v2.0",
+          "architecture": "AnyCPU managed IL",
+          "clrFlags": "ILONLY; no 32BITREQUIRED; no 32BITPREFERRED",
+          "purpose": "Pager assembly referenced by the main PSReadLine module"
+        },
+        {
+          "path": "PSReadLine/2.4.5/net6plus/Microsoft.PowerShell.PSReadLine.Polyfiller.dll",
+          "targetFramework": ".NETCoreApp,Version=v6.0",
+          "architecture": "AnyCPU managed IL",
+          "clrFlags": "ILONLY; no 32BITREQUIRED; no 32BITPREFERRED",
+          "purpose": "PowerShell 7 runtime compatibility polyfill for .NET 6 or later"
+        },
+        {
+          "path": "PSReadLine/2.4.5/netstd/Microsoft.PowerShell.PSReadLine.Polyfiller.dll",
+          "targetFramework": ".NETStandard,Version=v2.0",
+          "architecture": "AnyCPU managed IL",
+          "clrFlags": "ILONLY; no 32BITREQUIRED; no 32BITPREFERRED",
+          "purpose": "Windows PowerShell 5.1 and .NET Standard compatibility polyfill"
+        }
+      ],
+      "vendoredFiles": [
+        {
+          "path": "PSReadLine/2.4.5/Microsoft.PowerShell.PSReadLine.dll",
+          "sha256": "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+          "size": 339528
+        },
+        {
+          "path": "PSReadLine/2.4.5/Microsoft.PowerShell.Pager.dll",
+          "sha256": "451994c3d3e38d939b4fa5f8594d0207840f45e7a210aa75f81aef85aa17c592",
+          "size": 16784
+        },
+        {
+          "path": "PSReadLine/2.4.5/PSReadLine.format.ps1xml",
+          "sha256": "1ca887463598d38aa18236a97a4193b2228d1d8434fa73cc8c7932f42a0565cf",
+          "size": 26820
+        },
+        {
+          "path": "PSReadLine/2.4.5/PSReadLine.psd1",
+          "sha256": "dd8766bd4db0c1d17111b81d145d32448f61f48451d51c780a79be9ca98d837e",
+          "size": 15471
+        },
+        {
+          "path": "PSReadLine/2.4.5/PSReadLine.psm1",
+          "sha256": "9bc0252f616067ca5ef1d0328ec0b97c7d31c757f9fc80adee234ea6132a9c7e",
+          "size": 15076
+        },
+        {
+          "path": "PSReadLine/2.4.5/net6plus/Microsoft.PowerShell.PSReadLine.Polyfiller.dll",
+          "sha256": "6d33ea289b405c64bf5daa9c59e459596cac59ece399d0d215ee9f3d46afd675",
+          "size": 14920
+        },
+        {
+          "path": "PSReadLine/2.4.5/netstd/Microsoft.PowerShell.PSReadLine.Polyfiller.dll",
+          "sha256": "2e63dc86d9240243ccfb07da5d0b4fce2bc5ce5f9952658a7ce68c26bcd3e14c",
+          "size": 16928
+        }
+      ]
+    },
+    {
+      "name": "PSCompletions",
+      "version": "6.10.0",
+      "package": {
+        "source": "PowerShell Gallery",
+        "galleryPageUrl": "https://www.powershellgallery.com/packages/PSCompletions/6.10.0",
+        "metadataUrl": "https://www.powershellgallery.com/api/v2/Packages(Id='PSCompletions',Version='6.10.0')",
+        "downloadUrl": "https://www.powershellgallery.com/api/v2/package/PSCompletions/6.10.0",
+        "resolvedUrl": "https://cdn.powershellgallery.com/packages/pscompletions.6.10.0.nupkg",
+        "sha256": "9f2bf9c6d143d2dc0c50a531b964f9f6ff30393077405914ca7d746ef8e38cb7",
+        "sha512Base64": "RCp2hR9wqPIm6YTi/AxLeipDSlbV9BzXpHGnFKcY8EoEquTP0wm0le3pAuBTAp4y4AbMoXr4oAgOFjhIc/BaqA==",
+        "galleryHashAlgorithm": "SHA512",
+        "galleryHashVerified": true,
+        "size": 59176,
+        "created": "2026-07-16T13:31:56.413Z",
+        "published": "2026-07-16T13:31:56.413Z",
+        "embeddedSignatureEntry": false,
+        "signatureCmsParsed": false,
+        "signatureTrustVerified": false
+      },
+      "repository": {
+        "url": "https://github.com/abgox/PSCompletions",
+        "tag": null,
+        "commit": "427212789d4df206d37d1d3c3d12b4341ac73644",
+        "tree": "33620d3218510688f3f4305ddfefc6343cdfdcd0",
+        "commitSubject": "release(module): 6.10.0",
+        "commitTime": "2026-07-16T21:23:26+08:00",
+        "packageRepositoryMetadataPresent": false,
+        "selectedRuntimeSourceComparison": "All seven files are content-equal after CRLF-to-LF normalization"
+      },
+      "module": {
+        "manifest": "PSCompletions/6.10.0/PSCompletions.psd1",
+        "moduleVersion": "6.10.0",
+        "guid": "00929632-527d-4dab-a5b3-21197faccd05",
+        "rootModule": "PSCompletions.psm1",
+        "scriptsToProcess": [
+          "PSCompletions.ps1"
+        ],
+        "nestedModules": [],
+        "powerShellVersion": "5.1",
+        "compatiblePSEditions": [
+          "Core",
+          "Desktop"
+        ],
+        "compatiblePSEditionsDeclared": true,
+        "requiredModules": [],
+        "windowsPowerShell51Entry": "PSCompletions/6.10.0/PSCompletions.psd1",
+        "powerShell7Entry": "PSCompletions/6.10.0/PSCompletions.psd1",
+        "runtimeImportVerified": false,
+        "runtimeImportVerificationNote": "Manifest and syntax were inspected; import still requires supported Windows PowerShell 5.1 and PowerShell 7 tests."
+      },
+      "selection": {
+        "rule": "Retain the manifest, root script module, required ScriptsToProcess script, and the complete package-supplied psc completion directory. Exclude NuGet container metadata and nuspec. The package has no embedded license; retain the fixed release-commit license separately.",
+        "includedPackagePaths": [
+          "PSCompletions.ps1",
+          "PSCompletions.psd1",
+          "PSCompletions.psm1",
+          "completions/psc/config.json",
+          "completions/psc/hooks.ps1",
+          "completions/psc/language/en-US.json",
+          "completions/psc/language/zh-CN.json"
+        ],
+        "excludedPackagePaths": [
+          "PSCompletions.nuspec",
+          "[Content_Types].xml",
+          "_rels/.rels",
+          "package/services/metadata/core-properties/b49d231ebabe47b8aefdc42940db636a.psmdcp"
+        ]
+      },
+      "license": {
+        "spdxId": "MIT",
+        "packageEmbedded": false,
+        "packageLicenseUrl": "https://github.com/abgox/PSCompletions/blob/main/LICENSE",
+        "packageLicenseUrlIsFloating": true,
+        "vendoredPath": "licenses/PSCompletions-6.10.0/LICENSE",
+        "sha256": "ff823ba75e90563c3876fbe28df694c0cde5817c721397af7879db19e8ecdd5b",
+        "size": 1090,
+        "fixedSourceUrl": "https://raw.githubusercontent.com/abgox/PSCompletions/427212789d4df206d37d1d3c3d12b4341ac73644/LICENSE",
+        "fixedSourceSha256": "ff823ba75e90563c3876fbe28df694c0cde5817c721397af7879db19e8ecdd5b",
+        "runtimeFilesMatchFixedCommit": true,
+        "noticeFilePresent": false
+      },
+      "archiveAudit": {
+        "crcVerified": true,
+        "pathTraversalEntries": [],
+        "symlinkEntries": [],
+        "caseInsensitiveDuplicateEntries": [],
+        "encryptedEntries": [],
+        "unexpectedExeEntries": []
+      },
+      "runtimeAudit": {
+        "containsInvokeExpression": true,
+        "invokeExpressionPurpose": "Expands double-brace expressions in module and completion display templates; the command AST is not passed directly to Invoke-Expression.",
+        "startsUpdateJobOnImport": true,
+        "mayContactNetworkAfterImport": true,
+        "writesBelowModuleDirectory": "$PSScriptRoot/data",
+        "builtInCompletionDirectories": [
+          "psc"
+        ],
+        "gitCompletionIncluded": false,
+        "integrationReviewRequired": true
+      },
+      "vendoredFiles": [
+        {
+          "path": "PSCompletions/6.10.0/PSCompletions.ps1",
+          "sha256": "b32a5bc04e9dbb099daf9aa1cc9b6e2d2927b589ac4847ddffa8e11f357b8df5",
+          "size": 120700
+        },
+        {
+          "path": "PSCompletions/6.10.0/PSCompletions.psd1",
+          "sha256": "17b4203e9ade01a56c01c3e6cafd94db9e55f8d7d76d599ff64645c4a8a3c1ff",
+          "size": 1631
+        },
+        {
+          "path": "PSCompletions/6.10.0/PSCompletions.psm1",
+          "sha256": "ab67a3e31d1a57d8c53f5dbf20586a0e6cc00ab781033c2c6eed5e320f3bb610",
+          "size": 55557
+        },
+        {
+          "path": "PSCompletions/6.10.0/completions/psc/config.json",
+          "sha256": "78954abccf6a908cba29635b3e3eb54263f628390857714c1e3128f1c3326c9b",
+          "size": 73
+        },
+        {
+          "path": "PSCompletions/6.10.0/completions/psc/hooks.ps1",
+          "sha256": "8892db60ca6580a6a157902f8bb92e30ce85ae109b7c1fdf3eb47e02daf5efb5",
+          "size": 7089
+        },
+        {
+          "path": "PSCompletions/6.10.0/completions/psc/language/en-US.json",
+          "sha256": "baaab326319e9f7615ef93211b84dacc928f3620bc52b2fe37ae992060eae0d1",
+          "size": 95436
+        },
+        {
+          "path": "PSCompletions/6.10.0/completions/psc/language/zh-CN.json",
+          "sha256": "0383d95e2a3dba30e07de1d074997360d31a05267e22467d317bc21d39214074",
+          "size": 93191
+        }
+      ]
+    }
+  ]
+}

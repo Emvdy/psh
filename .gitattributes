@@ -18,3 +18,10 @@
 *.png binary
 *.tar binary
 *.zip binary
+
+# Vendored dependency and license bytes are verified against immutable package
+# hashes. Keep their upstream line endings unchanged on every checkout.
+src/Psh/Dependencies/PSReadLine/2.4.5/** binary
+src/Psh/Dependencies/PSCompletions/6.10.0/** binary
+licenses/PSReadLine-2.4.5/LICENSE.txt binary
+licenses/PSCompletions-6.10.0/LICENSE -text

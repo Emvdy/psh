@@ -5,6 +5,7 @@
 # data-driven; no executable utility is launched while the module is loaded.
 
 $script:PshCompleterLoadError = $null
+$script:PshInteractiveLoadError = $null
 
 function Set-PshLastExitCode {
     param(
@@ -853,10 +854,25 @@ function Initialize-PshArgumentCompleters {
     }
 }
 
+$interactivePath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Interactive') -ChildPath 'Initialize-PshInteractive.ps1'
+if (-not (Test-Path -LiteralPath $interactivePath -PathType Leaf)) {
+    $script:PshInteractiveLoadError = 'Interactive initialization source is missing.'
+}
+else {
+    try {
+        # Dot-source at module scope so the exported initializer survives import.
+        . $interactivePath
+    }
+    catch {
+        $script:PshInteractiveLoadError = [string]$_.Exception.Message
+    }
+}
+
 Initialize-PshArgumentCompleters
 
 Export-ModuleMember -Function @(
     'psh'
     'Get-PshCapabilities'
     'Get-PshCommandSpecification'
+    'Initialize-PshInteractive'
 )

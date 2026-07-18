@@ -1,10 +1,11 @@
-name: Goal 1 validation
+name: Core validation
 
 on:
   push:
     branches:
       - main
       - 'goal1/**'
+      - 'goal2/**'
   pull_request:
 
 permissions:
@@ -36,6 +37,14 @@ jobs:
         shell: powershell
         run: ./tests/Goal1.Acceptance.ps1
 
+      - name: Verify interactive dependencies
+        shell: powershell
+        run: ./scripts/Test-InteractiveDependencies.ps1
+
+      - name: Run Goal 2 acceptance
+        shell: powershell
+        run: ./tests/Goal2.Acceptance.ps1
+
   powershell:
     name: PowerShell 7
     runs-on: windows-latest
@@ -60,3 +69,11 @@ jobs:
       - name: Run Goal 1 acceptance
         shell: pwsh
         run: ./tests/Goal1.Acceptance.ps1
+
+      - name: Verify interactive dependencies
+        shell: pwsh
+        run: ./scripts/Test-InteractiveDependencies.ps1
+
+      - name: Run Goal 2 acceptance
+        shell: pwsh
+        run: ./tests/Goal2.Acceptance.ps1
