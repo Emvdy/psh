@@ -11,38 +11,52 @@ permissions:
   contents: read
 
 jobs:
-  module-and-specification:
-    name: ${{ matrix.label }}
+  windows-powershell:
+    name: Windows PowerShell 5.1
     runs-on: windows-latest
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: Windows PowerShell 5.1
-            shell: powershell
-          - label: PowerShell 7
-            shell: pwsh
 
     steps:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Report runtime
-        shell: ${{ matrix.shell }}
+        shell: powershell
         run: |
           $PSVersionTable | Out-String | Write-Output
-          if ('${{ matrix.shell }}' -eq 'powershell' -and $PSVersionTable.PSVersion.Major -ne 5) {
+          if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
               throw 'The Windows PowerShell job must run PowerShell 5.1.'
           }
-          if ('${{ matrix.shell }}' -eq 'pwsh' -and $PSVersionTable.PSVersion.Major -lt 7) {
+
+      - name: Check generated artifacts
+        shell: powershell
+        run: ./scripts/Generate-CommandArtifacts.ps1 -Check
+
+      - name: Run Goal 1 acceptance
+        shell: powershell
+        run: ./tests/Goal1.Acceptance.ps1
+
+  powershell:
+    name: PowerShell 7
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Report runtime
+        shell: pwsh
+        run: |
+          $PSVersionTable | Out-String | Write-Output
+          if ($PSVersionTable.PSVersion.Major -lt 7) {
               throw 'The PowerShell job must run PowerShell 7 or later.'
           }
 
       - name: Check generated artifacts
-        shell: ${{ matrix.shell }}
+        shell: pwsh
         run: ./scripts/Generate-CommandArtifacts.ps1 -Check
 
       - name: Run Goal 1 acceptance
-        shell: ${{ matrix.shell }}
+        shell: pwsh
         run: ./tests/Goal1.Acceptance.ps1
