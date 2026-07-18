@@ -10,7 +10,7 @@ condition has direct evidence.
 | --- | --- | --- | --- |
 | Goal 0 | COMPLETE | `1f87695` | Safety baseline and repository |
 | Goal 1 | COMPLETE | `83ed21f` | Module and machine-readable specification |
-| Goal 2 | IN_PROGRESS | pending | Interactive experience |
+| Goal 2 | IN_PROGRESS | `380726f` | Automated matrix complete; real VM interaction pending |
 | Goal 3 | PENDING | - | Blocked on Goal 2 DoneWhen |
 | Goal 4 | PENDING | - | Blocked on Goal 3 DoneWhen |
 | Goal 5 | PENDING | - | Blocked on Goal 4 DoneWhen |
@@ -229,7 +229,7 @@ Started: 2026-07-18 (Asia/Shanghai)
 - [x] Add PS5.1-compatible automated tests for dependency pins, key bindings,
   prompt behavior, Unicode/space paths, profile backup/restore, malformed
   markers, and startup timing.
-- [ ] Run the Goal 2 automated matrix in Windows PowerShell 5.1 and PowerShell
+- [x] Run the Goal 2 automated matrix in Windows PowerShell 5.1 and PowerShell
   7 CI.
 - [ ] Verify Tab, ListView, Ctrl+R, Chinese/space paths, and Git completion in
   VS Code on the real Windows 11 ARM64 VM.
@@ -240,9 +240,9 @@ Started: 2026-07-18 (Asia/Shanghai)
 
 | Condition | State | Evidence / action |
 | --- | --- | --- |
-| Existing profile markers are malformed | NOT HIT (local PS7) | Five unmatched, duplicated, reversed, inline, or modified variants caused whole-batch refusal with zero profile/state writes. Windows matrix remains pending. |
-| VT is unavailable with no safe fallback | NOT HIT (local PS7) | Redirected output disabled prediction with a structured reason while keys and the ANSI-free ASCII prompt remained available. Real VS Code validation remains pending. |
-| Shell startup becomes noticeably blocked | NOT HIT (local PS7) | Fresh fixed-bundle initialization measured 229 ms cold and 73 ms warm, created zero jobs, did not import PSCompletions, and left the dependency tree byte-identical. Windows/VM timing remains pending. |
+| Existing profile markers are malformed | NOT HIT (automated) | Five unmatched, duplicated, reversed, inline, or modified variants caused whole-batch refusal with zero profile/state writes. The complete matrix passed in local PS7, Windows PowerShell 5.1, and Windows PS7. |
+| VT is unavailable with no safe fallback | NOT HIT (automated) | Redirected output disabled prediction with a structured reason while keys and the ANSI-free ASCII prompt remained available. Windows CI passed; real VS Code validation remains pending. |
+| Shell startup becomes noticeably blocked | NOT HIT (automated) | Fresh local fixed-bundle initialization measured 229 ms cold and 73 ms warm, created zero jobs, did not import PSCompletions, and left the dependency tree byte-identical. Both Windows jobs also passed the enforced cold/warm timing bounds; real VM timing remains pending. |
 
 ### Known Environment Gate
 
@@ -260,7 +260,7 @@ Started: 2026-07-18 (Asia/Shanghai)
 - [ ] Paths with spaces pass interactive acceptance.
 - [ ] Git completion passes interactive acceptance.
 
-### Local Evidence
+### Automated Evidence
 
 - Dependency verifier output: `2 fixed components, 14 independently pinned`
   `runtime files, and 2 verified licenses`. A negative fixture that changed a
@@ -273,6 +273,24 @@ Started: 2026-07-18 (Asia/Shanghai)
 - Local runtime: official portable PowerShell `7.6.3` for macOS ARM64,
   archive SHA256
   `f0263c2072fe7d0953781c60497a574bea99b37237f2554a59ce4bad07de8d36`.
+- Goal 2 implementation and Windows acceptance fixes:
+  `c1d0047c8a0505b46cfcb2146a58aec3ec1467c3`,
+  `0f872860c9b86e68812f961b30561c88e72eb937`,
+  `2eaac03b1ad8692b9e5093361b3362381c1f9620`, and
+  `380726f1b5f32b5e656e1f0742a71626e3a8cf8b`.
+- Final branch CI: <https://github.com/Emvdy/psh/actions/runs/29643665073>,
+  conclusion `success` at head `380726f1b5f32b5e656e1f0742a71626e3a8cf8b`.
+  Both jobs and every non-cleanup step succeeded.
+- Windows PowerShell job used `5.1.26100.32995`, PSEdition `Desktop`; the
+  PowerShell job used `7.6.3`, PSEdition `Core`, platform `Win32NT`. Both used
+  Git for Windows `2.55.0.windows.2` and passed generated-artifact checking,
+  Goal 1 regression, the independent dependency verifier, and full Goal 2
+  acceptance.
+- The Windows matrix exercised the real fixed PSReadLine completion core in a
+  runner with no usable console handle by injecting only a test `IConsole`;
+  `_mockableMethods` remained the production singleton and singleton state was
+  restored after the call. It also drained 6,000 valid LF-formatted packed refs
+  and returned the deterministic 4,096-candidate cap on both runtimes.
 - Goal 1 regression passed after bundling the managed PSReadLine assemblies.
 - Goal 2 acceptance passed dependency isolation, actual PSReadLine
   implementation-assembly hash verification, exact handlers, engine-native Git
@@ -302,10 +320,15 @@ Started: 2026-07-18 (Asia/Shanghai)
   directory mutation, startup output, global state, and a network-capable
   update job. `Test-ModuleManifest` metadata validation caused zero writes,
   modules, variables, aliases, or jobs.
+- During CI diagnosis the `Windows 11` VM was temporarily resumed only for
+  read-only availability checks. Effective execution policy remained
+  `Restricted`, Git was not installed, no policy or GPO was changed, and
+  `prlctl status 'Windows 11'` again reported `paused` after the check.
 
 ### Remaining Work
 
-Windows PowerShell 5.1 and PowerShell 7 CI, diff/secret review, a Goal 2 commit,
-and real Windows 11 ARM64 VS Code acceptance remain. The VM execution-policy
-gate still requires an approved deployment path. Goal 3 must not start until
-every Goal 2 DoneWhen check has direct evidence.
+Real Windows 11 ARM64 VS Code acceptance, screenshots, and final Goal 2 VM
+evidence remain. The automated Windows PowerShell 5.1 and PowerShell 7 matrix,
+diff/secret review, implementation commits, and branch push are complete. The
+VM execution-policy gate still requires an approved deployment path. Goal 3
+must not start until every Goal 2 DoneWhen check has direct evidence.
