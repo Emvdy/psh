@@ -389,6 +389,8 @@ $ownedSourceFiles = @(
     Get-Item -LiteralPath (Join-Path $repositoryRootPath 'src/Psh/Psh.psm1')
     Get-Item -LiteralPath (Join-Path $repositoryRootPath 'src/Psh/Psh.psd1')
     Get-Item -LiteralPath $dependencyVerifierPath
+    Get-Item -LiteralPath (Join-Path $repositoryRootPath 'tests/Goal2.VM.Prepare.ps1')
+    Get-Item -LiteralPath (Join-Path $repositoryRootPath 'tests/Goal2.VM.SessionEvidence.ps1')
     Get-Item -LiteralPath $PSCommandPath
 )
 $parseFailureCount = 0
