@@ -91,9 +91,11 @@ PowerShell runtimes that expose the `Native` switch use
 that optional switch is unavailable, `-CommandName` plus `-ScriptBlock` and no
 `-ParameterName` selects the same engine native-completer registry implicitly.
 This matters because PSReadLine's Tab handlers call
-`CommandCompletion.CompleteInput` directly; they do not call the global
-`TabExpansion2` function. Warm initialization republishes Psh's two Git entries
-if another module has overwritten them.
+the engine's four-argument `CommandCompletion.CompleteInput` path, which invokes
+the global `TabExpansion2` function. Psh does not replace or wrap that function;
+its built-in implementation consumes the same engine native-completer registry.
+Warm initialization republishes Psh's two Git entries if another module has
+overwritten them.
 
 ## Prompt
 

@@ -178,6 +178,10 @@ function Invoke-PshGoal2PSReadLineCompletion {
     $runspaceField = $readLineType.GetField('_runspace', $instanceFlags)
     $tabCountField = $readLineType.GetField('_tabCommandCount', $instanceFlags)
     $tabCompletionsField = $readLineType.GetField('_tabCompletions', $instanceFlags)
+    $directorySeparatorField = $readLineType.GetField('_directorySeparator', $instanceFlags)
+    $mockableMethodsField = $readLineType.GetField('_mockableMethods', $instanceFlags)
+    $consoleField = $readLineType.GetField('_console', $instanceFlags)
+    $initialYField = $readLineType.GetField('_initialY', $instanceFlags)
     $getCompletionsMethod = $readLineType.GetMethod('GetCompletions', $instanceFlags)
     foreach ($requiredMember in @(
         $singletonField,
@@ -186,6 +190,10 @@ function Invoke-PshGoal2PSReadLineCompletion {
         $runspaceField,
         $tabCountField,
         $tabCompletionsField,
+        $directorySeparatorField,
+        $mockableMethodsField,
+        $consoleField,
+        $initialYField,
         $getCompletionsMethod
     )) {
         if ($null -eq $requiredMember) {
@@ -193,13 +201,116 @@ function Invoke-PshGoal2PSReadLineCompletion {
         }
     }
 
+    $memoryConsoleTypeName = 'Psh.Goal2.Acceptance.MemoryConsole'
+    $memoryConsoleType = $memoryConsoleTypeName -as [type]
+    if ($null -eq $memoryConsoleType) {
+        $memoryConsoleSource = @'
+using System;
+using System.Text;
+using Microsoft.PowerShell.Internal;
+
+namespace Psh.Goal2.Acceptance
+{
+    public sealed class MemoryConsole : IConsole
+    {
+        public MemoryConsole()
+        {
+            CursorSize = 25;
+            CursorVisible = true;
+            BufferWidth = 120;
+            BufferHeight = 3000;
+            WindowWidth = 120;
+            WindowHeight = 40;
+            BackgroundColor = ConsoleColor.Black;
+            ForegroundColor = ConsoleColor.Gray;
+            OutputEncoding = Encoding.UTF8;
+        }
+
+        public bool KeyAvailable { get { return false; } }
+        public int CursorLeft { get; set; }
+        public int CursorTop { get; set; }
+        public int CursorSize { get; set; }
+        public bool CursorVisible { get; set; }
+        public int BufferWidth { get; set; }
+        public int BufferHeight { get; set; }
+        public int WindowWidth { get; set; }
+        public int WindowHeight { get; set; }
+        public int WindowTop { get; set; }
+        public ConsoleColor BackgroundColor { get; set; }
+        public ConsoleColor ForegroundColor { get; set; }
+        public Encoding OutputEncoding { get; set; }
+
+        public ConsoleKeyInfo ReadKey()
+        {
+            throw new InvalidOperationException("The Goal 2 completion test cannot read interactive input.");
+        }
+
+        public void SetWindowPosition(int left, int top)
+        {
+            WindowTop = top;
+        }
+
+        public void SetCursorPosition(int left, int top)
+        {
+            CursorLeft = left;
+            CursorTop = top;
+        }
+
+        public void WriteLine(string value) { }
+        public void Write(string value) { }
+        public void BlankRestOfLine() { }
+    }
+}
+'@
+        $compilerReferences = @($readLineCommand.ImplementingType.Assembly.Location)
+        $consoleAssemblyPath = [ConsoleColor].Assembly.Location
+        if (-not [string]::Equals(
+            $consoleAssemblyPath,
+            [object].Assembly.Location,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            $compilerReferences += $consoleAssemblyPath
+        }
+        $netstandardAssembly = [AppDomain]::CurrentDomain.GetAssemblies() |
+            Where-Object { $_.GetName().Name -ceq 'netstandard' } |
+            Select-Object -First 1
+        if ($null -ne $netstandardAssembly -and
+            -not [string]::IsNullOrWhiteSpace($netstandardAssembly.Location)) {
+            $compilerReferences += $netstandardAssembly.Location
+        }
+        $memoryConsoleType = @(
+            Add-Type `
+                -TypeDefinition $memoryConsoleSource `
+                -ReferencedAssemblies $compilerReferences `
+                -PassThru `
+                -ErrorAction Stop |
+                Where-Object { $_.FullName -ceq $memoryConsoleTypeName }
+        ) | Select-Object -First 1
+    }
+    if ($null -eq $memoryConsoleType) {
+        throw 'The test-only PSReadLine memory console type is unavailable.'
+    }
+    $memoryConsole = [Activator]::CreateInstance($memoryConsoleType)
+    if (-not $consoleField.FieldType.IsInstanceOfType($memoryConsole)) {
+        throw 'The test-only memory console does not implement the active PSReadLine IConsole interface.'
+    }
+
     $singleton = $singletonField.GetValue($null)
+    if (-not [object]::ReferenceEquals($mockableMethodsField.GetValue($singleton), $singleton)) {
+        throw 'The active PSReadLine completion provider was replaced by a test double.'
+    }
     $buffer = $bufferField.GetValue($singleton)
     $savedBuffer = [string]$buffer.ToString()
     $savedCurrent = $currentField.GetValue($singleton)
     $savedRunspace = $runspaceField.GetValue($singleton)
     $savedTabCount = $tabCountField.GetValue($singleton)
     $savedTabCompletions = $tabCompletionsField.GetValue($singleton)
+    $savedDirectorySeparator = $directorySeparatorField.GetValue($singleton)
+    $savedConsole = $consoleField.GetValue($singleton)
+    $savedInitialY = $initialYField.GetValue($singleton)
+    $completion = $null
+    $completionError = $null
+    $restorationErrors = @()
     try {
         [void]$buffer.Clear()
         [void]$buffer.Append($InputScript)
@@ -207,16 +318,51 @@ function Invoke-PshGoal2PSReadLineCompletion {
         $runspaceField.SetValue($singleton, [Management.Automation.Runspaces.Runspace]::DefaultRunspace)
         $tabCountField.SetValue($singleton, 0)
         $tabCompletionsField.SetValue($singleton, $null)
-        return $getCompletionsMethod.Invoke($singleton, $null)
+        $consoleField.SetValue($singleton, $memoryConsole)
+        $completion = $getCompletionsMethod.Invoke($singleton, $null)
+    }
+    catch {
+        $completionError = $_.Exception
     }
     finally {
-        [void]$buffer.Clear()
-        [void]$buffer.Append($savedBuffer)
-        $currentField.SetValue($singleton, $savedCurrent)
-        $runspaceField.SetValue($singleton, $savedRunspace)
-        $tabCountField.SetValue($singleton, $savedTabCount)
-        $tabCompletionsField.SetValue($singleton, $savedTabCompletions)
+        $restoreActions = @(
+            { $consoleField.SetValue($singleton, $savedConsole) },
+            { $initialYField.SetValue($singleton, $savedInitialY) },
+            { $directorySeparatorField.SetValue($singleton, $savedDirectorySeparator) },
+            {
+                [void]$buffer.Clear()
+                [void]$buffer.Append($savedBuffer)
+            },
+            { $currentField.SetValue($singleton, $savedCurrent) },
+            { $runspaceField.SetValue($singleton, $savedRunspace) },
+            { $tabCountField.SetValue($singleton, $savedTabCount) },
+            { $tabCompletionsField.SetValue($singleton, $savedTabCompletions) }
+        )
+        foreach ($restoreAction in $restoreActions) {
+            try {
+                & $restoreAction
+            }
+            catch {
+                $restorationErrors += $_.Exception
+            }
+        }
     }
+
+    if ($restorationErrors.Count -gt 0) {
+        throw ('The PSReadLine completion test could not restore singleton state: {0}' -f @(
+            $restorationErrors | ForEach-Object { $_.Message }
+        ) -join '; ')
+    }
+    if ($null -ne $completionError) {
+        while ($null -ne $completionError.InnerException -and @(
+            [Reflection.TargetInvocationException],
+            [Management.Automation.MethodInvocationException]
+        ) -contains $completionError.GetType()) {
+            $completionError = $completionError.InnerException
+        }
+        throw $completionError
+    }
+    return $completion
 }
 
 $repositoryRootPath = [IO.Path]::GetFullPath($RepositoryRoot)
@@ -596,7 +742,7 @@ $initialization = Initialize-PshInteractive
 
     $readLineCompletion = Invoke-PshGoal2PSReadLineCompletion -InputScript $branchInput
     Assert-PshGoal2Condition ($null -ne $readLineCompletion) 'PSReadLine returned no completion object for Git input.'
-    Assert-PshGoal2Condition (@($readLineCompletion.CompletionMatches.CompletionText) -contains 'feature/test') 'The real PSReadLine MenuComplete path did not receive the Git ref candidate.'
+    Assert-PshGoal2Condition (@($readLineCompletion.CompletionMatches.CompletionText) -contains 'feature/test') 'The real PSReadLine completion core did not receive the Git ref candidate.'
 
     $headOutput = @(& $gitPath -C $gitRepository rev-parse HEAD)
     $headObjectId = [string]$headOutput[0]
