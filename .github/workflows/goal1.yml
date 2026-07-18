@@ -1,0 +1,48 @@
+name: Goal 1 validation
+
+on:
+  push:
+    branches:
+      - main
+      - 'goal1/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  module-and-specification:
+    name: ${{ matrix.label }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows PowerShell 5.1
+            shell: powershell
+          - label: PowerShell 7
+            shell: pwsh
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Report runtime
+        shell: ${{ matrix.shell }}
+        run: |
+          $PSVersionTable | Out-String | Write-Output
+          if ('${{ matrix.shell }}' -eq 'powershell' -and $PSVersionTable.PSVersion.Major -ne 5) {
+              throw 'The Windows PowerShell job must run PowerShell 5.1.'
+          }
+          if ('${{ matrix.shell }}' -eq 'pwsh' -and $PSVersionTable.PSVersion.Major -lt 7) {
+              throw 'The PowerShell job must run PowerShell 7 or later.'
+          }
+
+      - name: Check generated artifacts
+        shell: ${{ matrix.shell }}
+        run: ./scripts/Generate-CommandArtifacts.ps1 -Check
+
+      - name: Run Goal 1 acceptance
+        shell: ${{ matrix.shell }}
+        run: ./tests/Goal1.Acceptance.ps1

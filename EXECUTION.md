@@ -9,7 +9,7 @@ condition has direct evidence.
 | Goal | Status | Commit | Notes |
 | --- | --- | --- | --- |
 | Goal 0 | COMPLETE | `1f87695` | Safety baseline and repository |
-| Goal 1 | PENDING | - | Blocked on Goal 0 DoneWhen |
+| Goal 1 | IN_PROGRESS | pending | Module and machine-readable specification |
 | Goal 2 | PENDING | - | Blocked on Goal 1 DoneWhen |
 | Goal 3 | PENDING | - | Blocked on Goal 2 DoneWhen |
 | Goal 4 | PENDING | - | Blocked on Goal 3 DoneWhen |
@@ -95,3 +95,85 @@ Started: 2026-07-18 (Asia/Shanghai)
 
 None. All Goal 0 StopIf conditions were checked and not hit after remediation,
 and all Goal 0 DoneWhen conditions have direct evidence. Goal 1 may start.
+
+## Goal 1: Module And Machine-Readable Specification
+
+Started: 2026-07-18 (Asia/Shanghai)
+
+### Prerequisite
+
+- [x] Goal 0 is complete and all four Goal 0 DoneWhen checks have direct
+  evidence above.
+
+### Implementation Checklist
+
+- [x] Create a Windows PowerShell 5.1-compatible `Psh` module and manifest.
+- [x] Define all 64 command names, flags, exit codes, Core/Full backends, help,
+  examples, object APIs, and completion data in one structured specification.
+- [x] Define all management commands and JSON-capable interfaces in the same
+  specification.
+- [x] Generate `commands.json` deterministically from the specification.
+- [x] Generate the compatibility documentation from the specification.
+- [x] Generate argument completers from the specification.
+- [x] Implement `psh capabilities --json` with active Core/Full backends.
+- [x] Implement the `%LOCALAPPDATA%\Psh\versions\<version>` layout contract.
+- [x] Add stable `bootstrap.ps1`, default `config.psd1`, and atomic
+  `current.json` switching support.
+- [x] Add focused Goal 1 tests, including generated-artifact drift checks.
+- [x] Verify Core has no third-party utility executable dependency.
+- [x] Import the module in clean PowerShell 7 and verify 64 capabilities.
+- [ ] Import the module in clean Windows PowerShell 5.1 and verify 64
+  capabilities.
+- [x] Review the complete Goal 1 diff for secrets and unrelated files.
+- [ ] Commit Goal 1, push it, and record the commit SHA and test evidence.
+
+### StopIf Checks
+
+| Condition | State | Evidence / action |
+| --- | --- | --- |
+| Core unexpectedly requires PowerShell 7 | UNCHECKED | Real PS5.1 parser validation passed, but import is still pending on Windows CI because the VM effective policy is Restricted. |
+| Core requires administrator access | NOT_HIT | Acceptance uses an isolated current-user temporary layout; source scan found no elevation request. |
+| Core performs startup downloads | NOT_HIT | Module/bootstrap review and acceptance found no network API; import and bootstrap are local-only. |
+| Core requires third-party utility executables | NOT_HIT | Core reports all backends as `powershell`; source contains no EXE/DLL and acceptance passes without native tools. |
+
+### Evidence Collected
+
+- Authoritative specification:
+  `src/Psh/Specification/commands.psd1`, schema `1.0`, version `0.1.0`,
+  exactly 64 unique commands and management actions from PLAN.md.
+- Deterministic generator: PowerShell 7.6.3 ARM64 generated
+  `generated/commands.json`, `docs/compatibility.md`, and
+  `src/Psh/Generated/ArgumentCompleters.ps1`; a separate `-Check` run returned
+  `Generated command artifacts are up to date.`
+- PS7 test runtime: official PowerShell `v7.6.3` macOS ARM64 portable asset;
+  SHA256 `f0263c2072fe7d0953781c60497a574bea99b37237f2554a59ce4bad07de8d36`
+  matched the official `hashes.sha256` asset. The runtime remained under
+  `/private/tmp` and was not installed or added to PATH.
+- Clean PS7 acceptance output:
+  `Goal 1 acceptance passed: specification, generated artifacts, module`
+  `capabilities, safety constraints, and install layout.`
+- Direct capabilities output: Core reported 64 commands, no native backends,
+  exit `0`; Full reported 64 commands with only `fd,bat,rg,jq` native, exit
+  `0`.
+- Real VM PS5.1 runtime: `5.1.26100.8655`. Parser API read-only validation
+  returned `PS5.1_PARSE files=9 errors=0`.
+- VM import blocker: every `Get-ExecutionPolicy -List` scope is `Undefined`,
+  producing the Windows client effective `Restricted` policy. A normal,
+  non-bypassed `Import-Module` returned `PSSecurityException`,
+  `UnauthorizedAccess`, stating that script execution is disabled. No policy
+  or GPO was changed.
+- Safe alternative in progress: `.github/workflows/goal1.yml` will run the
+  same generated-artifact and acceptance tests on Windows x64 with native
+  Windows PowerShell 5.1 and PowerShell 7.
+
+### DoneWhen Audit
+
+- [ ] Module imports in a clean Windows PowerShell 5.1 session.
+- [x] Module imports in a clean PowerShell 7 session.
+- [x] `psh capabilities --json` reports all 64 commands and active backends.
+
+### Remaining Work
+
+Windows PowerShell 5.1 CI import and capability evidence, final diff review,
+commit, push, and evidence recording remain. Goal 2 must not start until the
+PS5.1 job passes and every Goal 1 DoneWhen check has direct evidence.
