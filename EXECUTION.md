@@ -8,7 +8,7 @@ condition has direct evidence.
 
 | Goal | Status | Commit | Notes |
 | --- | --- | --- | --- |
-| Goal 0 | IN_PROGRESS | pending | Safety baseline and repository |
+| Goal 0 | COMPLETE | `1f87695` | Safety baseline and repository |
 | Goal 1 | PENDING | - | Blocked on Goal 0 DoneWhen |
 | Goal 2 | PENDING | - | Blocked on Goal 1 DoneWhen |
 | Goal 3 | PENDING | - | Blocked on Goal 2 DoneWhen |
@@ -30,18 +30,18 @@ Started: 2026-07-18 (Asia/Shanghai)
 
 - [x] Reauthenticate the `Emvdy` GitHub account with `gh auth login`.
 - [x] Confirm that `Emvdy/psh` is absent or contains only this project.
-- [ ] Create or configure public repository `Emvdy/psh`.
+- [x] Create or configure public repository `Emvdy/psh`.
 - [x] Add `GPL-3.0-or-later` license and bilingual README files.
 - [x] Add contribution guide and security policy.
-- [ ] Configure protected GitHub Environment `release`.
-- [ ] Add `origin`, push `main`, and verify it is the default branch.
+- [x] Configure protected GitHub Environment `release`.
+- [x] Add `origin`, push `main`, and verify it is the default branch.
 - [x] Locate the exact Parallels VM named `Windows 11`.
 - [x] Record ARM64 architecture and Parallels Guest Tools state.
 - [x] Create a pre-install snapshot named `psh-preinstall-<timestamp>`.
 - [x] Record the pre-install snapshot ID.
 - [x] Run read-only guest diagnostics with `prlctl exec --current-user`.
 - [x] Review the complete Goal 0 diff for credentials and unrelated files.
-- [ ] Commit Goal 0 and record the commit SHA.
+- [x] Commit Goal 0 and record the commit SHA.
 
 ### StopIf Checks
 
@@ -63,6 +63,15 @@ Started: 2026-07-18 (Asia/Shanghai)
 - Repository ownership pre-check: authenticated `gh repo view Emvdy/psh`
   returned `Could not resolve to a Repository`, so no existing repository will
   be overwritten or repurposed.
+- Repository: <https://github.com/Emvdy/psh>, visibility `PUBLIC`; GitHub
+  identifies the license as GNU GPLv3.
+- Initial Goal 0 commit: `1f876951b5773bf56318db0da28d49126a9c58da`.
+- Initial push output reported a new `main` branch and configured it to track
+  `origin/main`.
+- Remote default branch: `main`; `git ls-remote --symref origin HEAD` returned
+  `ref: refs/heads/main` and the same commit SHA as local `HEAD`.
+- Protected Environment: `release`; API verification returned a
+  `required_reviewers` protection rule for GitHub user `Emvdy`.
 - VM inventory: exact name `Windows 11`, UUID
   `{acb3e79b-bc02-4c09-9620-275777f58a23}`, status `paused`.
 - VM architecture: `BIOS type: efi-arm64` and CPU `type=arm`.
@@ -73,15 +82,16 @@ Started: 2026-07-18 (Asia/Shanghai)
 - Passwordless guest diagnostic:
   `prlctl exec 'Windows 11' --current-user cmd.exe /d /c whoami` returned
   `emvdy217f\emvdy`.
+- Post-diagnostic VM status: `VM Windows 11 exist paused`.
 
 ### DoneWhen Audit
 
-- [ ] Remote accepts pushes.
-- [ ] `main` is the default branch.
+- [x] Remote accepts pushes.
+- [x] `main` is the default branch.
 - [x] Pre-install snapshot ID is recorded.
 - [x] `prlctl exec --current-user` runs read-only diagnostics.
 
 ### Remaining Work
 
-All unchecked Goal 0 items remain required. Goal 1 must not start until the
-four Goal 0 DoneWhen checks above have direct evidence.
+None. All Goal 0 StopIf conditions were checked and not hit after remediation,
+and all Goal 0 DoneWhen conditions have direct evidence. Goal 1 may start.
