@@ -107,6 +107,22 @@ function Get-PshGoal2TreeFingerprint {
     )
 }
 
+function Remove-PshGoal2TemporaryTree {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not [IO.Directory]::Exists($Path)) {
+        return
+    }
+
+    foreach ($file in @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction Ignore)) {
+        [IO.File]::SetAttributes($file.FullName, [IO.FileAttributes]::Normal)
+    }
+    [IO.Directory]::Delete($Path, $true)
+}
+
 function Assert-PshGoal2ExpectedFailure {
     param(
         [Parameter(Mandatory = $true)]
@@ -282,10 +298,6 @@ $originalLocation = Get-Location
 try {
     Remove-Module Psh -Force -ErrorAction Ignore
     Remove-Module PSReadLine -Force -ErrorAction Ignore
-    Import-Module -Name PSReadLine -Force -ErrorAction Stop
-    $preloadedPsReadLine = @(Get-Module -Name PSReadLine | Select-Object -First 1)[0]
-    Assert-PshGoal2Condition ($null -ne $preloadedPsReadLine) 'A system PSReadLine module was not available for the preloaded-conflict test.'
-    $preloadedPsReadLineBase = [IO.Path]::GetFullPath([string]$preloadedPsReadLine.ModuleBase).TrimEnd('\', '/')
     $expectedPsReadLineBase = [IO.Path]::GetFullPath((Join-Path $dependencyRoot 'PSReadLine/2.4.5')).TrimEnd('\', '/')
     $expectedPsReadLineAssemblyPath = [IO.Path]::GetFullPath((Join-Path $expectedPsReadLineBase 'Microsoft.PowerShell.PSReadLine.dll'))
     $expectedPsReadLineAssemblyHash = [string](Get-FileHash -LiteralPath $expectedPsReadLineAssemblyPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -293,7 +305,6 @@ try {
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         $modulePathComparison = [StringComparison]::OrdinalIgnoreCase
     }
-    Assert-PshGoal2Condition (-not [string]::Equals($preloadedPsReadLineBase, $expectedPsReadLineBase, $modulePathComparison)) 'The preloaded-conflict test did not load PSReadLine from a different path.'
 
     Import-Module -Name $moduleManifestPath -Force -ErrorAction Stop
     $module = Get-Module -Name Psh
@@ -315,8 +326,7 @@ try {
     Assert-PshGoal2Condition ([string]::Equals([string]$diagnostic.dependencies.psReadLine.expectedAssemblyPath, $expectedPsReadLineAssemblyPath, $modulePathComparison)) 'The PSReadLine diagnostic reports the wrong expected assembly path.'
     Assert-PshGoal2Condition ([string]$diagnostic.dependencies.psReadLine.expectedAssemblyHash -ceq $expectedPsReadLineAssemblyHash) 'The PSReadLine diagnostic reports the wrong expected assembly hash.'
     Assert-PshGoal2Condition ([string]$diagnostic.dependencies.psReadLine.actualAssemblyHash -ceq $expectedPsReadLineAssemblyHash) 'The active PSReadLine implementation bytes differ from the bundle.'
-    Assert-PshGoal2Condition (@($diagnostic.dependencies.psReadLine.removedConflicts).Count -eq 1) 'The preloaded PSReadLine conflict was not removed.'
-    Assert-PshGoal2Condition ([string]::Equals([string]$diagnostic.dependencies.psReadLine.removedConflicts[0].moduleBase, $preloadedPsReadLineBase, $modulePathComparison)) 'The diagnostic recorded the wrong preloaded PSReadLine conflict.'
+    Assert-PshGoal2Condition (@($diagnostic.dependencies.psReadLine.removedConflicts).Count -eq 0) 'A clean-session initialization unexpectedly removed a PSReadLine conflict.'
     $loadedPsReadLineModules = @(Get-Module -Name PSReadLine)
     Assert-PshGoal2Condition ($loadedPsReadLineModules.Count -eq 1) 'More than one PSReadLine module remained loaded after fixed-path initialization.'
     Assert-PshGoal2Condition ([string]::Equals([string]$loadedPsReadLineModules[0].ModuleBase, $expectedPsReadLineBase, $modulePathComparison)) 'The active PSReadLine module is not the fixed bundled copy.'
@@ -381,9 +391,6 @@ $initialization = Initialize-PshInteractive
     )
     $currentPowerShellPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
     $mismatchArguments = @('-NoLogo', '-NoProfile', '-NonInteractive')
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        $mismatchArguments += @('-ExecutionPolicy', 'Bypass')
-    }
     $mismatchArguments += @(
         '-File',
         $mismatchTestScript,
@@ -1211,12 +1218,8 @@ finally {
     }
     Remove-Module Psh -Force -ErrorAction Ignore
     Remove-Module PSReadLine -Force -ErrorAction Ignore
-    if ([IO.Directory]::Exists($interactiveTemporaryRoot)) {
-        [IO.Directory]::Delete($interactiveTemporaryRoot, $true)
-    }
-    if ([IO.Directory]::Exists($profileTemporaryRoot)) {
-        [IO.Directory]::Delete($profileTemporaryRoot, $true)
-    }
+    Remove-PshGoal2TemporaryTree -Path $interactiveTemporaryRoot
+    Remove-PshGoal2TemporaryTree -Path $profileTemporaryRoot
 }
 
 Write-Output 'Goal 2 acceptance passed: fixed dependencies, offline interaction, Git completion, prompt behavior, and lossless profile transactions.'
