@@ -9,7 +9,7 @@ condition has direct evidence.
 | Goal | Status | Commit | Notes |
 | --- | --- | --- | --- |
 | Goal 0 | COMPLETE | `1f87695` | Safety baseline and repository |
-| Goal 1 | IN_PROGRESS | pending | Module and machine-readable specification |
+| Goal 1 | COMPLETE | `6e5641c` | Module and machine-readable specification |
 | Goal 2 | PENDING | - | Blocked on Goal 1 DoneWhen |
 | Goal 3 | PENDING | - | Blocked on Goal 2 DoneWhen |
 | Goal 4 | PENDING | - | Blocked on Goal 3 DoneWhen |
@@ -122,16 +122,16 @@ Started: 2026-07-18 (Asia/Shanghai)
 - [x] Add focused Goal 1 tests, including generated-artifact drift checks.
 - [x] Verify Core has no third-party utility executable dependency.
 - [x] Import the module in clean PowerShell 7 and verify 64 capabilities.
-- [ ] Import the module in clean Windows PowerShell 5.1 and verify 64
+- [x] Import the module in clean Windows PowerShell 5.1 and verify 64
   capabilities.
 - [x] Review the complete Goal 1 diff for secrets and unrelated files.
-- [ ] Commit Goal 1, push it, and record the commit SHA and test evidence.
+- [x] Commit Goal 1, push it, and record the commit SHA and test evidence.
 
 ### StopIf Checks
 
 | Condition | State | Evidence / action |
 | --- | --- | --- |
-| Core unexpectedly requires PowerShell 7 | UNCHECKED | Real PS5.1 parser validation passed, but import is still pending on Windows CI because the VM effective policy is Restricted. |
+| Core unexpectedly requires PowerShell 7 | NOT_HIT | Windows x64 CI imported and exercised the module in Windows PowerShell 5.1.26100.32995. |
 | Core requires administrator access | NOT_HIT | Acceptance uses an isolated current-user temporary layout; source scan found no elevation request. |
 | Core performs startup downloads | NOT_HIT | Module/bootstrap review and acceptance found no network API; import and bootstrap are local-only. |
 | Core requires third-party utility executables | NOT_HIT | Core reports all backends as `powershell`; source contains no EXE/DLL and acceptance passes without native tools. |
@@ -162,18 +162,32 @@ Started: 2026-07-18 (Asia/Shanghai)
   non-bypassed `Import-Module` returned `PSSecurityException`,
   `UnauthorizedAccess`, stating that script execution is disabled. No policy
   or GPO was changed.
-- Safe alternative in progress: `.github/workflows/goal1.yml` will run the
-  same generated-artifact and acceptance tests on Windows x64 with native
-  Windows PowerShell 5.1 and PowerShell 7.
+- Safe alternative completed: `.github/workflows/goal1.yml` ran the same
+  generated-artifact and acceptance tests on Windows x64 with native Windows
+  PowerShell 5.1 and PowerShell 7.
+- Goal 1 implementation head: `6e5641cb34360124eade55545ed028b0b005debd`.
+- Final branch CI: <https://github.com/Emvdy/psh/actions/runs/29635418864>,
+  conclusion `success`. Both jobs and every non-cleanup test step succeeded.
+- Windows PowerShell job: version `5.1.26100.32995`, PSEdition `Desktop`;
+  generator `-Check` and Goal 1 acceptance both passed.
+- PowerShell job: version `7.6.3`, PSEdition `Core`, Win32NT;
+  generator `-Check` and Goal 1 acceptance both passed.
+- CI action supply chain: `actions/checkout` is pinned to immutable v6 commit
+  `df4cb1c069e1874edd31b4311f1884172cec0e10`; final logs contain no Node 20
+  deprecation warning.
+- Line-ending determinism: `.gitattributes` fixes generated and source text to
+  LF; the same byte-level `-Check` passed on PS5.1 and PS7 Windows jobs.
+- VM test-batch cleanup: original `pause-idle=on` was restored and
+  `prlctl status 'Windows 11'` returned `VM Windows 11 exist paused`.
 
 ### DoneWhen Audit
 
-- [ ] Module imports in a clean Windows PowerShell 5.1 session.
+- [x] Module imports in a clean Windows PowerShell 5.1 session.
 - [x] Module imports in a clean PowerShell 7 session.
 - [x] `psh capabilities --json` reports all 64 commands and active backends.
 
 ### Remaining Work
 
-Windows PowerShell 5.1 CI import and capability evidence, final diff review,
-commit, push, and evidence recording remain. Goal 2 must not start until the
-PS5.1 job passes and every Goal 1 DoneWhen check has direct evidence.
+None. All Goal 1 StopIf conditions were checked and not hit, and all Goal 1
+DoneWhen conditions have direct evidence. Goal 2 may start after this evidence
+commit is merged to `main` and the resulting `main` workflow is green.
