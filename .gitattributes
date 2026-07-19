@@ -25,3 +25,7 @@ src/Psh/Dependencies/PSReadLine/2.4.5/** binary
 src/Psh/Dependencies/PSCompletions/6.10.0/** binary
 licenses/PSReadLine-2.4.5/LICENSE.txt binary
 licenses/PSCompletions-6.10.0/LICENSE -text
+
+# Real-VM evidence hashes cover the original guest bytes, including CRLF.
+evidence/goal2/**/logs/*.json binary
+evidence/goal2/**/logs/*.log binary

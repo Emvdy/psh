@@ -1,0 +1,395 @@
+{
+    "schemaVersion":  1,
+    "evidenceId":  "goal2-20260719T025655Z-2412eb25",
+    "capturedAtUtc":  "2026-07-19T02:57:31.2224770Z",
+    "sourceCommit":  "2412eb252481d8eafe2637090ac947a9337df4f6",
+    "stagedVersion":  "0.1.0-vm.2412eb25",
+    "user":  "EMVDY217F\\emvdy",
+    "elevated":  false,
+    "processArchitecture":  "Arm64",
+    "windowsPowerShell":  {
+                              "version":  "5.1.26100.8655",
+                              "policies":  [
+                                               {
+                                                   "scope":  "MachinePolicy",
+                                                   "policy":  "Undefined"
+                                               },
+                                               {
+                                                   "scope":  "UserPolicy",
+                                                   "policy":  "Undefined"
+                                               },
+                                               {
+                                                   "scope":  "Process",
+                                                   "policy":  "Undefined"
+                                               },
+                                               {
+                                                   "scope":  "CurrentUser",
+                                                   "policy":  "RemoteSigned"
+                                               },
+                                               {
+                                                   "scope":  "LocalMachine",
+                                                   "policy":  "Undefined"
+                                               }
+                                           ],
+                              "log":  "C:\\Users\\emvdy\\AppData\\Local\\PshGoal2Evidence\\2412eb25-20260719T102118\\goal2-winps51-arm64.log"
+                          },
+    "powerShell7":  {
+                        "executable":  "C:\\Users\\emvdy\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe",
+                        "version":  "7.6.3",
+                        "architecture":  "Arm64",
+                        "policies":  [
+                                         {
+                                             "scope":  "MachinePolicy",
+                                             "policy":  "Undefined"
+                                         },
+                                         {
+                                             "scope":  "UserPolicy",
+                                             "policy":  "Undefined"
+                                         },
+                                         {
+                                             "scope":  "Process",
+                                             "policy":  "Undefined"
+                                         },
+                                         {
+                                             "scope":  "CurrentUser",
+                                             "policy":  "RemoteSigned"
+                                         },
+                                         {
+                                             "scope":  "LocalMachine",
+                                             "policy":  "RemoteSigned"
+                                         }
+                                     ],
+                        "allUsersConfig":  {
+                                               "path":  "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.6.3.0_arm64__8wekyb3d8bbwe\\powershell.config.json",
+                                               "sha256":  "98c0e5b6ee17eb8b8f4e4940c2b2528689cec8470db4bde427ad16d90d6a52d4",
+                                               "document":  {
+                                                                "Microsoft.PowerShell:ExecutionPolicy":  "RemoteSigned",
+                                                                "WindowsPowerShellCompatibilityModuleDenyList":  [
+                                                                                                                     "PSScheduledJob",
+                                                                                                                     "BestPractices",
+                                                                                                                     "UpdateServices"
+                                                                                                                 ]
+                                                            }
+                                           },
+                        "currentUserConfig":  {
+                                                  "path":  "C:\\Mac\\Home\\Documents\\PowerShell\\powershell.config.json",
+                                                  "sha256":  "07b07a34cba62b4a50e941fa9f568e2719c5573853ec2df77a4314f64c5d9bb2",
+                                                  "document":  {
+                                                                   "Microsoft.PowerShell:ExecutionPolicy":  "RemoteSigned"
+                                                               }
+                                              },
+                        "log":  "C:\\Users\\emvdy\\AppData\\Local\\PshGoal2Evidence\\2412eb25-20260719T102118\\goal2-pwsh7-arm64.log"
+                    },
+    "install":  {
+                    "root":  "C:\\Users\\emvdy\\AppData\\Local\\Psh",
+                    "currentPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\current.json",
+                    "current":  {
+                                    "schemaVersion":  1,
+                                    "version":  "0.1.0-vm.2412eb25"
+                                },
+                    "moduleRoot":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh",
+                    "moduleTree":  [
+                                       "Dependencies/interactive.lock.json|13336|d49ce116c7d97359cabfacbcc3b13c342ce1742f3c9dfa60c39ea13ea78293b7",
+                                       "Dependencies/PSCompletions/6.10.0/completions/psc/config.json|73|78954abccf6a908cba29635b3e3eb54263f628390857714c1e3128f1c3326c9b",
+                                       "Dependencies/PSCompletions/6.10.0/completions/psc/hooks.ps1|7089|8892db60ca6580a6a157902f8bb92e30ce85ae109b7c1fdf3eb47e02daf5efb5",
+                                       "Dependencies/PSCompletions/6.10.0/completions/psc/language/en-US.json|95436|baaab326319e9f7615ef93211b84dacc928f3620bc52b2fe37ae992060eae0d1",
+                                       "Dependencies/PSCompletions/6.10.0/completions/psc/language/zh-CN.json|93191|0383d95e2a3dba30e07de1d074997360d31a05267e22467d317bc21d39214074",
+                                       "Dependencies/PSCompletions/6.10.0/PSCompletions.ps1|120700|b32a5bc04e9dbb099daf9aa1cc9b6e2d2927b589ac4847ddffa8e11f357b8df5",
+                                       "Dependencies/PSCompletions/6.10.0/PSCompletions.psd1|1631|17b4203e9ade01a56c01c3e6cafd94db9e55f8d7d76d599ff64645c4a8a3c1ff",
+                                       "Dependencies/PSCompletions/6.10.0/PSCompletions.psm1|55557|ab67a3e31d1a57d8c53f5dbf20586a0e6cc00ab781033c2c6eed5e320f3bb610",
+                                       "Dependencies/PSReadLine/2.4.5/Microsoft.PowerShell.Pager.dll|16784|451994c3d3e38d939b4fa5f8594d0207840f45e7a210aa75f81aef85aa17c592",
+                                       "Dependencies/PSReadLine/2.4.5/Microsoft.PowerShell.PSReadLine.dll|339528|f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                       "Dependencies/PSReadLine/2.4.5/net6plus/Microsoft.PowerShell.PSReadLine.Polyfiller.dll|14920|6d33ea289b405c64bf5daa9c59e459596cac59ece399d0d215ee9f3d46afd675",
+                                       "Dependencies/PSReadLine/2.4.5/netstd/Microsoft.PowerShell.PSReadLine.Polyfiller.dll|16928|2e63dc86d9240243ccfb07da5d0b4fce2bc5ce5f9952658a7ce68c26bcd3e14c",
+                                       "Dependencies/PSReadLine/2.4.5/PSReadLine.format.ps1xml|26820|1ca887463598d38aa18236a97a4193b2228d1d8434fa73cc8c7932f42a0565cf",
+                                       "Dependencies/PSReadLine/2.4.5/PSReadLine.psd1|15471|dd8766bd4db0c1d17111b81d145d32448f61f48451d51c780a79be9ca98d837e",
+                                       "Dependencies/PSReadLine/2.4.5/PSReadLine.psm1|15076|9bc0252f616067ca5ef1d0328ec0b97c7d31c757f9fc80adee234ea6132a9c7e",
+                                       "Generated/ArgumentCompleters.ps1|7752|eb7e11b893a40a1d090d0329d1648cf81e126040f39024a82ef494cb1075022b",
+                                       "Interactive/GitCompletion.ps1|16061|cfe03610380b44bc4a70c13555340c6583aa6f7fafbff17dc288f7f733e3a08c",
+                                       "Interactive/Initialize-PshInteractive.ps1|42211|4c1a2fb2cff0aa44244c41e11d612ecd5e4a2a36659f9204ebf4e8084c65f591",
+                                       "Interactive/Prompt.ps1|10441|6aead301f6fcf46bdf76d8213d0ce6434c05b21a15262b42963f53424671d433",
+                                       "Psh.psd1|952|af0c80f072d553e65fced387330da73f7cbfe09c2a057f6ae1dca4aa9acd7bff",
+                                       "Psh.psm1|27265|68f4e6930514651026b0cae115eb88f585859483813e9621d48518ed86ad9698",
+                                       "Specification/commands.psd1|33793|ed1b8be3699513e79b71cbd856e233c4849d32c46a0bdd349b00d03cbfd8e9da"
+                                   ],
+                    "profiles":  [
+                                     {
+                                         "path":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\profile.ps1",
+                                         "sha256":  "7d337451e1d0c7632c2a46a1d01258925990aaa90f5f4098e9cba5d40cba3cc1",
+                                         "startCount":  1,
+                                         "endCount":  1
+                                     },
+                                     {
+                                         "path":  "C:\\Mac\\Home\\Documents\\PowerShell\\profile.ps1",
+                                         "sha256":  "7d337451e1d0c7632c2a46a1d01258925990aaa90f5f4098e9cba5d40cba3cc1",
+                                         "startCount":  1,
+                                         "endCount":  1
+                                     }
+                                 ],
+                    "startup":  {
+                                    "windowsPowerShell":  [
+                                                              {
+                                                                  "durationMilliseconds":  832,
+                                                                  "exitCode":  0,
+                                                                  "log":  "C:\\Users\\emvdy\\AppData\\Local\\PshGoal2Evidence\\2412eb25-20260719T102118\\startup-winps51-cold.log",
+                                                                  "probe":  {
+                                                                                "pshCount":  1,
+                                                                                "pshModuleBase":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh",
+                                                                                "psReadLineCount":  1,
+                                                                                "psReadLineVersion":  "2.4.5",
+                                                                                "psReadLineModuleBase":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5",
+                                                                                "implementingDllPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                                                "implementingDllHash":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                                                "assemblies":  [
+                                                                                                   {
+                                                                                                       "fullName":  "Microsoft.PowerShell.PSReadLine, Version=2.4.5.0, Culture=neutral, PublicKeyToken=null",
+                                                                                                       "path":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                                                                       "sha256":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2"
+                                                                                                   }
+                                                                                               ],
+                                                                                "psCompletionsCount":  0,
+                                                                                "jobCount":  0,
+                                                                                "profile":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\profile.ps1"
+                                                                            }
+                                                              },
+                                                              {
+                                                                  "durationMilliseconds":  730,
+                                                                  "exitCode":  0,
+                                                                  "log":  "C:\\Users\\emvdy\\AppData\\Local\\PshGoal2Evidence\\2412eb25-20260719T102118\\startup-winps51-warm.log",
+                                                                  "probe":  {
+                                                                                "pshCount":  1,
+                                                                                "pshModuleBase":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh",
+                                                                                "psReadLineCount":  1,
+                                                                                "psReadLineVersion":  "2.4.5",
+                                                                                "psReadLineModuleBase":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5",
+                                                                                "implementingDllPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                                                "implementingDllHash":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                                                "assemblies":  [
+                                                                                                   {
+                                                                                                       "fullName":  "Microsoft.PowerShell.PSReadLine, Version=2.4.5.0, Culture=neutral, PublicKeyToken=null",
+                                                                                                       "path":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                                                                       "sha256":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2"
+                                                                                                   }
+                                                                                               ],
+                                                                                "psCompletionsCount":  0,
+                                                                                "jobCount":  0,
+                                                                                "profile":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\profile.ps1"
+                                                                            }
+                                                              }
+                                                          ],
+                                    "powerShell7":  [
+                                                        {
+                                                            "durationMilliseconds":  866,
+                                                            "exitCode":  0,
+                                                            "log":  "C:\\Users\\emvdy\\AppData\\Local\\PshGoal2Evidence\\2412eb25-20260719T102118\\startup-pwsh7-cold.log",
+                                                            "probe":  {
+                                                                          "pshCount":  1,
+                                                                          "pshModuleBase":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh",
+                                                                          "psReadLineCount":  1,
+                                                                          "psReadLineVersion":  "2.4.5",
+                                                                          "psReadLineModuleBase":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules\\PSReadLine\\2.4.5",
+                                                                          "implementingDllPath":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                                          "implementingDllHash":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                                          "assemblies":  [
+                                                                                             {
+                                                                                                 "fullName":  "Microsoft.PowerShell.PSReadLine, Version=2.4.5.0, Culture=neutral, PublicKeyToken=null",
+                                                                                                 "path":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                                                                 "sha256":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2"
+                                                                                             }
+                                                                                         ],
+                                                                          "psCompletionsCount":  0,
+                                                                          "jobCount":  0,
+                                                                          "profile":  "C:\\Mac\\Home\\Documents\\PowerShell\\profile.ps1"
+                                                                      }
+                                                        },
+                                                        {
+                                                            "durationMilliseconds":  807,
+                                                            "exitCode":  0,
+                                                            "log":  "C:\\Users\\emvdy\\AppData\\Local\\PshGoal2Evidence\\2412eb25-20260719T102118\\startup-pwsh7-warm.log",
+                                                            "probe":  {
+                                                                          "pshCount":  1,
+                                                                          "pshModuleBase":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh",
+                                                                          "psReadLineCount":  1,
+                                                                          "psReadLineVersion":  "2.4.5",
+                                                                          "psReadLineModuleBase":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules\\PSReadLine\\2.4.5",
+                                                                          "implementingDllPath":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                                          "implementingDllHash":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                                          "assemblies":  [
+                                                                                             {
+                                                                                                 "fullName":  "Microsoft.PowerShell.PSReadLine, Version=2.4.5.0, Culture=neutral, PublicKeyToken=null",
+                                                                                                 "path":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                                                                 "sha256":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2"
+                                                                                             }
+                                                                                         ],
+                                                                          "psCompletionsCount":  0,
+                                                                          "jobCount":  0,
+                                                                          "profile":  "C:\\Mac\\Home\\Documents\\PowerShell\\profile.ps1"
+                                                                      }
+                                                        }
+                                                    ]
+                                },
+                    "psReadLineProjection":  {
+                                                 "whatIf":  [
+                                                                {
+                                                                    "SourcePath":  "C:\\Users\\emvdy\\AppData\\Local\\Temp\\psh-goal2-source-2412eb2\\src\\Psh\\Dependencies\\PSReadLine\\2.4.5",
+                                                                    "ModuleRoot":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules",
+                                                                    "TargetPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5",
+                                                                    "Version":  "2.4.5",
+                                                                    "Disposition":  "created",
+                                                                    "Status":  "WouldCreate",
+                                                                    "Owned":  true,
+                                                                    "Changed":  false,
+                                                                    "FileCount":  7,
+                                                                    "TreeSha256":  "ba8c4b0064725aa107f024d243d9f8af8ab43791a4bdda39893d27b22ae6f79d",
+                                                                    "StateRoot":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\psreadline-projection-state",
+                                                                    "ManifestPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\psreadline-projection-state\\manifest.json",
+                                                                    "ManifestState":  "planned"
+                                                                },
+                                                                {
+                                                                    "SourcePath":  "C:\\Users\\emvdy\\AppData\\Local\\Temp\\psh-goal2-source-2412eb2\\src\\Psh\\Dependencies\\PSReadLine\\2.4.5",
+                                                                    "ModuleRoot":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules",
+                                                                    "TargetPath":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules\\PSReadLine\\2.4.5",
+                                                                    "Version":  "2.4.5",
+                                                                    "Disposition":  "created",
+                                                                    "Status":  "WouldCreate",
+                                                                    "Owned":  true,
+                                                                    "Changed":  false,
+                                                                    "FileCount":  7,
+                                                                    "TreeSha256":  "ba8c4b0064725aa107f024d243d9f8af8ab43791a4bdda39893d27b22ae6f79d",
+                                                                    "StateRoot":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\psreadline-projection-state",
+                                                                    "ManifestPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\psreadline-projection-state\\manifest.json",
+                                                                    "ManifestState":  "planned"
+                                                                }
+                                                            ],
+                                                 "results":  [
+                                                                 {
+                                                                     "SourcePath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Dependencies\\PSReadLine\\2.4.5",
+                                                                     "ModuleRoot":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules",
+                                                                     "TargetPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5",
+                                                                     "Version":  "2.4.5",
+                                                                     "Disposition":  "created",
+                                                                     "Status":  "Created",
+                                                                     "Owned":  true,
+                                                                     "Changed":  true,
+                                                                     "FileCount":  7,
+                                                                     "TreeSha256":  "ba8c4b0064725aa107f024d243d9f8af8ab43791a4bdda39893d27b22ae6f79d",
+                                                                     "StateRoot":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\psreadline-projection-state",
+                                                                     "ManifestPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\psreadline-projection-state\\manifest.json",
+                                                                     "ManifestState":  "complete"
+                                                                 },
+                                                                 {
+                                                                     "SourcePath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Dependencies\\PSReadLine\\2.4.5",
+                                                                     "ModuleRoot":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules",
+                                                                     "TargetPath":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules\\PSReadLine\\2.4.5",
+                                                                     "Version":  "2.4.5",
+                                                                     "Disposition":  "created",
+                                                                     "Status":  "Created",
+                                                                     "Owned":  true,
+                                                                     "Changed":  true,
+                                                                     "FileCount":  7,
+                                                                     "TreeSha256":  "ba8c4b0064725aa107f024d243d9f8af8ab43791a4bdda39893d27b22ae6f79d",
+                                                                     "StateRoot":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\psreadline-projection-state",
+                                                                     "ManifestPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\psreadline-projection-state\\manifest.json",
+                                                                     "ManifestState":  "complete"
+                                                                 }
+                                                             ],
+                                                 "moduleBases":  {
+                                                                     "windowsPowerShell":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5",
+                                                                     "powerShell7":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules\\PSReadLine\\2.4.5"
+                                                                 },
+                                                 "manifestPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\psreadline-projection-state\\manifest.json",
+                                                 "manifestHash":  "cb00018b8e7fc9797d9b6fb3dd042c91f28a4bb07821a7e55ca272bbbfe5d5e0",
+                                                 "manifest":  {
+                                                                  "schemaVersion":  1,
+                                                                  "product":  "Psh",
+                                                                  "component":  "PSReadLineProjection",
+                                                                  "version":  "2.4.5",
+                                                                  "state":  "complete",
+                                                                  "operation":  "install",
+                                                                  "transactionId":  "51b3f1831f164efabfa38abd8fa4c9ee",
+                                                                  "sourcePath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Dependencies\\PSReadLine\\2.4.5",
+                                                                  "fileCount":  7,
+                                                                  "treeSha256":  "ba8c4b0064725aa107f024d243d9f8af8ab43791a4bdda39893d27b22ae6f79d",
+                                                                  "files":  [
+                                                                                {
+                                                                                    "relativePath":  "Microsoft.PowerShell.PSReadLine.dll",
+                                                                                    "length":  339528,
+                                                                                    "sha256":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2"
+                                                                                },
+                                                                                {
+                                                                                    "relativePath":  "Microsoft.PowerShell.Pager.dll",
+                                                                                    "length":  16784,
+                                                                                    "sha256":  "451994c3d3e38d939b4fa5f8594d0207840f45e7a210aa75f81aef85aa17c592"
+                                                                                },
+                                                                                {
+                                                                                    "relativePath":  "PSReadLine.format.ps1xml",
+                                                                                    "length":  26820,
+                                                                                    "sha256":  "1ca887463598d38aa18236a97a4193b2228d1d8434fa73cc8c7932f42a0565cf"
+                                                                                },
+                                                                                {
+                                                                                    "relativePath":  "PSReadLine.psd1",
+                                                                                    "length":  15471,
+                                                                                    "sha256":  "dd8766bd4db0c1d17111b81d145d32448f61f48451d51c780a79be9ca98d837e"
+                                                                                },
+                                                                                {
+                                                                                    "relativePath":  "PSReadLine.psm1",
+                                                                                    "length":  15076,
+                                                                                    "sha256":  "9bc0252f616067ca5ef1d0328ec0b97c7d31c757f9fc80adee234ea6132a9c7e"
+                                                                                },
+                                                                                {
+                                                                                    "relativePath":  "net6plus/Microsoft.PowerShell.PSReadLine.Polyfiller.dll",
+                                                                                    "length":  14920,
+                                                                                    "sha256":  "6d33ea289b405c64bf5daa9c59e459596cac59ece399d0d215ee9f3d46afd675"
+                                                                                },
+                                                                                {
+                                                                                    "relativePath":  "netstd/Microsoft.PowerShell.PSReadLine.Polyfiller.dll",
+                                                                                    "length":  16928,
+                                                                                    "sha256":  "2e63dc86d9240243ccfb07da5d0b4fce2bc5ce5f9952658a7ce68c26bcd3e14c"
+                                                                                }
+                                                                            ],
+                                                                  "targets":  [
+                                                                                  {
+                                                                                      "moduleRoot":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules",
+                                                                                      "targetPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5",
+                                                                                      "disposition":  "created",
+                                                                                      "createdParentPaths":  [
+                                                                                                                 "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules",
+                                                                                                                 "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine"
+                                                                                                             ]
+                                                                                  },
+                                                                                  {
+                                                                                      "moduleRoot":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules",
+                                                                                      "targetPath":  "C:\\Mac\\Home\\Documents\\PowerShell\\Modules\\PSReadLine\\2.4.5",
+                                                                                      "disposition":  "created",
+                                                                                      "createdParentPaths":  [
+                                                                                                                 "C:\\Mac\\Home\\Documents\\PowerShell\\Modules",
+                                                                                                                 "C:\\Mac\\Home\\Documents\\PowerShell\\Modules\\PSReadLine"
+                                                                                                             ]
+                                                                                  }
+                                                                              ]
+                                                              }
+                                             }
+                },
+    "tools":  {
+                  "gitPath":  "C:\\Program Files\\Git\\cmd\\git.exe",
+                  "gitVersion":  "git version 2.55.0.windows.3",
+                  "gitMachine":  "AA64",
+                  "codePath":  "C:\\Users\\emvdy\\AppData\\Local\\Programs\\Microsoft VS Code\\bin\\code.cmd",
+                  "codeVersion":  [
+                                      "1.126.0",
+                                      "7e7950df89d055b5a378379db9ee14290772148a",
+                                      "arm64"
+                                  ],
+                  "codeMachine":  "AA64",
+                  "codeExtensions":  [
+                                         "ms-vscode.powershell@2025.4.0"
+                                     ]
+              },
+    "fixture":  {
+                    "path":  "C:\\Users\\emvdy\\Psh 验收 空格\\repo",
+                    "branches":  [
+                                     "feature/vscode-acceptance",
+                                     "main"
+                                 ]
+                }
+}

@@ -10,7 +10,7 @@ condition has direct evidence.
 | --- | --- | --- | --- |
 | Goal 0 | COMPLETE | `1f87695` | Safety baseline and repository |
 | Goal 1 | COMPLETE | `83ed21f` | Module and machine-readable specification |
-| Goal 2 | IN_PROGRESS | `380726f` | Automated matrix complete; real VM interaction pending |
+| Goal 2 | IN_PROGRESS | `2412eb2` | Real VM DoneWhen passed; evidence commit and CI pending |
 | Goal 3 | PENDING | - | Blocked on Goal 2 DoneWhen |
 | Goal 4 | PENDING | - | Blocked on Goal 3 DoneWhen |
 | Goal 5 | PENDING | - | Blocked on Goal 4 DoneWhen |
@@ -231,7 +231,7 @@ Started: 2026-07-18 (Asia/Shanghai)
   markers, and startup timing.
 - [x] Run the Goal 2 automated matrix in Windows PowerShell 5.1 and PowerShell
   7 CI.
-- [ ] Verify Tab, ListView, Ctrl+R, Chinese/space paths, and Git completion in
+- [x] Verify Tab, ListView, Ctrl+R, Chinese/space paths, and Git completion in
   VS Code on the real Windows 11 ARM64 VM.
 - [x] Review the Goal 2 diff for secrets, caches, binaries, and unrelated files.
 - [ ] Commit Goal 2, push it, and record commit, CI, VM logs, and screenshots.
@@ -240,25 +240,33 @@ Started: 2026-07-18 (Asia/Shanghai)
 
 | Condition | State | Evidence / action |
 | --- | --- | --- |
-| Existing profile markers are malformed | NOT HIT (automated) | Five unmatched, duplicated, reversed, inline, or modified variants caused whole-batch refusal with zero profile/state writes. The complete matrix passed in local PS7, Windows PowerShell 5.1, and Windows PS7. |
-| VT is unavailable with no safe fallback | NOT HIT (automated) | Redirected output disabled prediction with a structured reason while keys and the ANSI-free ASCII prompt remained available. Windows CI passed; real VS Code validation remains pending. |
-| Shell startup becomes noticeably blocked | NOT HIT (automated) | Fresh local fixed-bundle initialization measured 229 ms cold and 73 ms warm, created zero jobs, did not import PSCompletions, and left the dependency tree byte-identical. Both Windows jobs also passed the enforced cold/warm timing bounds; real VM timing remains pending. |
+| Existing profile markers are malformed | NOT HIT | Five unmatched, duplicated, reversed, inline, or modified variants caused whole-batch refusal with zero profile/state writes. Both real-VM strict session records verify one exact ordered marker pair in each target profile. |
+| VT is unavailable with no safe fallback | NOT HIT | Both real VS Code sessions reported supported terminal capabilities and enabled `History + ListView`. Redirected-output automation still verified the ANSI-free prompt and structured non-VT fallback. |
+| Shell startup becomes noticeably blocked | NOT HIT | Real ARM64 profile probes measured WinPS `832/730 ms` cold/warm and PowerShell 7 `866/807 ms`, all below `5000 ms`, with one output record, zero jobs, and no imported PSCompletions module. |
 
-### Known Environment Gate
+### Execution Policy Authorization
 
-- The real VM currently has all execution-policy scopes `Undefined`, yielding
-  effective `Restricted`. Normal profile/module script loading is blocked.
-  No GPO or policy was changed and no bypass was used. Automated implementation
-  can proceed, but VM interactive acceptance will require a user-approved
-  execution-policy/deployment path before Goal 2 can complete.
+- On 2026-07-19 the user authorized `RemoteSigned` at `CurrentUser` only.
+  Windows PowerShell retained `MachinePolicy`, `UserPolicy`, `Process`, and
+  `LocalMachine` as `Undefined`. No `Bypass` process or GPO change was used.
+- PowerShell 7's official MSIX package independently reports
+  `LocalMachine=RemoteSigned` from its immutable `$PSHOME/powershell.config.json`.
+  The acceptance run did not write that package file; its audited SHA-256 is
+  `98c0e5b6ee17eb8b8f4e4940c2b2528689cec8470db4bde427ad16d90d6a52d4`.
+  The CurrentUser config and complete scope evidence are retained in both
+  `prepare.json` and the PowerShell 7 session JSON.
 
 ### DoneWhen Audit
 
-- [ ] VS Code shows completions below the prompt.
-- [ ] History view acceptance passes.
-- [ ] Chinese paths pass interactive acceptance.
-- [ ] Paths with spaces pass interactive acceptance.
-- [ ] Git completion passes interactive acceptance.
+- [x] VS Code shows completions below the prompt in both shells: see the two
+  `git-command-menu` images in the retained evidence set.
+- [x] History view acceptance passes: both shells show `History + ListView`,
+  reverse search, and prefix Up/Down results.
+- [x] Chinese paths pass interactive acceptance: every final prompt and both
+  strict session JSON files retain `Psh 验收 空格`.
+- [x] Paths with spaces pass interactive acceptance in the same fixture.
+- [x] Git completion passes: command and ref menus appear below the prompt and
+  the completed ref is executed into `feature/vscode-acceptance` in both shells.
 
 ### Automated Evidence
 
@@ -277,9 +285,12 @@ Started: 2026-07-18 (Asia/Shanghai)
   `c1d0047c8a0505b46cfcb2146a58aec3ec1467c3`,
   `0f872860c9b86e68812f961b30561c88e72eb937`,
   `2eaac03b1ad8692b9e5093361b3362381c1f9620`, and
-  `380726f1b5f32b5e656e1f0742a71626e3a8cf8b`.
-- Final branch CI: <https://github.com/Emvdy/psh/actions/runs/29643665073>,
-  conclusion `success` at head `380726f1b5f32b5e656e1f0742a71626e3a8cf8b`.
+  `380726f1b5f32b5e656e1f0742a71626e3a8cf8b`,
+  `ecaa674611a9f3c229456d59ead178e7135f800f`,
+  `589650805b241c781d065a8102151f1e155f2b1e`, and
+  `2412eb252481d8eafe2637090ac947a9337df4f6`.
+- Accepted runtime CI: <https://github.com/Emvdy/psh/actions/runs/29669928412>,
+  conclusion `success` at head `2412eb252481d8eafe2637090ac947a9337df4f6`.
   Both jobs and every non-cleanup step succeeded.
 - Windows PowerShell job used `5.1.26100.32995`, PSEdition `Desktop`; the
   PowerShell job used `7.6.3`, PSEdition `Core`, platform `Win32NT`. Both used
@@ -320,15 +331,41 @@ Started: 2026-07-18 (Asia/Shanghai)
   directory mutation, startup output, global state, and a network-capable
   update job. `Test-ModuleManifest` metadata validation caused zero writes,
   modules, variables, aliases, or jobs.
-- During CI diagnosis the `Windows 11` VM was temporarily resumed only for
-  read-only availability checks. Effective execution policy remained
-  `Restricted`, Git was not installed, no policy or GPO was changed, and
-  `prlctl status 'Windows 11'` again reported `paused` after the check.
+- During early CI diagnosis the `Windows 11` VM was temporarily resumed only
+  for read-only availability checks. The later user-authorized CurrentUser
+  policy change and official Git/VS Code setup are fully captured by the final
+  VM evidence below; no GPO or Windows PowerShell LocalMachine scope changed.
+
+### Real VM Evidence
+
+- Stable evidence root:
+  `evidence/goal2/goal2-20260719T025655Z-2412eb25/`. Its `README.md` maps each
+  DoneWhen item to direct screenshots, records the input method, and explains
+  the PowerShell 7 packaged policy configuration. `SHA256SUMS` covers the
+  README, 9 original logs/JSON files, and 19 screenshots.
+- VM prepare record SHA-256:
+  `c3f3fc8d934f3167b6ca47c45899b08945ea17983f3beab0af35954a03186110`.
+  It proves non-elevated Windows 11 ARM64, VS Code `1.126.0` ARM64, PowerShell
+  extension `2025.4.0`, PowerShell `7.6.3` ARM64, Git for Windows
+  `2.55.0.windows.3` AA64, both profile targets, and four startup probes.
+- Windows PowerShell strict session record SHA-256:
+  `6d9899a133fa72400ffb3480990f287d412c4b8f30e3d71024e5a7d12d004fbd`.
+  PID `11768` reported Desktop `5.1.26100.8655`, ARM64, ConsoleHost, VS Code
+  shell integration, exact handlers, `History + ListView`, and the accepted
+  CJK/space Git fixture.
+- PowerShell 7 strict session record SHA-256:
+  `b6cfc38d19556b348da62ea70a205445b68f6b115926fec3aeaeb1080d5c17d4`.
+  PID `1572` reported Core `7.6.3`, ARM64, ConsoleHost, and the same strict
+  interaction, projection, prompt, profile, shell-integration, and Git state.
+- Both sessions loaded exactly one PSReadLine `2.4.5` assembly from the
+  CurrentUser projection. The implementation DLL SHA-256 is
+  `f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2`;
+  the accepted VS Code `shellIntegration.ps1` SHA-256 is
+  `7d27a8cce8c3b9a7e6cb0045a2035f303c34d228b23b6619fed1934a4027a4db`.
 
 ### Remaining Work
 
-Real Windows 11 ARM64 VS Code acceptance, screenshots, and final Goal 2 VM
-evidence remain. The automated Windows PowerShell 5.1 and PowerShell 7 matrix,
-diff/secret review, implementation commits, and branch push are complete. The
-VM execution-policy gate still requires an approved deployment path. Goal 3
-must not start until every Goal 2 DoneWhen check has direct evidence.
+All implementation, automated, and real Windows 11 ARM64 DoneWhen checks now
+have direct evidence. The only remaining Goal 2 work is to commit and push the
+stable evidence set, obtain successful CI for that evidence commit, and record
+its commit/run in this ledger. Goal 3 must not start before that final gate.

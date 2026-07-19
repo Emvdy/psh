@@ -1,0 +1,4 @@
+Interactive dependency verification passed: 2 fixed components, 14 independently pinned runtime files, and 2 verified licenses.
+What if: Performing the operation "Project verified PSReadLine 2.4.5 and record current-user ownership state" on target "C:\Users\emvdy\AppData\Local\Temp\p2p-1be76d9a0d31\lifecycle\WindowsPowerShell\Modules\PSReadLine\2.4.5, C:\Users\emvdy\AppData\Local\Temp\p2p-1be76d9a0d31\lifecycle\PowerShell\Modules\PSReadLine\2.4.5".
+What if: Performing the operation "Remove unchanged Psh-owned PSReadLine projections and projection state" on target "C:\Users\emvdy\AppData\Local\Temp\p2p-1be76d9a0d31\lifecycle\WindowsPowerShell\Modules\PSReadLine\2.4.5, C:\Users\emvdy\AppData\Local\Temp\p2p-1be76d9a0d31\lifecycle\PowerShell\Modules\PSReadLine\2.4.5".
+Goal 2 acceptance passed: fixed dependencies, safe PSReadLine projection, offline interaction, Git completion, prompt behavior, and lossless profile transactions.

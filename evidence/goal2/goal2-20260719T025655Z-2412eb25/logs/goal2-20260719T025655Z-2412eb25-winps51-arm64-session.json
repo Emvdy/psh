@@ -1,0 +1,380 @@
+{
+    "schemaVersion":  1,
+    "evidenceId":  "goal2-20260719T025655Z-2412eb25",
+    "capturedAtUtc":  "2026-07-19T04:10:03.4131378Z",
+    "expectedVersion":  "0.1.0-vm.2412eb25",
+    "process":  {
+                    "pid":  11768,
+                    "executable":  "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                    "version":  "5.1.26100.8655",
+                    "edition":  "Desktop",
+                    "architecture":  "Arm64",
+                    "shellId":  "winps51-arm64",
+                    "hostName":  "ConsoleHost",
+                    "term":  "",
+                    "termProgram":  "vscode"
+                },
+    "executionPolicy":  {
+                            "effective":  "RemoteSigned",
+                            "scopes":  [
+                                           {
+                                               "scope":  "MachinePolicy",
+                                               "policy":  "Undefined"
+                                           },
+                                           {
+                                               "scope":  "UserPolicy",
+                                               "policy":  "Undefined"
+                                           },
+                                           {
+                                               "scope":  "Process",
+                                               "policy":  "Undefined"
+                                           },
+                                           {
+                                               "scope":  "CurrentUser",
+                                               "policy":  "RemoteSigned"
+                                           },
+                                           {
+                                               "scope":  "LocalMachine",
+                                               "policy":  "Undefined"
+                                           }
+                                       ],
+                            "allUsersConfig":  null,
+                            "currentUserConfig":  null
+                        },
+    "install":  {
+                    "root":  "C:\\Users\\emvdy\\AppData\\Local\\Psh",
+                    "currentPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\current.json",
+                    "currentHash":  "518d8c2ad4759b9172d1b697eff39f6caee70a2a8ecbebd00714265e8351ca93",
+                    "current":  {
+                                    "schemaVersion":  1,
+                                    "version":  "0.1.0-vm.2412eb25"
+                                },
+                    "psh":  {
+                                "name":  "Psh",
+                                "version":  "0.1.0",
+                                "moduleBase":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh",
+                                "modulePath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Psh.psm1",
+                                "manifestPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Psh.psd1"
+                            }
+                },
+    "psReadLine":  {
+                       "moduleCount":  1,
+                       "name":  "PSReadLine",
+                       "version":  "2.4.5",
+                       "moduleBase":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5",
+                       "modulePath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\PSReadLine.psm1",
+                       "bundledModuleBase":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Dependencies\\PSReadLine\\2.4.5",
+                       "projectedTree":  [
+                                             "Microsoft.PowerShell.Pager.dll|16784|451994c3d3e38d939b4fa5f8594d0207840f45e7a210aa75f81aef85aa17c592",
+                                             "Microsoft.PowerShell.PSReadLine.dll|339528|f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                             "net6plus/Microsoft.PowerShell.PSReadLine.Polyfiller.dll|14920|6d33ea289b405c64bf5daa9c59e459596cac59ece399d0d215ee9f3d46afd675",
+                                             "netstd/Microsoft.PowerShell.PSReadLine.Polyfiller.dll|16928|2e63dc86d9240243ccfb07da5d0b4fce2bc5ce5f9952658a7ce68c26bcd3e14c",
+                                             "PSReadLine.format.ps1xml|26820|1ca887463598d38aa18236a97a4193b2228d1d8434fa73cc8c7932f42a0565cf",
+                                             "PSReadLine.psd1|15471|dd8766bd4db0c1d17111b81d145d32448f61f48451d51c780a79be9ca98d837e",
+                                             "PSReadLine.psm1|15076|9bc0252f616067ca5ef1d0328ec0b97c7d31c757f9fc80adee234ea6132a9c7e"
+                                         ],
+                       "implementingDllPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                       "implementingDllHash":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                       "assemblyState":  "reused-identical",
+                       "handlers":  [
+                                        {
+                                            "chord":  "Tab",
+                                            "key":  "Tab",
+                                            "function":  "MenuComplete",
+                                            "description":  "Complete the input if there is a single completion, otherwise complete the input by selecting from a menu of possible completions."
+                                        },
+                                        {
+                                            "chord":  "Ctrl+r",
+                                            "key":  "Ctrl+r",
+                                            "function":  "ReverseSearchHistory",
+                                            "description":  "Search history backwards interactively"
+                                        },
+                                        {
+                                            "chord":  "UpArrow",
+                                            "key":  "UpArrow",
+                                            "function":  "HistorySearchBackward",
+                                            "description":  "Search for the previous item in the history that starts with the current input - like PreviousHistory if the input is empty"
+                                        },
+                                        {
+                                            "chord":  "DownArrow",
+                                            "key":  "DownArrow",
+                                            "function":  "HistorySearchForward",
+                                            "description":  "Search for the next item in the history that starts with the current input - like NextHistory if the input is empty"
+                                        }
+                                    ],
+                       "prediction":  {
+                                          "source":  "History",
+                                          "viewStyle":  "ListView"
+                                      },
+                       "psCompletionsCount":  0,
+                       "jobCountBeforeWarm":  0,
+                       "jobCountAfterWarm":  0,
+                       "appDomainAssemblies":  [
+                                                   {
+                                                       "fullName":  "Microsoft.PowerShell.PSReadLine, Version=2.4.5.0, Culture=neutral, PublicKeyToken=null",
+                                                       "path":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                       "sha256":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2"
+                                                   }
+                                               ],
+                       "vscodeWrapper":  {
+                                             "functionCount":  2,
+                                             "promptFunctionCount":  1,
+                                             "shellIntegrationPath":  "C:\\Users\\emvdy\\AppData\\Local\\Programs\\Microsoft VS Code\\7e7950df89\\resources\\app\\out\\vs\\workbench\\contrib\\terminal\\common\\scripts\\shellIntegration.ps1",
+                                             "shellIntegrationHash":  "7d27a8cce8c3b9a7e6cb0045a2035f303c34d228b23b6619fed1934a4027a4db",
+                                             "originalPromptPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Interactive\\Prompt.ps1",
+                                             "stateType":  "System.Collections.Hashtable"
+                                         }
+                   },
+    "warmInitialization":  {
+                               "schemaVersion":  1,
+                               "component":  "interactive",
+                               "success":  true,
+                               "dependencyRoot":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Dependencies",
+                               "powershell":  {
+                                                  "version":  "5.1.26100.8655",
+                                                  "edition":  "Desktop"
+                                              },
+                               "terminal":  {
+                                                "supported":  true,
+                                                "reason":  "HostReportsSupport",
+                                                "outputRedirected":  false,
+                                                "hostName":  "ConsoleHost"
+                                            },
+                               "dependencies":  {
+                                                    "psReadLine":  {
+                                                                       "name":  "PSReadLine",
+                                                                       "expectedVersion":  "2.4.5",
+                                                                       "requestedPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Dependencies\\PSReadLine\\2.4.5\\PSReadLine.psd1",
+                                                                       "resolvedPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Dependencies\\PSReadLine\\2.4.5\\PSReadLine.psd1",
+                                                                       "manifestVersion":  "2.4.5",
+                                                                       "validated":  true,
+                                                                       "imported":  true,
+                                                                       "loadedVersion":  "2.4.5",
+                                                                       "loadedPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\PSReadLine.psm1",
+                                                                       "loadedModuleBase":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5",
+                                                                       "loadAction":  "reused-preloaded-identical",
+                                                                       "expectedAssemblyPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Dependencies\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                                       "expectedAssemblyHash":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                                       "actualAssemblyPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                                       "actualAssemblyHash":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                                       "assemblyVerified":  true,
+                                                                       "assemblyVerificationState":  "reused-identical",
+                                                                       "expectedTreeFileCount":  7,
+                                                                       "expectedTreeFingerprint":  [
+                                                                                                       "Microsoft.PowerShell.Pager.dll|16784|451994c3d3e38d939b4fa5f8594d0207840f45e7a210aa75f81aef85aa17c592",
+                                                                                                       "Microsoft.PowerShell.PSReadLine.dll|339528|f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                                                                       "net6plus/Microsoft.PowerShell.PSReadLine.Polyfiller.dll|14920|6d33ea289b405c64bf5daa9c59e459596cac59ece399d0d215ee9f3d46afd675",
+                                                                                                       "netstd/Microsoft.PowerShell.PSReadLine.Polyfiller.dll|16928|2e63dc86d9240243ccfb07da5d0b4fce2bc5ce5f9952658a7ce68c26bcd3e14c",
+                                                                                                       "PSReadLine.format.ps1xml|26820|1ca887463598d38aa18236a97a4193b2228d1d8434fa73cc8c7932f42a0565cf",
+                                                                                                       "PSReadLine.psd1|15471|dd8766bd4db0c1d17111b81d145d32448f61f48451d51c780a79be9ca98d837e",
+                                                                                                       "PSReadLine.psm1|15076|9bc0252f616067ca5ef1d0328ec0b97c7d31c757f9fc80adee234ea6132a9c7e"
+                                                                                                   ],
+                                                                       "actualTreeFileCount":  7,
+                                                                       "actualTreeFingerprint":  [
+                                                                                                     "Microsoft.PowerShell.Pager.dll|16784|451994c3d3e38d939b4fa5f8594d0207840f45e7a210aa75f81aef85aa17c592",
+                                                                                                     "Microsoft.PowerShell.PSReadLine.dll|339528|f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                                                                     "net6plus/Microsoft.PowerShell.PSReadLine.Polyfiller.dll|14920|6d33ea289b405c64bf5daa9c59e459596cac59ece399d0d215ee9f3d46afd675",
+                                                                                                     "netstd/Microsoft.PowerShell.PSReadLine.Polyfiller.dll|16928|2e63dc86d9240243ccfb07da5d0b4fce2bc5ce5f9952658a7ce68c26bcd3e14c",
+                                                                                                     "PSReadLine.format.ps1xml|26820|1ca887463598d38aa18236a97a4193b2228d1d8434fa73cc8c7932f42a0565cf",
+                                                                                                     "PSReadLine.psd1|15471|dd8766bd4db0c1d17111b81d145d32448f61f48451d51c780a79be9ca98d837e",
+                                                                                                     "PSReadLine.psm1|15076|9bc0252f616067ca5ef1d0328ec0b97c7d31c757f9fc80adee234ea6132a9c7e"
+                                                                                                 ],
+                                                                       "treeVerified":  true,
+                                                                       "treeVerificationState":  "reused-identical",
+                                                                       "preloadedAssemblies":  [
+                                                                                                   {
+                                                                                                       "fullName":  "Microsoft.PowerShell.PSReadLine, Version=2.4.5.0, Culture=neutral, PublicKeyToken=null",
+                                                                                                       "location":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                                                                       "sha256":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                                                                       "inspectionError":  null
+                                                                                                   }
+                                                                                               ],
+                                                                       "restartRequired":  false,
+                                                                       "mutationSuppressed":  true,
+                                                                       "importScope":  "Global",
+                                                                       "integrationMode":  "ManifestImport",
+                                                                       "executionSuppressed":  false,
+                                                                       "suppressionReason":  null,
+                                                                       "removedConflicts":  [
+
+                                                                                            ],
+                                                                       "restoredConflicts":  [
+
+                                                                                             ],
+                                                                       "restorationErrors":  [
+
+                                                                                             ],
+                                                                       "error":  null
+                                                                   },
+                                                    "psCompletions":  {
+                                                                          "name":  "PSCompletions",
+                                                                          "expectedVersion":  "6.10.0",
+                                                                          "requestedPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Dependencies\\PSCompletions\\6.10.0\\PSCompletions.psd1",
+                                                                          "resolvedPath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Dependencies\\PSCompletions\\6.10.0\\PSCompletions.psd1",
+                                                                          "manifestVersion":  "6.10.0",
+                                                                          "validated":  true,
+                                                                          "imported":  false,
+                                                                          "loadedVersion":  null,
+                                                                          "loadedPath":  null,
+                                                                          "loadedModuleBase":  null,
+                                                                          "loadAction":  null,
+                                                                          "expectedAssemblyPath":  null,
+                                                                          "expectedAssemblyHash":  null,
+                                                                          "actualAssemblyPath":  null,
+                                                                          "actualAssemblyHash":  null,
+                                                                          "assemblyVerified":  false,
+                                                                          "assemblyVerificationState":  "not-applicable",
+                                                                          "expectedTreeFileCount":  0,
+                                                                          "expectedTreeFingerprint":  [
+
+                                                                                                      ],
+                                                                          "actualTreeFileCount":  0,
+                                                                          "actualTreeFingerprint":  [
+
+                                                                                                    ],
+                                                                          "treeVerified":  false,
+                                                                          "treeVerificationState":  "not-applicable",
+                                                                          "preloadedAssemblies":  [
+
+                                                                                                  ],
+                                                                          "restartRequired":  false,
+                                                                          "mutationSuppressed":  false,
+                                                                          "importScope":  "Global",
+                                                                          "integrationMode":  "PshOfflineAdapter",
+                                                                          "executionSuppressed":  true,
+                                                                          "suppressionReason":  "The pinned upstream manifest starts a network-capable update job and writes below its module directory. Psh validates the bundle but does not execute ScriptsToProcess.",
+                                                                          "removedConflicts":  [
+
+                                                                                               ],
+                                                                          "restoredConflicts":  [
+
+                                                                                                ],
+                                                                          "restorationErrors":  [
+
+                                                                                                ],
+                                                                          "error":  null
+                                                                      }
+                                                },
+                               "keyBindings":  [
+                                                   {
+                                                       "chord":  "Tab",
+                                                       "function":  "MenuComplete",
+                                                       "configured":  true,
+                                                       "implementationAssemblyPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                       "implementationAssemblyHash":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                       "error":  null
+                                                   },
+                                                   {
+                                                       "chord":  "Ctrl+r",
+                                                       "function":  "ReverseSearchHistory",
+                                                       "configured":  true,
+                                                       "implementationAssemblyPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                       "implementationAssemblyHash":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                       "error":  null
+                                                   },
+                                                   {
+                                                       "chord":  "UpArrow",
+                                                       "function":  "HistorySearchBackward",
+                                                       "configured":  true,
+                                                       "implementationAssemblyPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                       "implementationAssemblyHash":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                       "error":  null
+                                                   },
+                                                   {
+                                                       "chord":  "DownArrow",
+                                                       "function":  "HistorySearchForward",
+                                                       "configured":  true,
+                                                       "implementationAssemblyPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                       "implementationAssemblyHash":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                       "error":  null
+                                                   }
+                                               ],
+                               "prediction":  {
+                                                  "requested":  true,
+                                                  "enabled":  true,
+                                                  "source":  "History",
+                                                  "viewStyle":  "ListView",
+                                                  "reason":  "Configured",
+                                                  "implementationAssemblyPath":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\Modules\\PSReadLine\\2.4.5\\Microsoft.PowerShell.PSReadLine.dll",
+                                                  "implementationAssemblyHash":  "f8e3a5b7e3e8cad2130ce10647564a2a0ea15d98db8a0cc8d589f80154c108e2",
+                                                  "error":  null
+                                              },
+                               "gitCompletion":  {
+                                                     "registered":  true,
+                                                     "alreadyRegistered":  true,
+                                                     "mode":  "PshOfflineNativeCompleter",
+                                                     "commandNames":  [
+                                                                          "git",
+                                                                          "git.exe"
+                                                                      ],
+                                                     "gitAvailable":  true,
+                                                     "gitPath":  "C:\\Program Files\\Git\\cmd\\git.exe",
+                                                     "registrar":  "NativeArgumentCompleter",
+                                                     "registrationSyntax":  "ExplicitNativeSwitch",
+                                                     "timeoutMs":  150,
+                                                     "error":  null
+                                                 },
+                               "prompt":  {
+                                              "requested":  true,
+                                              "enabled":  true,
+                                              "replacedExisting":  true,
+                                              "style":  "PlainAscii",
+                                              "gitEnabled":  true,
+                                              "gitAvailable":  true,
+                                              "gitTimeoutMs":  150,
+                                              "error":  null
+                                          },
+                               "errors":  [
+
+                                          ],
+                               "warnings":  [
+
+                                            ]
+                           },
+    "profiles":  {
+                     "activeCurrentUserAllHosts":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\profile.ps1",
+                     "targets":  [
+                                     {
+                                         "path":  "C:\\Mac\\Home\\Documents\\WindowsPowerShell\\profile.ps1",
+                                         "sha256":  "7d337451e1d0c7632c2a46a1d01258925990aaa90f5f4098e9cba5d40cba3cc1",
+                                         "startCount":  1,
+                                         "endCount":  1,
+                                         "startLine":  1,
+                                         "endLine":  30
+                                     },
+                                     {
+                                         "path":  "C:\\Mac\\Home\\Documents\\PowerShell\\profile.ps1",
+                                         "sha256":  "7d337451e1d0c7632c2a46a1d01258925990aaa90f5f4098e9cba5d40cba3cc1",
+                                         "startCount":  1,
+                                         "endCount":  1,
+                                         "startLine":  1,
+                                         "endLine":  30
+                                     }
+                                 ]
+                 },
+    "git":  {
+                "path":  "C:\\Program Files\\Git\\cmd\\git.exe",
+                "version":  "git version 2.55.0.windows.3",
+                "workTreeRoot":  "C:/Users/emvdy/Psh 验收 空格/repo",
+                "activeBranch":  "feature/vscode-acceptance",
+                "branches":  [
+                                 "feature/vscode-acceptance",
+                                 "main"
+                             ]
+            },
+    "session":  {
+                    "fixturePath":  "C:\\Users\\emvdy\\Psh 验收 空格\\repo",
+                    "cwdPath":  "C:\\Users\\emvdy\\Psh 验收 空格\\repo",
+                    "cwdProviderPath":  "C:\\Users\\emvdy\\Psh 验收 空格\\repo",
+                    "promptBeforeWarm":  {
+                                             "commandType":  "ScriptBlock",
+                                             "sourcePath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Interactive\\Prompt.ps1",
+                                             "text":  "[0] C:\\Users\\emvdy\\Psh 验收 空格\\repo (git:feature/vscode-acceptance)\u003e "
+                                         },
+                    "promptAfterWarm":  {
+                                            "commandType":  "ScriptBlock",
+                                            "sourcePath":  "C:\\Users\\emvdy\\AppData\\Local\\Psh\\versions\\0.1.0-vm.2412eb25\\Psh\\Interactive\\Prompt.ps1",
+                                            "text":  "[0] C:\\Users\\emvdy\\Psh 验收 空格\\repo (git:feature/vscode-acceptance)\u003e "
+                                        }
+                }
+}
