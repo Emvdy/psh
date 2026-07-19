@@ -48,6 +48,15 @@ $expectedManagementCommands = @(
     'rollback', 'self-test', 'uninstall'
 )
 $nativeFullCommands = @('bat', 'fd', 'jq', 'rg')
+$expectedTierPartitions = @{
+    1 = @('pwd cd ls mkdir rmdir cp mv rm touch ln realpath basename dirname mktemp cat head tail cut tr sort uniq wc tee printf echo base64 which env printenv test sleep sha256sum md5sum'.Split(' '))
+    2 = @('stat file tree find fd du df bat grep rg sed awk jq xargs export ps kill pgrep pkill timeout curl wget tar zip unzip gzip gunzip'.Split(' '))
+    3 = @('date whoami hostname clear'.Split(' '))
+}
+$expectedPlatformShapedCommands = @(
+    'ls', 'stat', 'file', 'tree', 'du', 'df', 'which', 'ps', 'pgrep', 'pkill',
+    'date', 'whoami', 'hostname', 'clear'
+)
 
 $specificationPath = Join-Path $RepositoryRoot 'src/Psh/Specification/commands.psd1'
 $manifestPath = Join-Path $RepositoryRoot 'src/Psh/Psh.psd1'
@@ -58,24 +67,50 @@ Assert-PshCondition (Test-Path -LiteralPath $manifestPath -PathType Leaf) 'The m
 Assert-PshCondition (Test-Path -LiteralPath $generatorPath -PathType Leaf) 'The artifact generator is missing.'
 
 $specification = Import-PowerShellDataFile -LiteralPath $specificationPath
-Assert-PshCondition ([string]$specification.SchemaVersion -eq '1.0') 'Unexpected specification schema version.'
+Assert-PshCondition ([string]$specification.SchemaVersion -eq '1.1') 'Unexpected specification schema version.'
 Assert-PshCondition ($specification.PshVersion -eq '0.1.0') 'Unexpected Psh version in the specification.'
+Assert-PshCondition ((@($specification.CommandTiers.Tier) -join ',') -eq '1,2,3') 'The specification does not define command tiers 1 through 3.'
+Assert-PshCondition ([string]$specification.CommandTiers[1].Description -match 'Core implements the documented subset') 'Tier 2 does not document the Core subset boundary.'
+Assert-PshCondition ([string]$specification.CommandTiers[1].Description -match 'Full native rg, fd, jq, and bat accept') 'Tier 2 does not document the Full native complete-argument exception.'
+Assert-PshCondition ([string]$specification.CommandTiers[1].Validation -match 'exit code 2') 'Tier 2 does not document usage exit code 2 for unsupported PowerShell-subset syntax.'
+Assert-PshCondition ((@($specification.NameCollisionPolicy.ResolutionOrder) -join '|') -eq 'Psh function|built-in alias|native executable') 'The name-collision resolution order drifted from PLAN.md.'
+Assert-PshCondition ([string]$specification.NameCollisionPolicy.DisableConfigKey -eq 'DisabledCommands') 'The name-collision disable key is not DisabledCommands.'
 
 $actualNames = @($specification.Commands | ForEach-Object { $_.Name })
 Assert-PshCondition ($actualNames.Count -eq 64) 'The specification must contain exactly 64 commands.'
 Assert-PshCondition (@($actualNames | Group-Object | Where-Object { $_.Count -ne 1 }).Count -eq 0) 'Command names must be unique.'
 Assert-PshCondition (@(Compare-Object ($expectedCommands | Sort-Object) ($actualNames | Sort-Object)).Count -eq 0) 'The 64 command names do not match PLAN.md.'
 
+foreach ($tierNumber in @(1, 2, 3)) {
+    $actualTierCommands = @($specification.Commands | Where-Object { [int]$_.Tier -eq $tierNumber } | ForEach-Object { [string]$_.Name })
+    Assert-PshCondition (($actualTierCommands -join '|') -eq ($expectedTierPartitions[$tierNumber] -join '|')) "Tier $tierNumber does not exactly match PLAN.md."
+}
+$actualPlatformShapedCommands = @($specification.Commands | Where-Object { [bool]$_.PlatformShaped } | ForEach-Object { [string]$_.Name })
+Assert-PshCondition (($actualPlatformShapedCommands -join '|') -eq ($expectedPlatformShapedCommands -join '|')) 'Platform-shaped command metadata drifted.'
+
 $actualManagement = @($specification.ManagementCommands | ForEach-Object { $_.Name })
 Assert-PshCondition (@(Compare-Object ($expectedManagementCommands | Sort-Object) ($actualManagement | Sort-Object)).Count -eq 0) 'Management commands do not match PLAN.md.'
 Assert-PshCondition (((@($specification.ExitCodes | ForEach-Object { [int]$_.Code }) | Sort-Object) -join ',') -eq '0,1,2,3,4,5') 'The exit-code contract must define 0 through 5.'
 
 foreach ($command in $specification.Commands) {
+    Assert-PshCondition ([int]$command.Tier -in @(1, 2, 3)) "$($command.Name) has invalid tier metadata."
+    Assert-PshCondition ($command.PlatformShaped -is [bool]) "$($command.Name) has non-Boolean PlatformShaped metadata."
+    Assert-PshCondition (-not [string]::IsNullOrWhiteSpace([string]$command.EditionNotes)) "$($command.Name) has no Core/Full compatibility notes."
+    Assert-PshCondition ($null -ne $command.CollisionTargets) "$($command.Name) has no collision target data."
+    Assert-PshCondition (-not [string]::IsNullOrWhiteSpace([string]$command.CollisionNotes)) "$($command.Name) has no collision notes."
+    foreach ($collisionTarget in @($command.CollisionTargets)) {
+        Assert-PshCondition ([string]$collisionTarget -match '^(alias|native):[^:]+$') "$($command.Name) uses an unsupported collision category: $collisionTarget"
+    }
     Assert-PshCondition (-not [string]::IsNullOrWhiteSpace([string]$command.Summary)) "$($command.Name) has no help summary."
     Assert-PshCondition ($null -ne $command.Flags) "$($command.Name) has no completion flag data."
     Assert-PshCondition (@($command.ExitCodes).Count -gt 0) "$($command.Name) has no exit-code data."
     Assert-PshCondition (@($command.Examples).Count -gt 0) "$($command.Name) has no examples."
     Assert-PshCondition ($command.CoreBackend -eq 'powershell') "$($command.Name) Core backend is not PowerShell."
+
+    if ([int]$command.Tier -eq 2) {
+        Assert-PshCondition (@($command.ExitCodes) -contains 2) "$($command.Name) Tier 2 contract does not expose usage exit code 2."
+        Assert-PshCondition ([string]$command.EditionNotes -match 'unsupported syntax exits 2') "$($command.Name) Tier 2 notes do not document unsupported syntax exit code 2."
+    }
 
     if ($nativeFullCommands -contains $command.Name) {
         Assert-PshCondition ($command.FullBackend -eq ("native:{0}" -f $command.Name)) "$($command.Name) Full backend is not its pinned native tool."
@@ -87,9 +122,58 @@ foreach ($command in $specification.Commands) {
 
 & $generatorPath -Check
 
+$specificationText = [IO.File]::ReadAllText($specificationPath)
+$generatorValidationRoot = Join-Path ([IO.Path]::GetTempPath()) ("psh-goal1-generator-{0}" -f [Guid]::NewGuid().ToString('N'))
+try {
+    [IO.Directory]::CreateDirectory($generatorValidationRoot) | Out-Null
+    $generatorMutationCases = @(
+        @{
+            Name = 'tier-partition'
+            Find = "            Name = 'pwd'`n            Tier = 1"
+            Replace = "            Name = 'pwd'`n            Tier = 2"
+            ExpectedError = 'Tier 1 command partition does not exactly match PLAN.md.'
+        }
+        @{
+            Name = 'collision-order'
+            Find = "ResolutionOrder = @('Psh function', 'built-in alias', 'native executable')"
+            Replace = "ResolutionOrder = @('built-in alias', 'Psh function', 'native executable')"
+            ExpectedError = 'NameCollisionPolicy resolution order must be Psh function, built-in alias, then native executable.'
+        }
+        @{
+            Name = 'required-command-metadata'
+            Find = "            CollisionNotes = 'Shadows the built-in pwd alias; disabling this Psh command restores alias resolution.'"
+            Replace = "            CollisionDetail = 'Shadows the built-in pwd alias; disabling this Psh command restores alias resolution.'"
+            ExpectedError = "command 'pwd' is missing 'CollisionNotes'."
+        }
+    )
+
+    foreach ($mutationCase in $generatorMutationCases) {
+        Assert-PshCondition ($specificationText.Contains([string]$mutationCase.Find)) "Generator validation fixture '$($mutationCase.Name)' did not match the canonical specification."
+        $mutatedSpecification = $specificationText.Replace([string]$mutationCase.Find, [string]$mutationCase.Replace)
+        $mutatedSpecificationPath = Join-Path $generatorValidationRoot ("{0}.psd1" -f $mutationCase.Name)
+        [IO.File]::WriteAllText($mutatedSpecificationPath, $mutatedSpecification, (New-Object System.Text.UTF8Encoding($false)))
+
+        $validationError = $null
+        try {
+            & $generatorPath -Check -SpecificationPath $mutatedSpecificationPath | Out-Null
+        }
+        catch {
+            $validationError = $_.Exception.Message
+        }
+        Assert-PshCondition (-not [string]::IsNullOrWhiteSpace([string]$validationError)) "Generator accepted invalid '$($mutationCase.Name)' metadata."
+        Assert-PshCondition ([string]$validationError -like ("*{0}*" -f $mutationCase.ExpectedError)) "Generator rejected '$($mutationCase.Name)' for the wrong reason: $validationError"
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $generatorValidationRoot) {
+        Remove-Item -LiteralPath $generatorValidationRoot -Recurse -Force
+    }
+}
+
 $generatedFiles = @(
     (Join-Path $RepositoryRoot 'generated/commands.json'),
     (Join-Path $RepositoryRoot 'docs/compatibility.md'),
+    (Join-Path $RepositoryRoot 'docs/install-layout.md'),
     (Join-Path $RepositoryRoot 'src/Psh/Generated/ArgumentCompleters.ps1')
 )
 foreach ($generatedFile in $generatedFiles) {
@@ -100,8 +184,61 @@ foreach ($generatedFile in $generatedFiles) {
 }
 
 $generatedSpecification = Get-Content -LiteralPath (Join-Path $RepositoryRoot 'generated/commands.json') -Raw | ConvertFrom-Json
+Assert-PshCondition ([string]$generatedSpecification.SchemaVersion -eq '1.1') 'Generated commands.json has the wrong schema version.'
+Assert-PshCondition ((@($generatedSpecification.NameCollisionPolicy.ResolutionOrder) -join '|') -eq 'Psh function|built-in alias|native executable') 'Generated commands.json has the wrong collision resolution order.'
+Assert-PshCondition ([string]$generatedSpecification.NameCollisionPolicy.DisableConfigKey -eq 'DisabledCommands') 'Generated commands.json has the wrong disable config key.'
+Assert-PshCondition (@($generatedSpecification.CommandTiers).Count -eq @($specification.CommandTiers).Count) 'Generated commands.json has the wrong command-tier count.'
+for ($tierIndex = 0; $tierIndex -lt @($specification.CommandTiers).Count; $tierIndex++) {
+    $sourceTier = @($specification.CommandTiers)[$tierIndex]
+    $generatedTier = @($generatedSpecification.CommandTiers)[$tierIndex]
+    foreach ($tierProperty in @('Tier', 'Name', 'Description', 'Validation')) {
+        Assert-PshCondition ([string]$generatedTier.$tierProperty -ceq [string]$sourceTier[$tierProperty]) "Generated command tier $($tierIndex + 1) '$tierProperty' drifted from the source specification."
+    }
+}
 Assert-PshCondition (@($generatedSpecification.Commands).Count -eq 64) 'Generated commands.json does not contain 64 commands.'
 Assert-PshCondition (@(Compare-Object ($expectedCommands | Sort-Object) (@($generatedSpecification.Commands.Name) | Sort-Object)).Count -eq 0) 'Generated commands.json command names drifted from PLAN.md.'
+Assert-PshCondition ((@($generatedSpecification.Commands.Name) -join '|') -eq ($actualNames -join '|')) 'Generated commands.json command order drifted from the source specification.'
+Assert-PshCondition (@($generatedSpecification.Commands | Where-Object { [int]$_.Tier -eq 1 }).Count -eq 33) 'Generated commands.json has the wrong Tier 1 count.'
+Assert-PshCondition (@($generatedSpecification.Commands | Where-Object { [int]$_.Tier -eq 2 }).Count -eq 27) 'Generated commands.json has the wrong Tier 2 count.'
+Assert-PshCondition (@($generatedSpecification.Commands | Where-Object { [int]$_.Tier -eq 3 }).Count -eq 4) 'Generated commands.json has the wrong Tier 3 count.'
+Assert-PshCondition (@($generatedSpecification.Commands | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.CollisionNotes) }).Count -eq 0) 'Generated commands.json omitted per-command collision notes.'
+
+$sourceCommandByName = @{}
+foreach ($sourceCommand in @($specification.Commands)) {
+    $sourceCommandByName[[string]$sourceCommand.Name] = $sourceCommand
+}
+foreach ($generatedCommand in @($generatedSpecification.Commands)) {
+    $sourceCommand = $sourceCommandByName[[string]$generatedCommand.Name]
+    Assert-PshCondition ($null -ne $sourceCommand) "Generated commands.json contains unknown command '$($generatedCommand.Name)'."
+    foreach ($metadataProperty in @('Tier', 'PlatformShaped', 'EditionNotes', 'CollisionTargets', 'CollisionNotes')) {
+        Assert-PshCondition ($null -ne $generatedCommand.PSObject.Properties[$metadataProperty]) "$($generatedCommand.Name) generated metadata is missing '$metadataProperty'."
+    }
+    Assert-PshCondition ([int]$generatedCommand.Tier -eq [int]$sourceCommand.Tier) "$($generatedCommand.Name) generated Tier drifted from the source specification."
+    Assert-PshCondition ([bool]$generatedCommand.PlatformShaped -eq [bool]$sourceCommand.PlatformShaped) "$($generatedCommand.Name) generated PlatformShaped drifted from the source specification."
+    Assert-PshCondition ([string]$generatedCommand.EditionNotes -ceq [string]$sourceCommand.EditionNotes) "$($generatedCommand.Name) generated EditionNotes drifted from the source specification."
+    Assert-PshCondition ((@($generatedCommand.CollisionTargets) -join '|') -ceq (@($sourceCommand.CollisionTargets) -join '|')) "$($generatedCommand.Name) generated CollisionTargets drifted from the source specification."
+    Assert-PshCondition ([string]$generatedCommand.CollisionNotes -ceq [string]$sourceCommand.CollisionNotes) "$($generatedCommand.Name) generated CollisionNotes drifted from the source specification."
+}
+
+$compatibilityText = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'docs/compatibility.md'))
+foreach ($requiredDocumentation in @(
+    'Tier 2 uses documented PowerShell subsets in Core',
+    'unsupported syntax in those subsets is rejected with exit code `2`',
+    'Full native `rg`, `fd`, `jq`, and `bat` instead accept their pinned tools'' complete argument sets',
+    'Psh function` > `built-in alias` > `native executable',
+    'psh config set DisabledCommands curl wget',
+    'Full delegates `rg`, `fd`, `jq`, and `bat`'
+)) {
+    Assert-PshCondition ($compatibilityText.Contains($requiredDocumentation)) "Compatibility documentation is missing: $requiredDocumentation"
+}
+
+$defaultConfig = Import-PowerShellDataFile -LiteralPath (Join-Path $RepositoryRoot 'src/install/config.psd1')
+Assert-PshCondition ($defaultConfig.Contains('DisabledCommands')) 'Default config.psd1 is missing DisabledCommands.'
+Assert-PshCondition (@($defaultConfig.DisabledCommands).Count -eq 0) 'Default config.psd1 must enable all commands with an empty DisabledCommands array.'
+
+$installLayoutText = [IO.File]::ReadAllText((Join-Path $RepositoryRoot 'docs/install-layout.md'))
+Assert-PshCondition ($installLayoutText.Contains('DisabledCommands = @()')) 'Generated install layout omits the required DisabledCommands default.'
+Assert-PshCondition ($installLayoutText.Contains('Changes are persisted only and take effect in a new shell or after `Remove-Module Psh; Import-Module Psh`.')) 'Generated install layout omits config activation semantics.'
 
 $sourceFiles = @(Get-ChildItem -LiteralPath (Join-Path $RepositoryRoot 'src') -Recurse -File)
 $allowedManagedDependencyRoot = [IO.Path]::GetFullPath(
@@ -153,6 +290,19 @@ try {
     Assert-PshCondition ([string]::IsNullOrWhiteSpace([string]$completerLoadError)) "Generated argument completers failed to load: $completerLoadError"
     $completion = TabExpansion2 -InputScript 'psh cap' -CursorColumn 7
     Assert-PshCondition (@($completion.CompletionMatches.CompletionText) -contains 'capabilities') 'Generated management completion did not offer capabilities.'
+
+    $configKeyInput = 'psh config set Dis'
+    $configKeyCompletion = TabExpansion2 -InputScript $configKeyInput -CursorColumn $configKeyInput.Length
+    Assert-PshCondition (@($configKeyCompletion.CompletionMatches.CompletionText) -contains 'DisabledCommands') 'Generated config completion did not offer DisabledCommands.'
+
+    $fdGeneratedFlags = @(& $module { @($script:PshCommandFlags['fd']) })
+    Assert-PshCondition ($fdGeneratedFlags -contains '-e') 'Generated fd completion metadata omitted the documented -e extension filter.'
+
+    foreach ($expectedCommand in $expectedCommands) {
+        $disabledCommandInput = "psh config set DisabledCommands $expectedCommand"
+        $disabledCommandCompletion = TabExpansion2 -InputScript $disabledCommandInput -CursorColumn $disabledCommandInput.Length
+        Assert-PshCondition (@($disabledCommandCompletion.CompletionMatches.CompletionText) -contains $expectedCommand) "Generated config completion did not offer '$expectedCommand' for DisabledCommands."
+    }
 
     foreach ($edition in @('Core', 'Full')) {
         $env:PSH_EDITION = $edition

@@ -20,7 +20,7 @@ $script:PshCommandFlags = @{
     'file' = @('-b', '-i', '-L', '-z', '--help')
     'tree' = @('-a', '-d', '-f', '-L', '--help')
     'find' = @('-name', '-iname', '-type', '-mindepth', '-maxdepth', '-size', '-mtime', '-mmin', '--hidden', '--exclude', '-print', '-print0', '--help')
-    'fd' = @('-g', '--glob', '-t', '--type', '-d', '--max-depth', '--min-depth', '-S', '--size', '--changed-before', '--changed-within', '-H', '--hidden', '-E', '--exclude', '-0', '--print0', '--help')
+    'fd' = @('-e', '-g', '--glob', '-t', '--type', '-d', '--max-depth', '--min-depth', '-S', '--size', '--changed-before', '--changed-within', '-H', '--hidden', '-E', '--exclude', '-0', '--print0', '--help')
     'du' = @('-a', '-h', '-s', '-d', '--max-depth', '--help')
     'df' = @('-h', '-T', '--total', '--help')
     'mktemp' = @('-d', '-u', '-p', '--tmpdir', '--help')
@@ -69,6 +69,9 @@ $script:PshCommandFlags = @{
     'clear' = @('-x', '--help')
 }
 
+$script:PshCommandNames = @('pwd', 'cd', 'ls', 'mkdir', 'rmdir', 'cp', 'mv', 'rm', 'touch', 'ln', 'realpath', 'basename', 'dirname', 'stat', 'file', 'tree', 'find', 'fd', 'du', 'df', 'mktemp', 'cat', 'bat', 'head', 'tail', 'grep', 'rg', 'sed', 'awk', 'jq', 'cut', 'tr', 'sort', 'uniq', 'wc', 'tee', 'xargs', 'printf', 'echo', 'base64', 'which', 'env', 'printenv', 'export', 'test', 'ps', 'kill', 'pgrep', 'pkill', 'timeout', 'sleep', 'curl', 'wget', 'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'sha256sum', 'md5sum', 'date', 'whoami', 'hostname', 'clear')
+$script:PshDisableConfigKey = 'DisabledCommands'
+
 $script:PshManagementFlags = @{
     'version' = @('--help')
     'doctor' = @('--json', '--help')
@@ -104,6 +107,46 @@ function Register-PshArgumentCompleters {
         $action = ''
         if ($elements.Count -gt 1) {
             $action = $elements[1].Extent.Text.Trim("'`"")
+        }
+
+        if ($action -eq 'config') {
+            $configAction = ''
+            if ($elements.Count -gt 2) {
+                $configAction = $elements[2].Extent.Text.Trim("'`"")
+            }
+
+            if ($configAction -in @('get', 'set', 'reset')) {
+                $configKey = ''
+                if ($elements.Count -gt 3) {
+                    $configKey = $elements[3].Extent.Text.Trim("'`"")
+                }
+
+                if (-not [string]::Equals($configKey, $script:PshDisableConfigKey, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    if ($script:PshDisableConfigKey -like "$wordToComplete*") {
+                        New-Object System.Management.Automation.CompletionResult -ArgumentList @(
+                            $script:PshDisableConfigKey,
+                            $script:PshDisableConfigKey,
+                            [System.Management.Automation.CompletionResultType]::ParameterName,
+                            'Disable selected Psh command functions.'
+                        )
+                    }
+                    return
+                }
+
+                if ($configAction -eq 'set') {
+                    foreach ($candidate in @($script:PshCommandNames)) {
+                        if ($candidate -like "$wordToComplete*") {
+                            New-Object System.Management.Automation.CompletionResult -ArgumentList @(
+                                $candidate,
+                                $candidate,
+                                [System.Management.Automation.CompletionResultType]::ParameterValue,
+                                "Disable the $candidate Psh command."
+                            )
+                        }
+                    }
+                }
+                return
+            }
         }
 
         if ($elements.Count -le 2 -and $wordToComplete -notlike '-*') {

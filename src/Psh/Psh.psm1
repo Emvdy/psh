@@ -4,6 +4,42 @@
 # Psh's public module surface is intentionally small.  The command catalog is
 # data-driven; no executable utility is launched while the module is loaded.
 
+$script:PshCallerFileCommandProjection = $null
+$script:PshDisabledCommands = @{}
+$script:PshConfigSnapshotPath = $null
+$script:PshConfigLoadError = $null
+$script:PshConfigEdition = 'Core'
+$pshProjectionHandoff = Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction SilentlyContinue
+if ($null -ne $pshProjectionHandoff) {
+    $script:PshCallerFileCommandProjection = $pshProjectionHandoff.Value
+    if ($null -ne $pshProjectionHandoff.Value.DisabledCommands) {
+        $script:PshDisabledCommands = $pshProjectionHandoff.Value.DisabledCommands
+    }
+    $script:PshConfigSnapshotPath = $pshProjectionHandoff.Value.ConfigPath
+    $script:PshConfigLoadError = $pshProjectionHandoff.Value.ConfigLoadError
+    if ([string]::Equals([string]$pshProjectionHandoff.Value.Edition, 'Full', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $script:PshConfigEdition = 'Full'
+    }
+    Remove-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -Force -ErrorAction Stop
+}
+Remove-Variable -Name pshProjectionHandoff -ErrorAction SilentlyContinue
+
+function Restore-PshCallerFileCommandProjection {
+    param(
+        [AllowNull()]
+        [object]$State
+    )
+
+    if ($null -eq $State -or $null -eq $State.Aliases -or $null -eq $State.Restore) { return }
+    & $State.Restore $State.Aliases
+}
+
+$ExecutionContext.SessionState.Module.OnRemove = {
+    Restore-PshCallerFileCommandProjection -State $script:PshCallerFileCommandProjection
+    $script:PshCallerFileCommandProjection = $null
+}
+
+try {
 $script:PshCompleterLoadError = $null
 $script:PshInteractiveLoadError = $null
 
@@ -279,39 +315,250 @@ function Import-PshSpecification {
     return $specification
 }
 
-function Get-PshConfigPaths {
-    $paths = @()
+function Get-PshCanonicalConfigPath {
     $localAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', [EnvironmentVariableTarget]::Process)
     if ([string]::IsNullOrWhiteSpace([string]$localAppData)) {
         $localAppData = $env:LOCALAPPDATA
     }
 
-    if (-not [string]::IsNullOrWhiteSpace([string]$localAppData)) {
-        $paths += Join-Path -Path (Join-Path -Path $localAppData -ChildPath 'Psh') -ChildPath 'config.psd1'
+    if ([string]::IsNullOrWhiteSpace([string]$localAppData)) {
+        return $null
     }
 
-    # Installed modules live at <LOCALAPPDATA>\Psh\versions\<version>\Psh.
-    # Walking upward also makes a copied/versioned module honor its sibling
-    # configuration when LOCALAPPDATA is not set in a test host.
-    $cursor = $PSScriptRoot
-    for ($index = 0; $index -lt 5; $index++) {
-        if ([string]::IsNullOrWhiteSpace([string]$cursor)) {
-            break
-        }
+    return (Join-Path -Path (Join-Path -Path $localAppData -ChildPath 'Psh') -ChildPath 'config.psd1')
+}
 
-        $candidate = Join-Path -Path $cursor -ChildPath 'config.psd1'
-        if (-not ($paths -contains $candidate)) {
-            $paths += $candidate
-        }
+function Get-PshInstalledConfigPath {
+    $versionRoot = Split-Path -Path $PSScriptRoot -Parent
+    $versionsRoot = Split-Path -Path $versionRoot -Parent
+    $installRoot = Split-Path -Path $versionsRoot -Parent
+    $versionName = Split-Path -Path $versionRoot -Leaf
+    $versionsName = Split-Path -Path $versionsRoot -Leaf
+    $versionPattern = '\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\z'
 
-        $parent = Split-Path -Path $cursor -Parent
-        if ([string]::IsNullOrWhiteSpace([string]$parent) -or $parent -eq $cursor) {
-            break
-        }
-        $cursor = $parent
+    if (-not [string]::Equals($versionsName, 'versions', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $versionName -notmatch $versionPattern -or
+        [string]::IsNullOrWhiteSpace([string]$installRoot)) {
+        return $null
+    }
+
+    return (Join-Path -Path $installRoot -ChildPath 'config.psd1')
+}
+
+function Get-PshConfigPaths {
+    $paths = @()
+    $canonicalPath = Get-PshCanonicalConfigPath
+    $installedPath = Get-PshInstalledConfigPath
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$canonicalPath)) {
+        $paths += $canonicalPath
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$installedPath) -and $paths -notcontains $installedPath) {
+        $paths += $installedPath
     }
 
     return $paths
+}
+
+function Resolve-PshConfigPath {
+    $paths = @(Get-PshConfigPaths)
+    foreach ($path in $paths) {
+        if (Test-Path -LiteralPath $path) {
+            return $path
+        }
+    }
+
+    if ($paths.Count -gt 0) {
+        return [string]$paths[0]
+    }
+
+    throw 'LOCALAPPDATA is not available and Psh is not running from a versioned installation layout.'
+}
+
+function Import-PshConfiguration {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$KnownCommands
+    )
+
+    if (-not [IO.File]::Exists($Path)) {
+        if (Test-Path -LiteralPath $Path) {
+            throw ('Psh configuration path is not a regular file: {0}' -f $Path)
+        }
+
+        return [PSCustomObject]@{
+            Path = $Path
+            SchemaVersion = 1
+            Edition = 'Core'
+            DisabledCommands = @()
+            Exists = $false
+        }
+    }
+
+    try {
+        $raw = Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
+    }
+    catch {
+        throw ('Psh configuration could not be loaded from {0}: {1}' -f $Path, $_.Exception.Message)
+    }
+
+    if ($raw -isnot [System.Collections.IDictionary]) {
+        throw ('Psh configuration is invalid: the top level of {0} must be a data hashtable.' -f $Path)
+    }
+
+    $allowedKeys = @('SchemaVersion', 'Edition', 'DisabledCommands')
+    foreach ($key in @($raw.Keys)) {
+        if ($allowedKeys -notcontains [string]$key) {
+            throw ('Psh configuration is invalid: unsupported top-level key "{0}".' -f [string]$key)
+        }
+    }
+    foreach ($requiredKey in $allowedKeys) {
+        if (-not (Test-PshProperty -InputObject $raw -Name $requiredKey)) {
+            throw ('Psh configuration is invalid: required key "{0}" is missing.' -f $requiredKey)
+        }
+    }
+
+    $schemaVersion = Get-PshPropertyValue -InputObject $raw -Name 'SchemaVersion'
+    if ($schemaVersion -isnot [int] -or [int]$schemaVersion -ne 1) {
+        throw 'Psh configuration is invalid: SchemaVersion must be the integer 1.'
+    }
+
+    $editionValue = Get-PshPropertyValue -InputObject $raw -Name 'Edition'
+    if ($editionValue -isnot [string] -or
+        ([string]$editionValue -notin @('Core', 'Full'))) {
+        throw 'Psh configuration is invalid: Edition must be Core or Full.'
+    }
+    $edition = if ([string]::Equals([string]$editionValue, 'Full', [System.StringComparison]::OrdinalIgnoreCase)) { 'Full' } else { 'Core' }
+
+    $disabledValue = $null
+    foreach ($rawKey in @($raw.Keys)) {
+        if ([string]::Equals([string]$rawKey, 'DisabledCommands', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $disabledValue = $raw[$rawKey]
+            break
+        }
+    }
+    if ($disabledValue -is [string] -or
+        $disabledValue -isnot [System.Collections.IEnumerable] -or
+        $disabledValue -is [System.Collections.IDictionary]) {
+        throw 'Psh configuration is invalid: DisabledCommands must be a string array.'
+    }
+
+    $knownByName = @{}
+    foreach ($knownCommand in @($KnownCommands)) {
+        $knownByName[$knownCommand.ToLowerInvariant()] = $knownCommand.ToLowerInvariant()
+    }
+
+    $requested = @{}
+    foreach ($disabledCommand in @($disabledValue)) {
+        if ($disabledCommand -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$disabledCommand)) {
+            throw 'Psh configuration is invalid: DisabledCommands must contain non-empty strings.'
+        }
+        $key = ([string]$disabledCommand).Trim().ToLowerInvariant()
+        if (-not $knownByName.ContainsKey($key)) {
+            throw ('Psh configuration is invalid: unknown command "{0}".' -f [string]$disabledCommand)
+        }
+        $requested[$key] = $true
+    }
+
+    $disabled = @()
+    foreach ($knownCommand in @($KnownCommands)) {
+        $key = $knownCommand.ToLowerInvariant()
+        if ($requested.ContainsKey($key)) {
+            $disabled += $key
+        }
+    }
+
+    return [PSCustomObject]@{
+        Path = $Path
+        SchemaVersion = 1
+        Edition = $edition
+        DisabledCommands = @($disabled)
+        Exists = $true
+    }
+}
+
+function ConvertTo-PshConfigurationText {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Configuration
+    )
+
+    $lines = New-Object 'System.Collections.Generic.List[string]'
+    [void]$lines.Add('# Copyright (C) 2026 Emvdy')
+    [void]$lines.Add('# SPDX-License-Identifier: GPL-3.0-or-later')
+    [void]$lines.Add('')
+    [void]$lines.Add('@{')
+    [void]$lines.Add('    SchemaVersion    = 1')
+    [void]$lines.Add(("    Edition          = '{0}'" -f ([string]$Configuration.Edition).Replace("'", "''")))
+
+    $disabled = @($Configuration.DisabledCommands)
+    if ($disabled.Count -eq 0) {
+        [void]$lines.Add('    DisabledCommands = @()')
+    }
+    else {
+        [void]$lines.Add('    DisabledCommands = @(')
+        foreach ($commandName in $disabled) {
+            [void]$lines.Add(("        '{0}'" -f ([string]$commandName).Replace("'", "''")))
+        }
+        [void]$lines.Add('    )')
+    }
+
+    [void]$lines.Add('}')
+    return (($lines -join [Environment]::NewLine) + [Environment]::NewLine)
+}
+
+function Write-PshConfiguration {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Configuration,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$KnownCommands
+    )
+
+    $path = [string]$Configuration.Path
+    $directory = Split-Path -Path $path -Parent
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        throw ('Psh configuration path has no parent directory: {0}' -f $path)
+    }
+    if ([IO.Directory]::Exists($path)) {
+        throw ('Psh configuration path is a directory: {0}' -f $path)
+    }
+
+    [void][IO.Directory]::CreateDirectory($directory)
+    $operationId = [Guid]::NewGuid().ToString('N')
+    $temporaryPath = Join-Path -Path $directory -ChildPath ('.config.{0}.tmp' -f $operationId)
+    $backupPath = Join-Path -Path $directory -ChildPath ('.config.{0}.bak' -f $operationId)
+
+    try {
+        $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+        [IO.File]::WriteAllText($temporaryPath, (ConvertTo-PshConfigurationText -Configuration $Configuration), $utf8WithoutBom)
+        $null = Import-PshConfiguration -Path $temporaryPath -KnownCommands $KnownCommands
+
+        if ([IO.File]::Exists($path)) {
+            [IO.File]::Replace($temporaryPath, $path, $backupPath)
+        }
+        else {
+            [IO.File]::Move($temporaryPath, $path)
+        }
+        $temporaryPath = $null
+    }
+    finally {
+        if ($null -ne $temporaryPath -and [IO.File]::Exists($temporaryPath)) {
+            [IO.File]::Delete($temporaryPath)
+        }
+        if ([IO.File]::Exists($backupPath)) {
+            try {
+                [IO.File]::Delete($backupPath)
+            }
+            catch {
+                # A stale Psh-owned backup does not invalidate an atomic write.
+            }
+        }
+    }
 }
 
 function Resolve-PshEdition {
@@ -328,34 +575,7 @@ function Resolve-PshEdition {
         return 'Core'
     }
 
-    foreach ($configPath in @(Get-PshConfigPaths)) {
-        if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
-            continue
-        }
-
-        try {
-            $config = Import-PowerShellDataFile -LiteralPath $configPath -ErrorAction Stop
-            $configuredEdition = Get-PshPropertyValue -InputObject $config -Name 'Edition'
-            if ($null -eq $configuredEdition) {
-                $configuredEdition = Get-PshPropertyValue -InputObject $config -Name 'PshEdition'
-            }
-            if ($configuredEdition -is [System.Collections.IDictionary]) {
-                $configuredEdition = Get-PshPropertyValue -InputObject $configuredEdition -Name 'Name'
-            }
-
-            if ([string]::Equals(([string]$configuredEdition).Trim(), 'Full', [System.StringComparison]::OrdinalIgnoreCase)) {
-                return 'Full'
-            }
-        }
-        catch {
-            # A broken optional config must never make Core unusable.  Core is
-            # the safe default and does not require native tools.
-        }
-
-        break
-    }
-
-    return 'Core'
+    return $script:PshConfigEdition
 }
 
 function Get-PshCommandName {
@@ -613,6 +833,145 @@ function ConvertTo-PshJsonText {
     return ($InputObject | ConvertTo-Json -Depth 20 -Compress)
 }
 
+function Write-PshConfigUsage {
+    param(
+        [AllowNull()]
+        [string]$Message
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($Message)) {
+        Write-Output ('psh: usage error: {0}' -f $Message)
+    }
+    Write-Output 'Usage: psh config get [DisabledCommands]'
+    Write-Output '       psh config set DisabledCommands <command> [<command>...]'
+    Write-Output '       psh config reset DisabledCommands'
+}
+
+function Format-PshDisabledCommands {
+    param(
+        [AllowEmptyCollection()]
+        [string[]]$CommandNames
+    )
+
+    $names = @($CommandNames)
+    if ($names.Count -eq 0) {
+        return 'DisabledCommands = @()'
+    }
+
+    $quoted = @($names | ForEach-Object { "'{0}'" -f ([string]$_).Replace("'", "''") })
+    return ('DisabledCommands = @({0})' -f ($quoted -join ', '))
+}
+
+function Invoke-PshConfigCommand {
+    param(
+        [AllowEmptyCollection()]
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Specification
+    )
+
+    $items = @($Arguments)
+    if ($items.Count -eq 0) {
+        Write-PshConfigUsage -Message 'a config action is required.'
+        return 2
+    }
+
+    $subaction = ([string]$items[0]).Trim().ToLowerInvariant()
+    if ($subaction -eq '--help') {
+        if ($items.Count -ne 1) {
+            Write-PshConfigUsage -Message '--help does not accept additional arguments.'
+            return 2
+        }
+        Write-PshConfigUsage -Message $null
+        return 0
+    }
+
+    if ($subaction -notin @('get', 'set', 'reset')) {
+        Write-PshConfigUsage -Message ('unknown config action "{0}".' -f [string]$items[0])
+        return 2
+    }
+
+    $knownCommands = @()
+    foreach ($entry in @(Get-PshCommandEntries -Specification $Specification)) {
+        $knownCommands += (Get-PshCommandName -Entry $entry).ToLowerInvariant()
+    }
+    $knownByName = @{}
+    foreach ($knownCommand in $knownCommands) {
+        $knownByName[$knownCommand] = $true
+    }
+
+    if ($subaction -eq 'get') {
+        if ($items.Count -gt 2) {
+            Write-PshConfigUsage -Message 'config get accepts at most one key.'
+            return 2
+        }
+        if ($items.Count -eq 2 -and
+            -not [string]::Equals(([string]$items[1]).Trim(), 'DisabledCommands', [System.StringComparison]::OrdinalIgnoreCase)) {
+            Write-PshConfigUsage -Message ('unknown config key "{0}".' -f [string]$items[1])
+            return 2
+        }
+
+        $path = Resolve-PshConfigPath
+        $configuration = Import-PshConfiguration -Path $path -KnownCommands $knownCommands
+        Write-Output (Format-PshDisabledCommands -CommandNames @($configuration.DisabledCommands))
+        return 0
+    }
+
+    if ($items.Count -lt 2 -or
+        -not [string]::Equals(([string]$items[1]).Trim(), 'DisabledCommands', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $key = if ($items.Count -gt 1) { [string]$items[1] } else { '' }
+        Write-PshConfigUsage -Message ('unknown or missing config key "{0}".' -f $key)
+        return 2
+    }
+
+    if ($subaction -eq 'reset') {
+        if ($items.Count -ne 2) {
+            Write-PshConfigUsage -Message 'config reset accepts only the DisabledCommands key.'
+            return 2
+        }
+
+        $path = Resolve-PshConfigPath
+        $configuration = Import-PshConfiguration -Path $path -KnownCommands $knownCommands
+        $configuration.DisabledCommands = @()
+        Write-PshConfiguration -Configuration $configuration -KnownCommands $knownCommands
+        Write-Output (Format-PshDisabledCommands -CommandNames @())
+        Write-Output 'The change takes effect in a new shell or after re-importing Psh.'
+        return 0
+    }
+
+    if ($items.Count -lt 3) {
+        Write-PshConfigUsage -Message 'config set requires at least one command name; use reset for the empty set.'
+        return 2
+    }
+
+    $requested = @{}
+    for ($index = 2; $index -lt $items.Count; $index++) {
+        $rawName = [string]$items[$index]
+        $commandName = $rawName.Trim().ToLowerInvariant()
+        if ([string]::IsNullOrWhiteSpace($commandName) -or -not $knownByName.ContainsKey($commandName)) {
+            Write-PshConfigUsage -Message ('unknown Psh command "{0}".' -f $rawName)
+            return 2
+        }
+        $requested[$commandName] = $true
+    }
+
+    $disabled = @()
+    foreach ($knownCommand in $knownCommands) {
+        if ($requested.ContainsKey($knownCommand)) {
+            $disabled += $knownCommand
+        }
+    }
+
+    $path = Resolve-PshConfigPath
+    $configuration = Import-PshConfiguration -Path $path -KnownCommands $knownCommands
+    $configuration.DisabledCommands = @($disabled)
+    Write-PshConfiguration -Configuration $configuration -KnownCommands $knownCommands
+    Write-Output (Format-PshDisabledCommands -CommandNames $disabled)
+    Write-Output 'The change takes effect in a new shell or after re-importing Psh.'
+    return 0
+}
+
 function Write-PshUsage {
     param(
         [AllowNull()]
@@ -622,7 +981,7 @@ function Write-PshUsage {
     if (-not [string]::IsNullOrWhiteSpace($Message)) {
         Write-Output ('psh: usage error: {0}' -f $Message)
     }
-    Write-Output 'Usage: psh version|capabilities|commands [--json]'
+    Write-Output 'Usage: psh version|capabilities|commands [--json] | config get|set|reset'
 }
 
 function Write-PshRuntimeError {
@@ -688,6 +1047,31 @@ function psh {
         return
     }
 
+    if ($action -eq 'config') {
+        $configArguments = @()
+        for ($index = 1; $index -lt $items.Count; $index++) {
+            $configArguments += [string]$items[$index]
+        }
+
+        try {
+            $specification = Import-PshSpecification
+            $configResult = @(Invoke-PshConfigCommand -Arguments $configArguments -Specification $specification)
+            if ($configResult.Count -eq 0 -or $configResult[$configResult.Count - 1] -isnot [int]) {
+                throw 'Psh config command did not return an exit code.'
+            }
+            $configExitCode = [int]$configResult[$configResult.Count - 1]
+            for ($index = 0; $index -lt ($configResult.Count - 1); $index++) {
+                Write-Output $configResult[$index]
+            }
+            Set-PshLastExitCode -Code $configExitCode
+        }
+        catch {
+            Write-PshRuntimeError -ErrorValue $_
+            Set-PshLastExitCode -Code 3
+        }
+        return
+    }
+
     $json = $false
     if ($items.Count -gt 1) {
         for ($index = 1; $index -lt $items.Count; $index++) {
@@ -703,9 +1087,8 @@ function psh {
         }
     }
 
-    # Goal 1 deliberately exposes only discovery/version actions.  Other
-    # management names remain in the machine-readable specification for later
-    # goals, while an actually unknown action is a usage error.
+    # Remaining management names stay in the machine-readable specification for
+    # later goals, while an actually unknown action is a usage error.
     $implementedActions = @('version', 'capabilities', 'commands')
     if ($implementedActions -notcontains $action) {
         Write-PshUsage -Message ('unknown action "{0}".' -f $action)
@@ -831,6 +1214,12 @@ function Get-PshCommandSpecification {
     return $normalized
 }
 
+$fileCommandsPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Commands') -ChildPath 'FileCommands.ps1'
+if (-not (Test-Path -LiteralPath $fileCommandsPath -PathType Leaf)) {
+    throw ('Psh file-command source is missing: {0}' -f $fileCommandsPath)
+}
+. $fileCommandsPath
+
 function Initialize-PshArgumentCompleters {
     $completerPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Generated') -ChildPath 'ArgumentCompleters.ps1'
     if (-not (Test-Path -LiteralPath $completerPath -PathType Leaf)) {
@@ -870,9 +1259,25 @@ else {
 
 Initialize-PshArgumentCompleters
 
-Export-ModuleMember -Function @(
+$exportedFunctions = @(
     'psh'
     'Get-PshCapabilities'
     'Get-PshCommandSpecification'
     'Initialize-PshInteractive'
+    'Find-PshItem'
+    'Set-PshFileTime'
 )
+$exportedFunctions += @(Get-PshEnabledFileCommandNames)
+
+Export-ModuleMember -Function $exportedFunctions
+}
+catch {
+    $pshModuleInitializationError = $_
+    try {
+        Restore-PshCallerFileCommandProjection -State $script:PshCallerFileCommandProjection
+    }
+    finally {
+        $script:PshCallerFileCommandProjection = $null
+    }
+    throw $pshModuleInitializationError
+}

@@ -3,11 +3,23 @@
 
 # Psh command compatibility
 
-Specification schema: `1.0`. Psh version: `0.1.0`.
+Specification schema: `1.1`. Psh version: `0.1.0`.
 
 Core uses PowerShell implementations and contains no third-party utility executables. Full delegates `rg`, `fd`, `jq`, and `bat` to pinned native tools; all other commands keep the PowerShell backend.
 
 For the four delegated commands, the flags listed below are common completion hints; Full accepts each pinned native tool's complete argument set.
+
+## Command tiers
+
+All 64 commands ship in both editions. Tier 2 uses documented PowerShell subsets in Core and for PowerShell-backed Full commands; unsupported syntax in those subsets is rejected with exit code `2` (`UsageError`). Full native `rg`, `fd`, `jq`, and `bat` instead accept their pinned tools' complete argument sets.
+
+| Tier | Fidelity target | Validation |
+| ---: | --- | --- |
+| 1 | Full common semantics: Implements the common behavior represented by the documented flags. | Tier 1 text commands use normalized GNU golden output; platform-shaped commands use structural assertions. |
+| 2 | Documented subset: Core implements the documented subset; PowerShell-backed Full commands use the same subset, while Full native rg, fd, jq, and bat accept each pinned tool's complete argument set. | Core and PowerShell-backed Full commands reject unsupported syntax with exit code 2; Full native commands follow their pinned tools' argument contracts. |
+| 3 | Thin wrapper: Provides a thin PowerShell wrapper around the corresponding host capability. | Structural smoke tests verify the wrapper contract on each supported host. |
+
+Commands marked platform-shaped are verified with structural assertions instead of GNU golden bytes. Other Tier 1 text commands use GNU output normalized for path separators, line endings, and `LC_ALL=C` collation.
 
 ## Editions
 
@@ -15,6 +27,29 @@ For the four delegated commands, the flags listed below are common completion hi
 | --- | --- | --- |
 | Core | - | PowerShell implementations only; no third-party utility executables. |
 | Full | rg, fd, jq, bat | Core plus pinned native ripgrep, fd, jq, and bat executables. |
+
+## Name collision policy
+
+Resolution order: `Psh function` > `built-in alias` > `native executable`.
+
+Psh functions win while enabled; disabling an individual command restores normal alias-first PowerShell resolution.
+
+All commands are enabled by default (`DisabledCommands = @()`). Disable individual Psh functions with `psh config set DisabledCommands curl wget`; restore the default with `psh config reset DisabledCommands`. A disabled name falls through to the built-in alias, then to the native executable.
+
+### Disabled command configuration
+
+DisabledCommands is the only mutable key in v0.1.0. set replaces the complete list, reset restores the empty default, and names are validated case-insensitively against all 64 Psh commands before an atomic write.
+
+Public syntax:
+
+- `psh config get [DisabledCommands]`
+- `psh config set DisabledCommands <command> [<command>...]`
+- `psh config reset DisabledCommands`
+- `psh config --help`
+
+The current-user file is `%LOCALAPPDATA%\Psh\config.psd1`. When the canonical file does not exist and the module is loaded from &lt;installRoot&gt;\versions\&lt;version&gt;\Psh, an existing &lt;installRoot&gt;\config.psd1 is used. Arbitrary ancestor config.psd1 files are never scanned.
+
+Changes are persisted only and take effect in a new shell or after `Remove-Module Psh; Import-Module Psh`.
 
 ## Exit codes
 
@@ -56,69 +91,69 @@ For the four delegated commands, the flags listed below are common completion hi
 
 ## Bash-style commands
 
-| Command | Category | Core | Full | Object API | Flags | Example |
-| --- | --- | --- | --- | --- | --- | --- |
-| `pwd` | Files and search | `powershell` | `powershell` | - | `-L` `-P` `--help` | `pwd` |
-| `cd` | Files and search | `powershell` | `powershell` | - | `-L` `-P` `--help` | `cd src` |
-| `ls` | Files and search | `powershell` | `powershell` | - | `-a` `-l` `-h` `-R` `-1` `-d` `--help` | `ls -la` |
-| `mkdir` | Files and search | `powershell` | `powershell` | - | `-p` `-v` `--help` | `mkdir -p build/output` |
-| `rmdir` | Files and search | `powershell` | `powershell` | - | `-p` `-v` `--ignore-fail-on-non-empty` `--help` | `rmdir -p empty/child` |
-| `cp` | Files and search | `powershell` | `powershell` | - | `-R` `-r` `-f` `-n` `-u` `-v` `-p` `--help` | `cp -R src backup` |
-| `mv` | Files and search | `powershell` | `powershell` | - | `-f` `-n` `-u` `-v` `--help` | `mv -n old.txt new.txt` |
-| `rm` | Files and search | `powershell` | `powershell` | - | `-R` `-r` `-f` `-v` `--help` | `rm file.txt` |
-| `touch` | Files and search | `powershell` | `powershell` | `Set-PshFileTime` | `-a` `-m` `-c` `-r` `-t` `--help` | `touch output.txt` |
-| `ln` | Files and search | `powershell` | `powershell` | - | `-s` `-f` `-n` `-v` `--help` | `ln source.txt target.txt` |
-| `realpath` | Files and search | `powershell` | `powershell` | - | `-e` `-m` `--relative-to` `--help` | `realpath .` |
-| `basename` | Files and search | `powershell` | `powershell` | - | `-a` `-s` `-z` `--help` | `basename src/file.txt .txt` |
-| `dirname` | Files and search | `powershell` | `powershell` | - | `-z` `--help` | `dirname src/file.txt` |
-| `stat` | Files and search | `powershell` | `powershell` | - | `-c` `-f` `-L` `-t` `--help` | `stat file.txt` |
-| `file` | Files and search | `powershell` | `powershell` | - | `-b` `-i` `-L` `-z` `--help` | `file archive.zip` |
-| `tree` | Files and search | `powershell` | `powershell` | - | `-a` `-d` `-f` `-L` `--help` | `tree -L 2 .` |
-| `find` | Files and search | `powershell` | `powershell` | `Find-PshItem` | `-name` `-iname` `-type` `-mindepth` `-maxdepth` `-size` `-mtime` `-mmin` `--hidden` `--exclude` `-print` `-print0` `--help` | `find . -name *.ps1 -type f` |
-| `fd` | Files and search | `powershell` | `native:fd` | `Find-PshItem` | `-g` `--glob` `-t` `--type` `-d` `--max-depth` `--min-depth` `-S` `--size` `--changed-before` `--changed-within` `-H` `--hidden` `-E` `--exclude` `-0` `--print0` `--help` | `fd -e ps1 src` |
-| `du` | Files and search | `powershell` | `powershell` | - | `-a` `-h` `-s` `-d` `--max-depth` `--help` | `du -sh .` |
-| `df` | Files and search | `powershell` | `powershell` | - | `-h` `-T` `--total` `--help` | `df -h` |
-| `mktemp` | Files and search | `powershell` | `powershell` | - | `-d` `-u` `-p` `--tmpdir` `--help` | `mktemp` |
-| `cat` | Text and data | `powershell` | `powershell` | - | `-n` `-b` `-s` `-A` `--help` | `cat file.txt` |
-| `bat` | Text and data | `powershell` | `native:bat` | - | `-n` `-p` `-A` `-l` `--style` `--color` `--paging` `--help` | `bat -n file.ps1` |
-| `head` | Text and data | `powershell` | `powershell` | `Get-PshHead` | `-n` `-c` `-q` `-v` `--help` | `head -n 5 file.txt` |
-| `tail` | Text and data | `powershell` | `powershell` | `Get-PshTail` | `-n` `-c` `-f` `-q` `-v` `--help` | `tail -n 20 log.txt` |
-| `grep` | Text and data | `powershell` | `powershell` | `Find-PshText` | `-i` `-v` `-n` `-r` `-l` `-c` `-m` `-A` `-B` `-C` `-E` `-F` `-q` `--include` `--exclude` `--hidden` `--glob` `--help` | `grep -n error log.txt` |
-| `rg` | Text and data | `powershell` | `native:rg` | `Find-PshText` | `-i` `-v` `-n` `-r` `-l` `-c` `-m` `-A` `-B` `-C` `-E` `-F` `-q` `--include` `--exclude` `--hidden` `--glob` `--help` | `rg -n TODO src` |
-| `sed` | Text and data | `powershell` | `powershell` | - | `-e` `-n` `-i` `-E` `--help` | `sed -e s/old/new/g file.txt` |
-| `awk` | Text and data | `powershell` | `powershell` | - | `-F` `-v` `--help` | `awk -F , {print $1} data.csv` |
-| `jq` | Text and data | `powershell` | `native:jq` | `Select-PshJson` | `-r` `-c` `-e` `--help` | `jq -r .name data.json` |
-| `cut` | Text and data | `powershell` | `powershell` | - | `-b` `-c` `-f` `-d` `-s` `--complement` `--help` | `cut -d , -f 1 data.csv` |
-| `tr` | Text and data | `powershell` | `powershell` | - | `-c` `-d` `-s` `--help` | `tr a-z A-Z` |
-| `sort` | Text and data | `powershell` | `powershell` | - | `-b` `-f` `-n` `-r` `-u` `-k` `-t` `--help` | `sort -n values.txt` |
-| `uniq` | Text and data | `powershell` | `powershell` | - | `-c` `-d` `-u` `-i` `-f` `-s` `--help` | `uniq -c sorted.txt` |
-| `wc` | Text and data | `powershell` | `powershell` | `Measure-PshText` | `-c` `-l` `-m` `-w` `--help` | `wc -l file.txt` |
-| `tee` | Text and data | `powershell` | `powershell` | - | `-a` `-i` `--help` | `tee output.txt` |
-| `xargs` | Text and data | `powershell` | `powershell` | `Invoke-PshXArgs` | `-0` `-n` `-I` `-P` `--help` | `xargs -n 1 echo` |
-| `printf` | Text and data | `powershell` | `powershell` | - | `-v` `--help` | `printf %s\\n value` |
-| `echo` | Text and data | `powershell` | `powershell` | - | `-n` `-e` `-E` `--help` | `echo hello` |
-| `base64` | Text and data | `powershell` | `powershell` | - | `-d` `--decode` `-w` `--wrap` `--help` | `base64 file.bin` |
-| `which` | Environment and processes | `powershell` | `powershell` | - | `-a` `--help` | `which pwsh` |
-| `env` | Environment and processes | `powershell` | `powershell` | - | `-i` `-u` `-0` `--ignore-environment` `--unset` `--help` | `env` |
-| `printenv` | Environment and processes | `powershell` | `powershell` | - | `-0` `--null` `--help` | `printenv PATH` |
-| `export` | Environment and processes | `powershell` | `powershell` | - | `-p` `-n` `--help` | `export NAME=value` |
-| `test` | Environment and processes | `powershell` | `powershell` | - | `-e` `-f` `-d` `-r` `-w` `-x` `-s` `-L` `-n` `-z` `--help` | `test -f file.txt` |
-| `ps` | Environment and processes | `powershell` | `powershell` | - | `-a` `-e` `-f` `-l` `-p` `--help` | `ps -ef` |
-| `kill` | Environment and processes | `powershell` | `powershell` | - | `-s` `-l` `--signal` `--help` | `kill 1234` |
-| `pgrep` | Environment and processes | `powershell` | `powershell` | - | `-f` `-i` `-l` `-n` `-o` `-u` `--help` | `pgrep -l pwsh` |
-| `pkill` | Environment and processes | `powershell` | `powershell` | - | `-f` `-i` `-n` `-o` `-u` `-s` `--signal` `--help` | `pkill -f worker.ps1` |
-| `timeout` | Environment and processes | `powershell` | `powershell` | - | `-s` `-k` `--signal` `--kill-after` `--preserve-status` `--help` | `timeout 10s pwsh -File task.ps1` |
-| `sleep` | Environment and processes | `powershell` | `powershell` | - | `--help` | `sleep 1.5` |
-| `curl` | Network and archives | `powershell` | `powershell` | - | `-f` `-L` `-o` `-O` `-s` `-S` `-I` `-X` `-H` `-d` `--data` `--connect-timeout` `--max-time` `--help` | `curl -fL -o file.zip https://example.invalid/file.zip` |
-| `wget` | Network and archives | `powershell` | `powershell` | - | `-O` `-q` `-c` `-S` `--timeout` `--header` `--method` `--body-data` `--help` | `wget -O file.zip https://example.invalid/file.zip` |
-| `tar` | Network and archives | `powershell` | `powershell` | - | `-c` `-x` `-t` `-f` `-C` `-z` `-v` `--help` | `tar -cf archive.tar src` |
-| `zip` | Network and archives | `powershell` | `powershell` | - | `-r` `-q` `-j` `-u` `--help` | `zip -r archive.zip src` |
-| `unzip` | Network and archives | `powershell` | `powershell` | - | `-l` `-o` `-n` `-d` `-q` `--help` | `unzip archive.zip -d output` |
-| `gzip` | Network and archives | `powershell` | `powershell` | - | `-c` `-d` `-f` `-k` `-n` `--help` | `gzip -k file.txt` |
-| `gunzip` | Network and archives | `powershell` | `powershell` | - | `-c` `-f` `-k` `--help` | `gunzip -k file.gz` |
-| `sha256sum` | Network and archives | `powershell` | `powershell` | - | `-c` `-b` `-t` `-z` `--help` | `sha256sum package.zip` |
-| `md5sum` | Network and archives | `powershell` | `powershell` | - | `-c` `-b` `-t` `-z` `--help` | `md5sum file.bin` |
-| `date` | Network and archives | `powershell` | `powershell` | - | `-u` `-R` `-I` `-d` `--date` `--help` | `date -I` |
-| `whoami` | Network and archives | `powershell` | `powershell` | - | `--help` | `whoami` |
-| `hostname` | Network and archives | `powershell` | `powershell` | - | `-f` `-s` `-i` `--help` | `hostname` |
-| `clear` | Network and archives | `powershell` | `powershell` | - | `-x` `--help` | `clear` |
+| Command | Tier | Platform-shaped | Category | Core | Full | Edition notes | Collision targets | Collision notes | Object API | Flags | Example |
+| --- | ---: | :---: | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `pwd` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | `alias:pwd` | Shadows the built-in pwd alias; disabling this Psh command restores alias resolution. | - | `-L` `-P` `--help` | `pwd` |
+| `cd` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | `alias:cd` | Shadows the built-in cd alias; disabling this Psh command restores alias resolution. | - | `-L` `-P` `--help` | `cd src` |
+| `ls` | 1 | yes | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | `alias:ls` | Shadows the built-in ls alias; disabling this Psh command restores alias resolution. | - | `-a` `-l` `-h` `-R` `-1` `-d` `--help` | `ls -la` |
+| `mkdir` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-p` `-v` `--help` | `mkdir -p build/output` |
+| `rmdir` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | `alias:rmdir` | Shadows the built-in rmdir alias; disabling this Psh command restores alias resolution. | - | `-p` `-v` `--ignore-fail-on-non-empty` `--help` | `rmdir -p empty/child` |
+| `cp` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | `alias:cp` | Shadows the built-in cp alias; disabling this Psh command restores alias resolution. | - | `-R` `-r` `-f` `-n` `-u` `-v` `-p` `--help` | `cp -R src backup` |
+| `mv` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | `alias:mv` | Shadows the built-in mv alias; disabling this Psh command restores alias resolution. | - | `-f` `-n` `-u` `-v` `--help` | `mv -n old.txt new.txt` |
+| `rm` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | `alias:rm` | Shadows the built-in rm alias; disabling this Psh command restores alias resolution. | - | `-R` `-r` `-f` `-v` `--help` | `rm file.txt` |
+| `touch` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | `Set-PshFileTime` | `-a` `-m` `-c` `-r` `-t` `--help` | `touch output.txt` |
+| `ln` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-s` `-f` `-n` `-v` `--help` | `ln source.txt target.txt` |
+| `realpath` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-e` `-m` `--relative-to` `--help` | `realpath .` |
+| `basename` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-a` `-s` `-z` `--help` | `basename src/file.txt .txt` |
+| `dirname` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-z` `--help` | `dirname src/file.txt` |
+| `stat` | 2 | yes | Files and search | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-c` `-f` `-L` `-t` `--help` | `stat file.txt` |
+| `file` | 2 | yes | Files and search | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-b` `-i` `-L` `-z` `--help` | `file archive.zip` |
+| `tree` | 2 | yes | Files and search | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | `native:tree.com` | Shadows Windows tree.com; disabling this Psh command exposes native executable resolution. | - | `-a` `-d` `-f` `-L` `--help` | `tree -L 2 .` |
+| `find` | 2 | no | Files and search | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | `native:find.exe` | Shadows Windows find.exe; disabling this Psh command exposes native executable resolution. | `Find-PshItem` | `-name` `-iname` `-type` `-mindepth` `-maxdepth` `-size` `-mtime` `-mmin` `--hidden` `--exclude` `-print` `-print0` `--help` | `find . -name *.ps1 -type f` |
+| `fd` | 2 | no | Files and search | `powershell` | `native:fd` | Core implements the documented PowerShell subset; unsupported syntax exits 2. Full delegates to pinned native fd and accepts its complete argument set. | `native:fd.exe` | The Psh function remains public and delegates internally to pinned fd.exe in Full; disabling it exposes native executable resolution. | `Find-PshItem` | `-e` `-g` `--glob` `-t` `--type` `-d` `--max-depth` `--min-depth` `-S` `--size` `--changed-before` `--changed-within` `-H` `--hidden` `-E` `--exclude` `-0` `--print0` `--help` | `fd -e ps1 src` |
+| `du` | 2 | yes | Files and search | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-a` `-h` `-s` `-d` `--max-depth` `--help` | `du -sh .` |
+| `df` | 2 | yes | Files and search | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-h` `-T` `--total` `--help` | `df -h` |
+| `mktemp` | 1 | no | Files and search | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-d` `-u` `-p` `--tmpdir` `--help` | `mktemp` |
+| `cat` | 1 | no | Text and data | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | `alias:cat` | Shadows the built-in cat alias; disabling this Psh command restores alias resolution. | - | `-n` `-b` `-s` `-A` `--help` | `cat file.txt` |
+| `bat` | 2 | no | Text and data | `powershell` | `native:bat` | Core implements the documented PowerShell subset; unsupported syntax exits 2. Full delegates to pinned native bat and accepts its complete argument set. | `native:bat.exe` | The Psh function remains public and delegates internally to pinned bat.exe in Full; disabling it exposes native executable resolution. | - | `-n` `-p` `-A` `-l` `--style` `--color` `--paging` `--help` | `bat -n file.ps1` |
+| `head` | 1 | no | Text and data | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | `Get-PshHead` | `-n` `-c` `-q` `-v` `--help` | `head -n 5 file.txt` |
+| `tail` | 1 | no | Text and data | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | `Get-PshTail` | `-n` `-c` `-f` `-q` `-v` `--help` | `tail -n 20 log.txt` |
+| `grep` | 2 | no | Text and data | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | `Find-PshText` | `-i` `-v` `-n` `-r` `-l` `-c` `-m` `-A` `-B` `-C` `-E` `-F` `-q` `--include` `--exclude` `--hidden` `--glob` `--help` | `grep -n error log.txt` |
+| `rg` | 2 | no | Text and data | `powershell` | `native:rg` | Core implements the documented PowerShell subset; unsupported syntax exits 2. Full delegates to pinned native rg and accepts its complete argument set. | `native:rg.exe` | The Psh function remains public and delegates internally to pinned rg.exe in Full; disabling it exposes native executable resolution. | `Find-PshText` | `-i` `-v` `-n` `-r` `-l` `-c` `-m` `-A` `-B` `-C` `-E` `-F` `-q` `--include` `--exclude` `--hidden` `--glob` `--help` | `rg -n TODO src` |
+| `sed` | 2 | no | Text and data | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-e` `-n` `-i` `-E` `--help` | `sed -e s/old/new/g file.txt` |
+| `awk` | 2 | no | Text and data | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-F` `-v` `--help` | `awk -F , {print $1} data.csv` |
+| `jq` | 2 | no | Text and data | `powershell` | `native:jq` | Core implements the documented PowerShell subset; unsupported syntax exits 2. Full delegates to pinned native jq and accepts its complete argument set. | `native:jq.exe` | The Psh function remains public and delegates internally to pinned jq.exe in Full; disabling it exposes native executable resolution. | `Select-PshJson` | `-r` `-c` `-e` `--help` | `jq -r .name data.json` |
+| `cut` | 1 | no | Text and data | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-b` `-c` `-f` `-d` `-s` `--complement` `--help` | `cut -d , -f 1 data.csv` |
+| `tr` | 1 | no | Text and data | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-c` `-d` `-s` `--help` | `tr a-z A-Z` |
+| `sort` | 1 | no | Text and data | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | `alias:sort` `native:sort.exe` | Shadows the built-in sort alias and Windows sort.exe; disabling it restores alias-first resolution. | - | `-b` `-f` `-n` `-r` `-u` `-k` `-t` `--help` | `sort -n values.txt` |
+| `uniq` | 1 | no | Text and data | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-c` `-d` `-u` `-i` `-f` `-s` `--help` | `uniq -c sorted.txt` |
+| `wc` | 1 | no | Text and data | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | `Measure-PshText` | `-c` `-l` `-m` `-w` `--help` | `wc -l file.txt` |
+| `tee` | 1 | no | Text and data | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | `alias:tee` | Shadows the built-in tee alias; disabling this Psh command restores alias resolution. | - | `-a` `-i` `--help` | `tee output.txt` |
+| `xargs` | 2 | no | Text and data | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | `Invoke-PshXArgs` | `-0` `-n` `-I` `-P` `--help` | `xargs -n 1 echo` |
+| `printf` | 1 | no | Text and data | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-v` `--help` | `printf %s\\n value` |
+| `echo` | 1 | no | Text and data | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | `alias:echo` | Shadows the built-in echo alias; disabling this Psh command restores alias resolution. | - | `-n` `-e` `-E` `--help` | `echo hello` |
+| `base64` | 1 | no | Text and data | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-d` `--decode` `-w` `--wrap` `--help` | `base64 file.bin` |
+| `which` | 1 | yes | Environment and processes | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-a` `--help` | `which pwsh` |
+| `env` | 1 | no | Environment and processes | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-i` `-u` `-0` `--ignore-environment` `--unset` `--help` | `env` |
+| `printenv` | 1 | no | Environment and processes | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-0` `--null` `--help` | `printenv PATH` |
+| `export` | 2 | no | Environment and processes | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-p` `-n` `--help` | `export NAME=value` |
+| `test` | 1 | no | Environment and processes | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-e` `-f` `-d` `-r` `-w` `-x` `-s` `-L` `-n` `-z` `--help` | `test -f file.txt` |
+| `ps` | 2 | yes | Environment and processes | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | `alias:ps` | Shadows the built-in ps alias; disabling this Psh command restores alias resolution. | - | `-a` `-e` `-f` `-l` `-p` `--help` | `ps -ef` |
+| `kill` | 2 | no | Environment and processes | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | `alias:kill` | Shadows the built-in kill alias; disabling this Psh command restores alias resolution. | - | `-s` `-l` `--signal` `--help` | `kill 1234` |
+| `pgrep` | 2 | yes | Environment and processes | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-f` `-i` `-l` `-n` `-o` `-u` `--help` | `pgrep -l pwsh` |
+| `pkill` | 2 | yes | Environment and processes | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-f` `-i` `-n` `-o` `-u` `-s` `--signal` `--help` | `pkill -f worker.ps1` |
+| `timeout` | 2 | no | Environment and processes | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | `native:timeout.exe` | Shadows Windows timeout.exe; disabling this Psh command exposes native executable resolution. | - | `-s` `-k` `--signal` `--kill-after` `--preserve-status` `--help` | `timeout 10s pwsh -File task.ps1` |
+| `sleep` | 1 | no | Environment and processes | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | `alias:sleep` | Shadows the built-in sleep alias; disabling this Psh command restores alias resolution. | - | `--help` | `sleep 1.5` |
+| `curl` | 2 | no | Network and archives | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | `alias:curl` `native:curl.exe` | Shadows the Windows PowerShell curl alias and Windows curl.exe; disabling it restores alias-first resolution. | - | `-f` `-L` `-o` `-O` `-s` `-S` `-I` `-X` `-H` `-d` `--data` `--connect-timeout` `--max-time` `--help` | `curl -fL -o file.zip https://example.invalid/file.zip` |
+| `wget` | 2 | no | Network and archives | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | `alias:wget` | Shadows the Windows PowerShell wget alias; disabling this Psh command restores alias resolution. | - | `-O` `-q` `-c` `-S` `--timeout` `--header` `--method` `--body-data` `--help` | `wget -O file.zip https://example.invalid/file.zip` |
+| `tar` | 2 | no | Network and archives | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | `native:tar.exe` | Shadows Windows tar.exe; disabling this Psh command exposes native executable resolution. | - | `-c` `-x` `-t` `-f` `-C` `-z` `-v` `--help` | `tar -cf archive.tar src` |
+| `zip` | 2 | no | Network and archives | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-r` `-q` `-j` `-u` `--help` | `zip -r archive.zip src` |
+| `unzip` | 2 | no | Network and archives | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-l` `-o` `-n` `-d` `-q` `--help` | `unzip archive.zip -d output` |
+| `gzip` | 2 | no | Network and archives | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-c` `-d` `-f` `-k` `-n` `--help` | `gzip -k file.txt` |
+| `gunzip` | 2 | no | Network and archives | `powershell` | `powershell` | Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-c` `-f` `-k` `--help` | `gunzip -k file.gz` |
+| `sha256sum` | 1 | no | Network and archives | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-c` `-b` `-t` `-z` `--help` | `sha256sum package.zip` |
+| `md5sum` | 1 | no | Network and archives | `powershell` | `powershell` | Core and Full use the same PowerShell implementation with full common semantics. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-c` `-b` `-t` `-z` `--help` | `md5sum file.bin` |
+| `date` | 3 | yes | Network and archives | `powershell` | `powershell` | Core and Full use the same thin PowerShell wrapper. | - | No default PowerShell alias or Windows executable collision is documented. | - | `-u` `-R` `-I` `-d` `--date` `--help` | `date -I` |
+| `whoami` | 3 | yes | Network and archives | `powershell` | `powershell` | Core and Full use the same thin PowerShell wrapper. | `native:whoami.exe` | Shadows Windows whoami.exe; disabling this Psh command exposes native executable resolution. | - | `--help` | `whoami` |
+| `hostname` | 3 | yes | Network and archives | `powershell` | `powershell` | Core and Full use the same thin PowerShell wrapper. | `native:hostname.exe` | Shadows Windows hostname.exe; disabling this Psh command exposes native executable resolution. | - | `-f` `-s` `-i` `--help` | `hostname` |
+| `clear` | 3 | yes | Network and archives | `powershell` | `powershell` | Core and Full use the same thin PowerShell wrapper. | `alias:clear` | Shadows the built-in clear alias; disabling this Psh command restores alias resolution. | - | `-x` `--help` | `clear` |

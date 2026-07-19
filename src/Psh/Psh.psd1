@@ -11,11 +11,35 @@
     Description = 'A focused Bash-style command compatibility layer for Windows PowerShell.'
     PowerShellVersion = '5.1'
     CompatiblePSEditions = @('Desktop', 'Core')
+    ScriptsToProcess = @('Commands/Project-FileCommands.ps1')
     FunctionsToExport = @(
         'psh'
         'Get-PshCapabilities'
         'Get-PshCommandSpecification'
         'Initialize-PshInteractive'
+        'Find-PshItem'
+        'Set-PshFileTime'
+        'pwd'
+        'cd'
+        'ls'
+        'mkdir'
+        'rmdir'
+        'cp'
+        'mv'
+        'rm'
+        'touch'
+        'ln'
+        'realpath'
+        'basename'
+        'dirname'
+        'stat'
+        'file'
+        'tree'
+        'find'
+        'fd'
+        'du'
+        'df'
+        'mktemp'
     )
     CmdletsToExport = @()
     VariablesToExport = @()
