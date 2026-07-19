@@ -588,10 +588,18 @@ try {
         [IO.File]::WriteAllText((Join-Path $replaceOldDirectory 'keep.txt'), 'old-directory-safe', $utf8NoBom)
         [IO.File]::WriteAllText((Join-Path $replaceNewDirectory 'keep.txt'), 'new-directory-safe', $utf8NoBom)
         Microsoft.PowerShell.Management\New-Item -Path $replaceDirectoryLink -ItemType SymbolicLink -Target $replaceOldDirectory -ErrorAction Stop | Microsoft.PowerShell.Core\Out-Null
-        $replaceDirectorySymlink = Invoke-PshBatch1Command -Name ln -Arguments @('-sfn', $replaceNewDirectory, $replaceDirectoryLink)
+        $replaceDirectoryTargetOperand = 'replace-new'
+        $replaceDirectorySymlink = Invoke-PshBatch1Command -Name ln -Arguments @('-sfn', $replaceDirectoryTargetOperand, $replaceDirectoryLink)
         $replaceDirectoryLinkItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $replaceDirectoryLink -Force -ErrorAction Stop
         $replaceDirectoryTarget = [string]@($replaceDirectoryLinkItem.Target)[0]
-        Assert-PshBatch1 ($replaceDirectorySymlink.ExitCode -eq 0 -and $replaceDirectoryTarget -ceq $replaceNewDirectory -and [IO.File]::ReadAllText((Join-Path $replaceOldDirectory 'keep.txt'), $utf8NoBom) -ceq 'old-directory-safe' -and [IO.File]::ReadAllText((Join-Path $replaceNewDirectory 'keep.txt'), $utf8NoBom) -ceq 'new-directory-safe') 'ln -sfn did not replace a directory symlink itself or changed a target directory.'
+        if ($env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\') {
+            Assert-PshBatch1 ($replaceDirectorySymlink.ExitCode -eq 0) ('Windows ln -sfn failed to replace a directory symbolic link: {0}' -f ($replaceDirectorySymlink.Output -join ' | '))
+            Assert-PshBatch1 (([IO.FileAttributes]$replaceDirectoryLinkItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -and $replaceDirectoryTarget -ceq $replaceDirectoryTargetOperand) 'Windows ln -sfn did not install a symbolic link with the literal relative directory target.'
+            Assert-PshBatch1 ([IO.File]::ReadAllText((Join-Path $replaceOldDirectory 'keep.txt'), $utf8NoBom) -ceq 'old-directory-safe' -and [IO.File]::ReadAllText((Join-Path $replaceNewDirectory 'keep.txt'), $utf8NoBom) -ceq 'new-directory-safe' -and [IO.File]::ReadAllText((Join-Path $replaceDirectoryLink 'keep.txt'), $utf8NoBom) -ceq 'new-directory-safe') 'Windows ln -sfn changed a target directory or did not redirect the link to the new target.'
+        }
+        else {
+            Assert-PshBatch1 ($replaceDirectorySymlink.ExitCode -eq 0 -and $replaceDirectoryTarget -ceq $replaceDirectoryTargetOperand -and [IO.File]::ReadAllText((Join-Path $replaceOldDirectory 'keep.txt'), $utf8NoBom) -ceq 'old-directory-safe' -and [IO.File]::ReadAllText((Join-Path $replaceNewDirectory 'keep.txt'), $utf8NoBom) -ceq 'new-directory-safe') 'ln -sfn did not replace a directory symlink itself or changed a target directory.'
+        }
 
         $symlinkRealPhysical = (Invoke-PshBatch1Command -Name realpath -Arguments @($symlinkReal)).Output[0]
         $physicalRealpath = Invoke-PshBatch1Command -Name realpath -Arguments @((Join-Path $symlinkLinks 'dir-link/target.txt'))
@@ -664,7 +672,8 @@ try {
             $windowsLiteralFileLink = 'Windows literal file link.txt'
             $windowsLiteralFileResult = Invoke-PshBatch1Command -Name ln -Arguments @('-s', $windowsLiteralFileTarget, $windowsLiteralFileLink)
             $windowsLiteralFileItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $windowsLiteralFileLink -Force -ErrorAction Stop
-            Assert-PshBatch1 ($windowsLiteralFileResult.ExitCode -eq 0 -and [string]@($windowsLiteralFileItem.Target)[0] -ceq $windowsLiteralFileTarget -and [IO.File]::ReadAllText($windowsLiteralFileLink, $utf8NoBom) -ceq 'windows-literal-file') 'Windows ln -s did not preserve or resolve a relative file target containing spaces, Unicode, and .. components.'
+            $windowsLiteralFilePath = [IO.Path]::GetFullPath((Join-Path -Path (Get-Location).ProviderPath -ChildPath $windowsLiteralFileLink))
+            Assert-PshBatch1 ($windowsLiteralFileResult.ExitCode -eq 0 -and [string]@($windowsLiteralFileItem.Target)[0] -ceq $windowsLiteralFileTarget -and [IO.File]::ReadAllText($windowsLiteralFilePath, $utf8NoBom) -ceq 'windows-literal-file') 'Windows ln -s did not preserve or resolve a relative file target containing spaces, Unicode, and .. components.'
         }
         Set-Location -LiteralPath $fixtureRoot
     }

@@ -1303,22 +1303,22 @@ function Copy-PshLinkEntry {
             Microsoft.PowerShell.Management\New-Item -Path $temporaryLink -ItemType $itemType -Target $targetText -ErrorAction Stop | Microsoft.PowerShell.Core\Out-Null
         }
         if ($null -eq $destinationItem) {
-            Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporaryLink -Destination $Destination -ErrorAction Stop
+            Move-PshLiteralEntry -Source $temporaryLink -Destination $Destination
         }
         elseif ((Get-PshItemTypeName -Item $destinationItem) -eq 'file') {
             Replace-PshFileEntry -Replacement $temporaryLink -Destination $Destination
         }
         else {
             $backup = New-PshSiblingTemporaryPath -Destination $Destination -Purpose 'copy-link-backup'
-            Microsoft.PowerShell.Management\Move-Item -LiteralPath $Destination -Destination $backup -ErrorAction Stop
+            Move-PshLiteralEntry -Source $Destination -Destination $backup
             try {
-                Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporaryLink -Destination $Destination -ErrorAction Stop
+                Move-PshLiteralEntry -Source $temporaryLink -Destination $Destination
                 $replacementCommitted = $true
             }
             catch {
                 $replacementError = $_.Exception.Message
                 try {
-                    Microsoft.PowerShell.Management\Move-Item -LiteralPath $backup -Destination $Destination -ErrorAction Stop
+                    Move-PshLiteralEntry -Source $backup -Destination $Destination
                     $backupRestored = $true
                 }
                 catch {
@@ -1329,11 +1329,11 @@ function Copy-PshLinkEntry {
         }
     }
     finally {
-        if ([IO.File]::Exists($temporaryLink) -or [IO.Directory]::Exists($temporaryLink)) {
-            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $temporaryLink -Force -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace($temporaryLink)) {
+            try { Remove-PshLiteralEntry -Path $temporaryLink } catch { }
         }
-        if (($replacementCommitted -or $backupRestored) -and -not [string]::IsNullOrWhiteSpace($backup) -and ([IO.File]::Exists($backup) -or [IO.Directory]::Exists($backup))) {
-            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+        if (($replacementCommitted -or $backupRestored) -and -not [string]::IsNullOrWhiteSpace($backup)) {
+            try { Remove-PshLiteralEntry -Path $backup } catch { }
         }
     }
     if ($VerboseOutput) {
@@ -1514,6 +1514,31 @@ function New-PshSiblingTemporaryPath {
     return $candidate
 }
 
+function Move-PshLiteralEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Source,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+
+    $sourceItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Source -Force -ErrorAction Stop
+    $attributes = [IO.FileAttributes]$sourceItem.Attributes
+    if (($env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\') -and
+        ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        if (($attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+            [IO.Directory]::Move($Source, $Destination)
+        }
+        else {
+            [IO.File]::Move($Source, $Destination)
+        }
+        return
+    }
+
+    Microsoft.PowerShell.Management\Move-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+}
+
 function Install-PshStagedEntry {
     param(
         [Parameter(Mandatory = $true)]
@@ -1531,18 +1556,18 @@ function Install-PshStagedEntry {
 
     $backup = New-PshSiblingTemporaryPath -Destination $Destination -Purpose 'replace-backup'
     $installed = $false
-    Microsoft.PowerShell.Management\Move-Item -LiteralPath $Destination -Destination $backup -ErrorAction Stop
+    Move-PshLiteralEntry -Source $Destination -Destination $backup
     try {
         try {
             if ($null -ne $BeforeInstall) { & $BeforeInstall }
-            Microsoft.PowerShell.Management\Move-Item -LiteralPath $Stage -Destination $Destination -ErrorAction Stop
+            Move-PshLiteralEntry -Source $Stage -Destination $Destination
             $installed = $true
         }
         catch {
             $installError = $_.Exception.Message
             try {
                 if ($null -ne $BeforeRollback) { & $BeforeRollback }
-                Microsoft.PowerShell.Management\Move-Item -LiteralPath $backup -Destination $Destination -ErrorAction Stop
+                Move-PshLiteralEntry -Source $backup -Destination $Destination
             }
             catch {
                 throw ('staged install failed ({0}); rollback failed ({1}); original retained at: {2}' -f $installError, $_.Exception.Message, $backup)
@@ -1551,7 +1576,7 @@ function Install-PshStagedEntry {
         }
     }
     finally {
-        if ($installed -and -not $RetainBackup -and (Test-Path -LiteralPath $backup)) {
+        if ($installed -and -not $RetainBackup) {
             try {
                 Remove-PshLiteralEntry -Path $backup
             }
@@ -1681,7 +1706,18 @@ function Remove-PshLiteralEntry {
     $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     $itemType = Get-PshItemTypeName -Item $item
     if ($itemType -eq 'link') {
-        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $attributes = [IO.FileAttributes]$item.Attributes
+        if ($env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\') {
+            if (($attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+                [IO.Directory]::Delete($Path, $false)
+            }
+            else {
+                [IO.File]::Delete($Path)
+            }
+        }
+        else {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+        }
     }
     elseif ($itemType -eq 'directory') {
         Clear-PshReadOnlyRemovalAttributes -Path $Path
@@ -1704,19 +1740,19 @@ function Restore-PshMoveDestination {
 
     $installedRecovery = New-PshSiblingTemporaryPath -Destination $Destination -Purpose 'move-installed'
     try {
-        Microsoft.PowerShell.Management\Move-Item -LiteralPath $Destination -Destination $installedRecovery -ErrorAction Stop
+        Move-PshLiteralEntry -Source $Destination -Destination $installedRecovery
     }
     catch {
         throw ('rollback could not preserve the installed entry ({0}); original retained at: {1}; installed entry remains at: {2}' -f $_.Exception.Message, $Backup, $Destination)
     }
 
     try {
-        Microsoft.PowerShell.Management\Move-Item -LiteralPath $Backup -Destination $Destination -ErrorAction Stop
+        Move-PshLiteralEntry -Source $Backup -Destination $Destination
     }
     catch {
         $restoreError = $_.Exception.Message
         try {
-            Microsoft.PowerShell.Management\Move-Item -LiteralPath $installedRecovery -Destination $Destination -ErrorAction Stop
+            Move-PshLiteralEntry -Source $installedRecovery -Destination $Destination
         }
         catch {
             throw ('rollback failed ({0}); reinstall failed ({1}); original retained at: {2}; installed entry retained at: {3}' -f $restoreError, $_.Exception.Message, $Backup, $installedRecovery)
@@ -1920,7 +1956,7 @@ function mv {
                 }
             }
             else {
-                Microsoft.PowerShell.Management\Move-Item -LiteralPath ([string]$plan.Source) -Destination ([string]$plan.Target) -ErrorAction Stop
+                Move-PshLiteralEntry -Source ([string]$plan.Source) -Destination ([string]$plan.Target)
             }
             if ($verbose) {
                 Write-Output ("renamed '{0}' -> '{1}'" -f $plan.SourceDisplay, $plan.TargetDisplay)
@@ -2356,12 +2392,12 @@ function ln {
                 }
             }
             else {
-                Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporaryLink -Destination $linkResolved -ErrorAction Stop
+                Move-PshLiteralEntry -Source $temporaryLink -Destination $linkResolved
             }
         }
         finally {
-            if ([IO.File]::Exists($temporaryLink) -or [IO.Directory]::Exists($temporaryLink)) {
-                Microsoft.PowerShell.Management\Remove-Item -LiteralPath $temporaryLink -Force -ErrorAction SilentlyContinue
+            if (-not [string]::IsNullOrWhiteSpace($temporaryLink)) {
+                try { Remove-PshLiteralEntry -Path $temporaryLink } catch { }
             }
         }
         if ($verbose) {
