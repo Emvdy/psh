@@ -111,6 +111,27 @@ function Test-PshBatch3ByteSequence {
     return $true
 }
 
+function Get-PshBatch3EncodingFingerprint {
+    param([Parameter(Mandatory = $true)][Text.Encoding]$Encoding)
+
+    return [PSCustomObject]@{
+        CodePage = [int]$Encoding.CodePage
+        WebName = [string]$Encoding.WebName
+        Preamble = [byte[]]$Encoding.GetPreamble()
+    }
+}
+
+function Test-PshBatch3EncodingFingerprint {
+    param(
+        [Parameter(Mandatory = $true)][object]$Before,
+        [Parameter(Mandatory = $true)][object]$After
+    )
+
+    return [int]$Before.CodePage -eq [int]$After.CodePage -and
+        [string]::Equals([string]$Before.WebName, [string]$After.WebName, [StringComparison]::Ordinal) -and
+        (Test-PshBatch3ByteSequence ([byte[]]$Before.Preamble) ([byte[]]$After.Preamble))
+}
+
 function Format-PshBatch3ByteDiagnostic {
     param(
         [AllowNull()][byte[]]$Actual,
@@ -730,8 +751,13 @@ exit 2
     $parallelRoot = Join-Path $helperRoot 'parallel'
     [void][IO.Directory]::CreateDirectory($parallelRoot)
     $parallelArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $helperPath, 'overlap', $parallelRoot)
+    $xargsParallelEncodingBefore = if ($isWindowsPlatform) { Get-PshBatch3EncodingFingerprint -Encoding ([Console]::InputEncoding) } else { $null }
     $xargsParallel = Invoke-PshBatch3Command -Name xargs -Arguments (@('-n', '1', '-P', '2', $powershellPath) + $parallelArguments) -PipelineInput @('slow fast third fourth') -UsePipeline
     Assert-PshBatch3 ($xargsParallel.ExitCode -eq 0 -and ($xargsParallel.Output -join '|') -eq 'done:slow|done:fast|done:third|done:fourth') 'xargs -P did not preserve invocation output order.'
+    if ($isWindowsPlatform) {
+        $xargsParallelEncodingAfter = Get-PshBatch3EncodingFingerprint -Encoding ([Console]::InputEncoding)
+        Assert-PshBatch3 (Test-PshBatch3EncodingFingerprint -Before $xargsParallelEncodingBefore -After $xargsParallelEncodingAfter) ('xargs -P changed Console.InputEncoding while starting native processes concurrently. BeforeCodePage={0}; AfterCodePage={1}; BeforeWebName={2}; AfterWebName={3}; Preamble={4}' -f $xargsParallelEncodingBefore.CodePage, $xargsParallelEncodingAfter.CodePage, $xargsParallelEncodingBefore.WebName, $xargsParallelEncodingAfter.WebName, (Format-PshBatch3ByteDiagnostic -Actual ([byte[]]$xargsParallelEncodingAfter.Preamble) -Expected ([byte[]]$xargsParallelEncodingBefore.Preamble)))
+    }
     $intervals = @()
     foreach ($token in @('slow', 'fast', 'third', 'fourth')) {
         $parts = [IO.File]::ReadAllText((Join-Path $parallelRoot ($token + '.interval')), $utf8NoBom).Split('|')
@@ -929,12 +955,37 @@ exit 0
     Assert-PshBatch3 ([string]$fullJqCapability.activeBackend -ceq 'native:jq') 'Full does not report native:jq as the active jq backend.'
 
     if ($isWindowsPlatform) {
+        $fullCommandModule = Get-Module -Name Psh -ErrorAction Stop
+        $invalidNativePath = Join-Path $helperRoot 'invalid-native.exe'
+        [IO.File]::WriteAllBytes($invalidNativePath, ([byte[]]$utf8NoBom.GetBytes('not a valid Windows executable')))
+        $invalidStartEncodingBefore = Get-PshBatch3EncodingFingerprint -Encoding ([Console]::InputEncoding)
+        $invalidStartError = $null
+        try {
+            & $fullCommandModule {
+                param($ProcessPath, $ProcessWorkingDirectory)
+                Invoke-PshCapturedProcess -FilePath ([string]$ProcessPath) -Arguments @() -StandardInputBytes ([byte[]]@()) -RedirectStandardInput:$true -WorkingDirectory ([string]$ProcessWorkingDirectory) | Out-Null
+            } $invalidNativePath $helperRoot
+        }
+        catch {
+            $invalidStartError = $_
+        }
+        $invalidStartEncodingAfter = Get-PshBatch3EncodingFingerprint -Encoding ([Console]::InputEncoding)
+        $invalidStartErrorMessage = if ($null -eq $invalidStartError) { '<none>' } else { [string]$invalidStartError.Exception.Message }
+        Assert-PshBatch3 ($null -ne $invalidStartError -and (Test-PshBatch3EncodingFingerprint -Before $invalidStartEncodingBefore -After $invalidStartEncodingAfter)) ('Invoke-PshCapturedProcess did not throw for an invalid executable or restore Console.InputEncoding after Start failed. Error={0}; BeforeCodePage={1}; AfterCodePage={2}; BeforeWebName={3}; AfterWebName={4}; Preamble={5}' -f $invalidStartErrorMessage, $invalidStartEncodingBefore.CodePage, $invalidStartEncodingAfter.CodePage, $invalidStartEncodingBefore.WebName, $invalidStartEncodingAfter.WebName, (Format-PshBatch3ByteDiagnostic -Actual ([byte[]]$invalidStartEncodingAfter.Preamble) -Expected ([byte[]]$invalidStartEncodingBefore.Preamble)))
+
+        $fullJqConsoleInputEncodingBefore = Get-PshBatch3EncodingFingerprint -Encoding ([Console]::InputEncoding)
         $fullJqArgumentValues = @('--stdin', '', 'a"b', 'trail\', 'space value')
         $fullJqUnicodeInput = ([string][char]0x6c49) + ([string][char]0x5b57) + ' caf' + ([string][char]0x00e9)
         $fullJqExpectedStdinBytes = [byte[]]$utf8NoBom.GetBytes($fullJqUnicodeInput)
         $fullJqNative = Invoke-PshBatch3Command -Name jq -Arguments $fullJqArgumentValues -PipelineInput @($fullJqUnicodeInput) -UsePipeline
         $fullJqNativeCapture = ConvertFrom-PshBatch3NativeCapture -Lines $fullJqNative.Output
         Assert-PshBatch3 ($fullJqNative.ExitCode -eq 0 -and $fullJqNativeCapture.Unexpected.Count -eq 0 -and (Test-PshBatch3StringArray @($fullJqNativeCapture.Arguments) $fullJqArgumentValues) -and (Test-PshBatch3ByteSequence $fullJqNativeCapture.StdinBytes $fullJqExpectedStdinBytes)) ('Full jq did not preserve exact native argv or write non-ASCII pipeline input as exact UTF-8 bytes. ExitCode={0}; Output={1}; Unexpected={2}; ActualArguments={3}; ExpectedArguments={4}; Stdin={5}' -f $fullJqNative.ExitCode, (Format-PshBatch3DiagnosticStrings $fullJqNative.Output), (Format-PshBatch3DiagnosticStrings $fullJqNativeCapture.Unexpected), (Format-PshBatch3DiagnosticStrings $fullJqNativeCapture.Arguments), (Format-PshBatch3DiagnosticStrings $fullJqArgumentValues), (Format-PshBatch3ByteDiagnostic -Actual $fullJqNativeCapture.StdinBytes -Expected $fullJqExpectedStdinBytes))
+        $fullJqEmptyInputArguments = @('--stdin')
+        $fullJqEmptyInput = Invoke-PshBatch3Command -Name jq -Arguments $fullJqEmptyInputArguments -PipelineInput @('') -UsePipeline
+        $fullJqEmptyInputCapture = ConvertFrom-PshBatch3NativeCapture -Lines $fullJqEmptyInput.Output
+        Assert-PshBatch3 ($fullJqEmptyInput.ExitCode -eq 0 -and $fullJqEmptyInputCapture.Unexpected.Count -eq 0 -and (Test-PshBatch3StringArray @($fullJqEmptyInputCapture.Arguments) $fullJqEmptyInputArguments) -and (Test-PshBatch3ByteSequence $fullJqEmptyInputCapture.StdinBytes ([byte[]]@()))) ('Full jq wrote bytes for an empty-string pipeline item. ExitCode={0}; Output={1}; Unexpected={2}; ActualArguments={3}; Stdin={4}' -f $fullJqEmptyInput.ExitCode, (Format-PshBatch3DiagnosticStrings $fullJqEmptyInput.Output), (Format-PshBatch3DiagnosticStrings $fullJqEmptyInputCapture.Unexpected), (Format-PshBatch3DiagnosticStrings $fullJqEmptyInputCapture.Arguments), (Format-PshBatch3ByteDiagnostic -Actual $fullJqEmptyInputCapture.StdinBytes -Expected ([byte[]]@())))
+        $fullJqConsoleInputEncodingAfter = Get-PshBatch3EncodingFingerprint -Encoding ([Console]::InputEncoding)
+        Assert-PshBatch3 (Test-PshBatch3EncodingFingerprint -Before $fullJqConsoleInputEncodingBefore -After $fullJqConsoleInputEncodingAfter) ('Full jq changed Console.InputEncoding while starting a native process. BeforeCodePage={0}; AfterCodePage={1}; BeforeWebName={2}; AfterWebName={3}; Preamble={4}' -f $fullJqConsoleInputEncodingBefore.CodePage, $fullJqConsoleInputEncodingAfter.CodePage, $fullJqConsoleInputEncodingBefore.WebName, $fullJqConsoleInputEncodingAfter.WebName, (Format-PshBatch3ByteDiagnostic -Actual ([byte[]]$fullJqConsoleInputEncodingAfter.Preamble) -Expected ([byte[]]$fullJqConsoleInputEncodingBefore.Preamble)))
     }
     else {
         $fullJqArguments = Invoke-PshBatch3Command -Name jq -Arguments @('--native-only', '', 'space value', '--')

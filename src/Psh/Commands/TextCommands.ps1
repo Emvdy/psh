@@ -512,13 +512,46 @@ function Invoke-PshCapturedProcess {
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardInput = $RedirectStandardInput
+        $standardInputEncoding = $null
+        $standardInputEncodingProperty = $null
+        if ($RedirectStandardInput) {
+            $standardInputEncoding = New-Object Text.UTF8Encoding($false)
+            $standardInputEncodingProperty = $startInfo.PSObject.Properties['StandardInputEncoding']
+            if ($null -ne $standardInputEncodingProperty) {
+                $startInfo.StandardInputEncoding = $standardInputEncoding
+            }
+        }
         $startInfo.RedirectStandardOutput = $true
         $startInfo.RedirectStandardError = $true
         Set-PshProcessArguments -StartInfo $startInfo -Arguments $launchArguments
 
         $process = New-Object Diagnostics.Process
         $process.StartInfo = $startInfo
-        if (-not $process.Start()) { throw ('failed to start process: {0}' -f $FilePath) }
+        $started = $false
+        if ($RedirectStandardInput -and $null -eq $standardInputEncodingProperty) {
+            $consoleInputEncodingLock = [string]::Intern('Psh.Invoke-PshCapturedProcess.ConsoleInputEncoding')
+            $consoleInputEncodingLockTaken = $false
+            try {
+                [Threading.Monitor]::Enter($consoleInputEncodingLock, [ref]$consoleInputEncodingLockTaken)
+                $originalConsoleInputEncoding = [Console]::InputEncoding
+                try {
+                    [Console]::InputEncoding = $standardInputEncoding
+                    $started = $process.Start()
+                }
+                finally {
+                    [Console]::InputEncoding = $originalConsoleInputEncoding
+                }
+            }
+            finally {
+                if ($consoleInputEncodingLockTaken) {
+                    [Threading.Monitor]::Exit($consoleInputEncodingLock)
+                }
+            }
+        }
+        else {
+            $started = $process.Start()
+        }
+        if (-not $started) { throw ('failed to start process: {0}' -f $FilePath) }
         $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdoutBuffer)
         $stderrTask = $process.StandardError.BaseStream.CopyToAsync($stderrBuffer)
         if ($RedirectStandardInput) {
