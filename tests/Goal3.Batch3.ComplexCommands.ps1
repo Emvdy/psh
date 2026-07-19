@@ -593,9 +593,8 @@ try {
     Assert-PshBatch3 ($jqClrStringProperty.ExitCode -eq 3 -and $jqClrArrayProperty.ExitCode -eq 3) 'Core jq exposed CLR Length/Count properties instead of rejecting non-object indexing at runtime.'
     $jqLength = Invoke-PshBatch3Command -Name jq -Arguments @('.items | length', $jqPath)
     Assert-PshBatch3 ($jqLength.ExitCode -eq 0 -and ($jqLength.Output -join '').Trim() -eq '3') 'Core jq length failed.'
-    $jqKeys = Invoke-PshBatch3Command -Name jq -Arguments @('.meta | keys', $jqPath)
-    $jqKeyValues = @(($jqKeys.Output -join "`n") | ConvertFrom-Json -ErrorAction Stop)
-    Assert-PshBatch3 ($jqKeys.ExitCode -eq 0 -and (Test-PshBatch3StringArray $jqKeyValues @('a', 'z'))) 'Core jq keys failed or was not deterministic.'
+    $jqKeys = Invoke-PshBatch3Command -Name jq -Arguments @('-c', '.meta | keys', $jqPath)
+    Assert-PshBatch3 ($jqKeys.ExitCode -eq 0 -and $jqKeys.Output.Count -eq 1 -and $jqKeys.Output[0] -ceq '["a","z"]') ('Core jq keys failed or was not deterministic. ExitCode={0}; Output={1}' -f $jqKeys.ExitCode, (Format-PshBatch3DiagnosticStrings $jqKeys.Output))
     $jqScalarKeys = Invoke-PshBatch3Command -Name jq -Arguments @('.name | keys', $jqPath)
     Assert-PshBatch3 ($jqScalarKeys.ExitCode -eq 2) 'Core jq keys accepted a scalar value.'
     $jqMap = Invoke-PshBatch3Command -Name jq -Arguments @('-c', '.items | map(.name)', $jqPath)
