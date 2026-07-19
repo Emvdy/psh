@@ -24,18 +24,12 @@ if ($null -ne $pshProjectionHandoff) {
 }
 Remove-Variable -Name pshProjectionHandoff -ErrorAction SilentlyContinue
 
-function Restore-PshCallerFileCommandProjection {
-    param(
-        [AllowNull()]
-        [object]$State
-    )
-
-    if ($null -eq $State -or $null -eq $State.Aliases -or $null -eq $State.Restore) { return }
-    & $State.Restore $State.Aliases
-}
-
 $ExecutionContext.SessionState.Module.OnRemove = {
-    Restore-PshCallerFileCommandProjection -State $script:PshCallerFileCommandProjection
+    if ($null -ne $script:PshCallerFileCommandProjection -and
+        $null -ne $script:PshCallerFileCommandProjection.Restore -and
+        @($script:PshCallerFileCommandProjection.ScopeStates).Count -gt 0) {
+        . ($script:PshCallerFileCommandProjection.Restore) $script:PshCallerFileCommandProjection
+    }
     $script:PshCallerFileCommandProjection = $null
 }
 
@@ -1274,7 +1268,11 @@ Export-ModuleMember -Function $exportedFunctions
 catch {
     $pshModuleInitializationError = $_
     try {
-        Restore-PshCallerFileCommandProjection -State $script:PshCallerFileCommandProjection
+        if ($null -ne $script:PshCallerFileCommandProjection -and
+            $null -ne $script:PshCallerFileCommandProjection.Restore -and
+            @($script:PshCallerFileCommandProjection.ScopeStates).Count -gt 0) {
+            . ($script:PshCallerFileCommandProjection.Restore) $script:PshCallerFileCommandProjection
+        }
     }
     finally {
         $script:PshCallerFileCommandProjection = $null

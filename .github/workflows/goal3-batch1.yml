@@ -71,6 +71,7 @@ jobs:
               ./scripts/Test-InteractiveDependencies.ps1
               ./tests/Goal2.Acceptance.ps1
               ./tests/Goal3.Batch1.Config.ps1
+              ./tests/Goal3.Batch1.AliasScope.ps1
               ./tests/Goal3.Batch1.FileCommands.ps1 -GoldenRoot $env:GOLDEN_ROOT
           }
           finally {
@@ -123,6 +124,7 @@ jobs:
               ./scripts/Test-InteractiveDependencies.ps1
               ./tests/Goal2.Acceptance.ps1
               ./tests/Goal3.Batch1.Config.ps1
+              ./tests/Goal3.Batch1.AliasScope.ps1
               ./tests/Goal3.Batch1.FileCommands.ps1 -GoldenRoot $env:GOLDEN_ROOT
           }
           finally {
