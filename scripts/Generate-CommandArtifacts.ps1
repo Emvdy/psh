@@ -79,6 +79,53 @@ function ConvertTo-PshStringArrayLiteral {
     return '@(' + ($quoted -join ', ') + ')'
 }
 
+function ConvertTo-PshCanonicalJsonEscapes {
+    param([string]$Json)
+
+    # Windows PowerShell 5.1 uses JavaScriptSerializer, which escapes these
+    # HTML-sensitive characters. Canonicalize newer ConvertTo-Json output to
+    # that representation without rewriting existing JSON escape sequences.
+    return $Json.Replace('&', '\u0026').Replace("'", '\u0027').Replace('<', '\u003c').Replace('>', '\u003e')
+}
+
+function ConvertTo-PshDiagnosticFragment {
+    param([AllowEmptyString()][string]$Value)
+
+    return $Value.Replace('\', '\\').Replace("`r", '\r').Replace("`n", '\n').Replace("`t", '\t').Replace('"', '\"')
+}
+
+function Get-PshTextDifference {
+    param(
+        [AllowNull()][string]$Expected,
+        [AllowNull()][string]$Actual
+    )
+
+    if ($null -eq $Expected) { $Expected = '' }
+    if ($null -eq $Actual) { $Actual = '' }
+    $sharedLength = [Math]::Min($Expected.Length, $Actual.Length)
+    $differenceIndex = 0
+    while ($differenceIndex -lt $sharedLength -and $Expected[$differenceIndex] -ceq $Actual[$differenceIndex]) {
+        $differenceIndex++
+    }
+
+    $expectedValue = '<end>'
+    if ($differenceIndex -lt $Expected.Length) {
+        $expectedValue = 'U+{0:X4}' -f [int][char]$Expected[$differenceIndex]
+    }
+    $actualValue = '<end>'
+    if ($differenceIndex -lt $Actual.Length) {
+        $actualValue = 'U+{0:X4}' -f [int][char]$Actual[$differenceIndex]
+    }
+
+    $contextStart = [Math]::Max(0, $differenceIndex - 40)
+    $expectedContextLength = [Math]::Min(80, $Expected.Length - $contextStart)
+    $actualContextLength = [Math]::Min(80, $Actual.Length - $contextStart)
+    $expectedContext = ConvertTo-PshDiagnosticFragment $Expected.Substring($contextStart, $expectedContextLength)
+    $actualContext = ConvertTo-PshDiagnosticFragment $Actual.Substring($contextStart, $actualContextLength)
+
+    return 'first difference at character {0}: expected {1}, actual {2}; lengths expected={3}, actual={4}; expected context="{5}"; actual context="{6}"' -f $differenceIndex, $expectedValue, $actualValue, $Expected.Length, $Actual.Length, $expectedContext, $actualContext
+}
+
 function New-PshJsonObject {
     param(
         [string[]]$PropertyNames,
@@ -185,7 +232,8 @@ function New-PshCommandsJson {
     Add-Member -InputObject $root -MemberType NoteProperty -Name 'ManagementCommands' -Value $managementCommands
     Add-Member -InputObject $root -MemberType NoteProperty -Name 'Commands' -Value $commands
 
-    return ($root | ConvertTo-Json -Depth 12 -Compress) + "`n"
+    $json = $root | ConvertTo-Json -Depth 12 -Compress
+    return (ConvertTo-PshCanonicalJsonEscapes ([string]$json)) + "`n"
 }
 
 function New-PshCompatibilityMarkdown {
@@ -609,6 +657,9 @@ Assert-PshCondition (Test-PshProperty $defaultConfig $disableConfigKey) "default
 Assert-PshCondition (@($defaultConfig[$disableConfigKey]).Count -eq 0) "default config.psd1 must set '$disableConfigKey' to an empty array."
 Assert-PshCondition ((@($defaultConfig[$disableConfigKey]) -join '|') -eq (@($nameCollisionPolicy.DefaultDisabledCommands) -join '|')) "default config.psd1 must match NameCollisionPolicy DefaultDisabledCommands."
 
+$jsonEscapeProbe = '<>&'''
+Assert-PshCondition ((ConvertTo-PshCanonicalJsonEscapes $jsonEscapeProbe) -ceq '\u003c\u003e\u0026\u0027') 'canonical JSON HTML-sensitive escaping drifted.'
+
 $expectedExitCodes = @(0, 1, 2, 3, 4, 5)
 $actualExitCodes = @($specification.ExitCodes | ForEach-Object { [int]$_.Code })
 Assert-PshCondition (($actualExitCodes -join ',') -eq ($expectedExitCodes -join ',')) 'ExitCodes must define codes 0 through 5 exactly once and in ascending order.'
@@ -795,6 +846,7 @@ $driftedPaths = New-Object 'System.Collections.Generic.List[string]'
 foreach ($artifactPath in $artifactPaths) {
     $expectedContent = [string]$artifactContent[$artifactPath]
     $matches = $false
+    $actualContent = $null
     if (Test-Path -LiteralPath $artifactPath -PathType Leaf) {
         $actualContent = [System.IO.File]::ReadAllText($artifactPath)
         $matches = $actualContent -ceq $expectedContent
@@ -803,7 +855,14 @@ foreach ($artifactPath in $artifactPaths) {
     if ($Check) {
         if (-not $matches) {
             $trimCharacters = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
-            [void]$driftedPaths.Add($artifactPath.Substring($repositoryRoot.Length).TrimStart($trimCharacters))
+            $relativeArtifactPath = $artifactPath.Substring($repositoryRoot.Length).TrimStart($trimCharacters)
+            if ($null -eq $actualContent) {
+                Write-Output "Generated artifact drift: $relativeArtifactPath is missing."
+            }
+            else {
+                Write-Output ('Generated artifact drift: {0}: {1}' -f $relativeArtifactPath, (Get-PshTextDifference -Expected $expectedContent -Actual $actualContent))
+            }
+            [void]$driftedPaths.Add($relativeArtifactPath)
         }
     }
     elseif (-not $matches) {
