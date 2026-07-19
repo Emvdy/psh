@@ -11,7 +11,7 @@ condition has direct evidence.
 | Goal 0 | COMPLETE | `1f87695` | Safety baseline and repository |
 | Goal 1 | COMPLETE | `83ed21f` | Module and machine-readable specification |
 | Goal 2 | COMPLETE | `20a4e59` | Amendment 1 closeout merged to `main`; final branch and main CI green |
-| Goal 3 | IN_PROGRESS | - | Goal 2 prerequisite met; Batches 1 and 2 are complete; Batch 3 is pending |
+| Goal 3 | IN_PROGRESS | - | Goal 2 prerequisite met; Batches 1-3 are complete; Batch 4 is pending |
 | Goal 4 | PENDING | - | Blocked on Goal 3 DoneWhen |
 | Goal 5 | PENDING | - | Blocked on Goal 4 DoneWhen |
 | Goal 6 | PENDING | - | Blocked on Goal 5 DoneWhen |
@@ -391,7 +391,7 @@ Started: 2026-07-19 (Asia/Shanghai)
 | --- | --- | --- |
 | 1 | File commands | COMPLETE |
 | 2 | Text search | COMPLETE |
-| 3 | Complex `sed`/`awk`/`jq`/`xargs` | PENDING |
+| 3 | Complex `sed`/`awk`/`jq`/`xargs` | COMPLETE |
 | 4 | System/network/archive | PENDING |
 
 Each batch must end with its own implementation, batch tests, commit, and green
@@ -468,8 +468,44 @@ CI before the next batch begins. Goal 3 is not complete.
   Ubuntu-generated goldens and both Windows CI runtimes remain green; Batch 2
   did not alter Batch 1 behavior or its normalization contract.
 
+### Batch 3 Evidence
+
+- Implementation and stabilization chain:
+  `c267e47f23ff383236e20ee35b891951239024b2` (`feat: add Goal 3 Batch 3
+  complex commands`), `fd935ca9af3b482aa229494f283bc2f253db0dbd` (`fix:
+  stabilize Batch 3 Windows sed behavior`),
+  `ba48cc70d3c744376fd3020704a8b53e6333ca48` (`fix: harden Batch 3 Windows
+  sed transactions`), `561f6c3395e3a9cf72ae4a24363498d14cd3c50b` (`fix:
+  preserve single-record sed input on WinPS`),
+  `107453927804041e8cfbf68f5eb1cb7f473f8b6f` (`fix: restore exact Windows
+  sed DACL`), `3e15b5a59f96bd8d2d916132e373fa51656211f6` (`test: normalize jq keys
+  across PowerShell`), `23ebc308f717f50b42f348df840f8141990e4fca` (`test:
+  diagnose native jq byte forwarding`), and
+  `7c9bbafada62db07ab16a2e16d0686521ad52108` (`fix: prevent WinPS native
+  stdin BOM`).
+- Batch 3 CI run: <https://github.com/Emvdy/psh/actions/runs/29707922858>,
+  head `7c9bbafada62db07ab16a2e16d0686521ad52108`, conclusion `success`.
+  Both jobs succeeded:
+  - [Windows PowerShell 5.1](https://github.com/Emvdy/psh/actions/runs/29707922858/job/88247861546)
+    ran the Batch 3 validation and regression suite.
+  - [PowerShell 7](https://github.com/Emvdy/psh/actions/runs/29707922858/job/88247861575)
+    ran the same Batch 3 validation and regression suite.
+- Final regression CI at the same head also passed:
+  [Batch 1](https://github.com/Emvdy/psh/actions/runs/29707922918) succeeded
+  for GNU Tier 1 goldens (`88247861666`), Windows PowerShell 5.1
+  (`88247872785`), and PowerShell 7 (`88247872794`); [Batch
+  2](https://github.com/Emvdy/psh/actions/runs/29707922859) succeeded for GNU
+  Tier 1 goldens (`88247861540`), Windows PowerShell 5.1 (`88247873268`), and
+  PowerShell 7 (`88247873296`).
+- Coverage includes Core implementations and Full native delegation for
+  `sed`, `awk`, `jq`, and `xargs`; exact native argument forwarding; and exact
+  UTF-8 pipeline input without a Windows PowerShell BOM.
+- Windows `sed -i` coverage verifies encoding, BOM, line-ending, and final
+  newline preservation; atomic failure recovery; transaction cleanup; mtime
+  updates; and exact original DACL restoration.
+
 ### Remaining Work
 
-Proceed to Batch 3 (`sed`/`awk`/`jq`/`xargs`), then Batch 4
-(system/network/archive), each with its own implementation, tests, commit, and
-green CI gate. Keep Goal 3 `IN_PROGRESS` until all four batch gates pass.
+Proceed to Batch 4 (system/network/archive) with its own implementation, tests,
+commit, and green CI gate. Keep Goal 3 `IN_PROGRESS` until all four batch gates
+pass.
