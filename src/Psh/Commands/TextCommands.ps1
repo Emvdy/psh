@@ -3151,10 +3151,6 @@ function Set-PshTextFileAtomically {
     )
 
     $isWindows = $env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\'
-    $sourceAcl = $null
-    if ($isWindows) {
-        $sourceAcl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path -ErrorAction Stop
-    }
     [Reflection.MethodInfo]$getUnixFileMode = $null
     [Reflection.MethodInfo]$setUnixFileMode = $null
     $sourceUnixFileMode = $null
@@ -3176,9 +3172,8 @@ function Set-PshTextFileAtomically {
     $temporaryPath = New-PshSiblingTemporaryPath -Destination $Path -Purpose 'sed'
     try {
         [IO.File]::WriteAllBytes($temporaryPath, [byte[]](ConvertTo-PshEncodedTextBytes -Text $Text -EncodingName $EncodingName))
-        if ($null -ne $sourceAcl) {
-            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $temporaryPath -AclObject $sourceAcl -ErrorAction Stop
-        }
+        # On Windows, ReplaceFile preserves the destination descriptor; applying it
+        # to the staged file first can turn inherited ACEs into explicit entries.
         if ($null -ne $sourceUnixFileMode) {
             $modeType = $setUnixFileMode.GetParameters()[1].ParameterType
             $typedMode = [Enum]::ToObject($modeType, [int]$sourceUnixFileMode)
@@ -3311,7 +3306,7 @@ function Read-PshSedProgram {
         Regex = $null
         Replacement = ''
         Global = $false
-        Print = $false
+        PrintOnSubstitution = $false
         RangeActive = $false
     }
 
@@ -3346,7 +3341,7 @@ function Read-PshSedProgram {
             $flag = [string]$Script[$Index.Value]
             $Index.Value++
             if ($flag -ceq 'g' -and -not $program.Global) { $program.Global = $true }
-            elseif ($flag -ceq 'p' -and -not $program.Print) { $program.Print = $true }
+            elseif ($flag -ceq 'p' -and -not $program.PrintOnSubstitution) { $program.PrintOnSubstitution = $true }
             else { Throw-PshTextUsageError ('unsupported sed substitution flag "{0}".' -f $flag) }
         }
     }
@@ -3472,6 +3467,41 @@ function Expand-PshSedReplacement {
     return $builder.ToString()
 }
 
+function Invoke-PshSedSubstitution {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Text.RegularExpressions.Regex]$Regex,
+
+        [AllowNull()]
+        [string]$Text,
+
+        [AllowNull()]
+        [string]$Replacement,
+
+        [switch]$Global
+    )
+
+    if ($null -eq $Text) { $Text = '' }
+    $matchCollection = $Regex.Matches($Text)
+    if ($matchCollection.Count -eq 0) {
+        return [PSCustomObject]@{ Text = $Text; Matched = $false }
+    }
+
+    $replacementCount = if ($Global) { $matchCollection.Count } else { 1 }
+    $builder = New-Object Text.StringBuilder
+    $sourceIndex = 0
+    for ($matchIndex = 0; $matchIndex -lt $replacementCount; $matchIndex++) {
+        $match = $matchCollection[$matchIndex]
+        if ($match.Index -gt $sourceIndex) {
+            [void]$builder.Append($Text.Substring($sourceIndex, $match.Index - $sourceIndex))
+        }
+        [void]$builder.Append((Expand-PshSedReplacement -Match $match -Replacement $Replacement))
+        $sourceIndex = $match.Index + $match.Length
+    }
+    if ($sourceIndex -lt $Text.Length) { [void]$builder.Append($Text.Substring($sourceIndex)) }
+    return [PSCustomObject]@{ Text = $builder.ToString(); Matched = $true }
+}
+
 function Invoke-PshSedPrograms {
     param(
         [Parameter(Mandatory = $true)]
@@ -3499,16 +3529,9 @@ function Invoke-PshSedPrograms {
                 continue
             }
             if ([string]$program.Command -ceq 's') {
-                $replacement = [string]$program.Replacement
-                $evaluator = [Text.RegularExpressions.MatchEvaluator]{
-                    param($match)
-                    Expand-PshSedReplacement -Match $match -Replacement $replacement
-                }
-                $count = if ($program.Global) { [int]::MaxValue } else { 1 }
-                $matched = $program.Regex.IsMatch($current)
-                $next = $program.Regex.Replace($current, $evaluator, $count)
-                $current = $next
-                if ($matched -and $program.Print) {
+                $substitution = Invoke-PshSedSubstitution -Regex $program.Regex -Text $current -Replacement ([string]$program.Replacement) -Global:([bool]$program.Global)
+                $current = [string]$substitution.Text
+                if ([bool]$substitution.Matched -and [bool]$program.PrintOnSubstitution) {
                     [void]$builder.Append($current)
                     [void]$builder.Append($terminator)
                 }

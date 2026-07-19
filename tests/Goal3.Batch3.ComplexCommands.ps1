@@ -150,6 +150,18 @@ function Test-PshBatch3StringArray {
     return $true
 }
 
+function Format-PshBatch3DiagnosticStrings {
+    param([AllowNull()][object[]]$Values)
+
+    $items = @($Values)
+    if ($items.Count -eq 0) { return '<empty>' }
+    return (($items | ForEach-Object {
+        $value = [string]$_
+        $visible = $value.Replace('\', '\\').Replace('"', '\"').Replace("`r", '\r').Replace("`n", '\n').Replace("`t", '\t')
+        'len={0}, text="{1}", utf8={2}' -f $value.Length, $visible, [Convert]::ToBase64String($utf8NoBom.GetBytes($value))
+    }) -join ' | ')
+}
+
 function ConvertFrom-PshBatch3CaptureRow {
     param([Parameter(Mandatory = $true)][string]$Text)
 
@@ -319,7 +331,7 @@ try {
     $sedSubstitute = Invoke-PshBatch3Command -Name sed -Arguments @('s/beta/B/g', $sedPath) -CountsAsBehavior
     Assert-PshBatch3 ($sedSubstitute.ExitCode -eq 0 -and (Normalize-PshBatch3Text ($sedSubstitute.Output -join "`n")) -eq "alpha one`nB two`nB B`nomega") 'sed substitution/global behavior failed.'
     $sedSameValuePrint = Invoke-PshBatch3Command -Name sed -Arguments @('-n', 's/a/a/p') -PipelineInput @('a') -UsePipeline
-    Assert-PshBatch3 ($sedSameValuePrint.ExitCode -eq 0 -and ($sedSameValuePrint.Output -join '') -eq 'a') 'sed s///p did not print a successful substitution when the replacement produced the same text.'
+    Assert-PshBatch3 ($sedSameValuePrint.ExitCode -eq 0 -and ($sedSameValuePrint.Output -join '') -eq 'a') ('sed s///p did not print a successful substitution when the replacement produced the same text. ExitCode={0}; Output.Count={1}; Output={2}' -f $sedSameValuePrint.ExitCode, $sedSameValuePrint.Output.Count, (Format-PshBatch3DiagnosticStrings $sedSameValuePrint.Output))
     $sedLineAddress = Invoke-PshBatch3Command -Name sed -Arguments @('-n', '2p', $sedPath)
     Assert-PshBatch3 ($sedLineAddress.ExitCode -eq 0 -and (Normalize-PshBatch3Text ($sedLineAddress.Output -join "`n")) -eq 'beta two') 'sed numeric address/print behavior failed.'
     $sedLastAddress = Invoke-PshBatch3Command -Name sed -Arguments @('-n', '$p', $sedPath)
@@ -403,7 +415,8 @@ try {
     Assert-PshBatch3 ($sedMetadataEdit.ExitCode -eq 0 -and [IO.File]::ReadAllText($sedMetadataPath, $utf8NoBom) -ceq 'METADATA value') 'sed -i metadata fixture edit failed.'
     Assert-PshBatch3 ([IO.File]::GetLastWriteTimeUtc($sedMetadataPath) -gt $sedMetadataWriteTimeBefore) 'sed -i restored the stale source mtime instead of recording the edit.'
     if ($isWindowsPlatform) {
-        Assert-PshBatch3 ([string](Get-Acl -LiteralPath $sedMetadataPath -ErrorAction Stop).Sddl -ceq $sedMetadataBefore) 'sed -i changed the Windows security descriptor.'
+        $sedMetadataAfter = [string](Get-Acl -LiteralPath $sedMetadataPath -ErrorAction Stop).Sddl
+        Assert-PshBatch3 ($sedMetadataAfter -ceq $sedMetadataBefore) ('sed -i changed the Windows security descriptor. Before={0}; After={1}' -f $sedMetadataBefore, $sedMetadataAfter)
     }
     else {
         Assert-PshBatch3 ([string][IO.File]::GetUnixFileMode($sedMetadataPath) -ceq $sedMetadataBefore) 'sed -i changed or relaxed the Unix 0640 mode.'
