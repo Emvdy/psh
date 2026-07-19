@@ -79,6 +79,18 @@ function Test-PshBatch1RecognizedSymbolicLinkError {
         $Message -match '(?i)required privilege|privilege is not held|operation not permitted|symbolic links?.*(?:not supported|disabled)|not supported.*symbolic link'
 }
 
+function ConvertTo-PshBatch1ExpectedSymbolicLinkTarget {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Target
+    )
+
+    if ($env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\') {
+        return $Target.Replace('/', '\')
+    }
+    return $Target
+}
+
 function Normalize-PshGoldenText {
     param(
         [AllowNull()]
@@ -668,7 +680,8 @@ try {
         $literalLink = Invoke-PshBatch1Command -Name ln -Arguments @('-s', '../real/target.txt', 'literal-link.txt')
         $literalLinkItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath 'literal-link.txt' -Force -ErrorAction Stop
         $literalTarget = @($literalLinkItem.Target)[0]
-        Assert-PshBatch1 ($literalLink.ExitCode -eq 0 -and [string]$literalTarget -ceq '../real/target.txt') 'ln -s did not preserve the relative target operand literally.'
+        $literalTargetExpected = ConvertTo-PshBatch1ExpectedSymbolicLinkTarget -Target '../real/target.txt'
+        Assert-PshBatch1 ($literalLink.ExitCode -eq 0 -and [string]$literalTarget -ceq $literalTargetExpected) 'ln -s did not preserve the relative target operand literally.'
 
         if ($env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\') {
             $windowsLiteralFileName = 'Windows target 空格.txt'
@@ -681,7 +694,8 @@ try {
                 $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
                     $windowsLiteralFileLink
                 )
-            Assert-PshBatch1 ($windowsLiteralFileResult.ExitCode -eq 0 -and [string]@($windowsLiteralFileItem.Target)[0] -ceq $windowsLiteralFileTarget -and [IO.File]::ReadAllText($windowsLiteralFilePath, $utf8NoBom) -ceq 'windows-literal-file') 'Windows ln -s did not preserve or resolve a relative file target containing spaces, Unicode, and .. components.'
+            $windowsLiteralFileTargetExpected = ConvertTo-PshBatch1ExpectedSymbolicLinkTarget -Target $windowsLiteralFileTarget
+            Assert-PshBatch1 ($windowsLiteralFileResult.ExitCode -eq 0 -and [string]@($windowsLiteralFileItem.Target)[0] -ceq $windowsLiteralFileTargetExpected -and [IO.File]::ReadAllText($windowsLiteralFilePath, $utf8NoBom) -ceq 'windows-literal-file') 'Windows ln -s did not preserve or resolve a relative file target containing spaces, Unicode, and .. components.'
         }
         Set-Location -LiteralPath $fixtureRoot
     }
@@ -698,7 +712,8 @@ try {
         $windowsLiteralDirectoryLink = 'Windows literal directory link'
         $windowsLiteralDirectoryResult = Invoke-PshBatch1Command -Name ln -Arguments @('-s', $windowsLiteralDirectoryTarget, $windowsLiteralDirectoryLink)
         $windowsLiteralDirectoryItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $windowsLiteralDirectoryLink -Force -ErrorAction Stop
-        Assert-PshBatch1 ($windowsLiteralDirectoryResult.ExitCode -eq 0 -and [string]@($windowsLiteralDirectoryItem.Target)[0] -ceq $windowsLiteralDirectoryTarget -and $windowsLiteralDirectoryItem.PSIsContainer) 'Windows ln -s did not preserve a relative directory target or set the directory symbolic-link flag.'
+        $windowsLiteralDirectoryTargetExpected = ConvertTo-PshBatch1ExpectedSymbolicLinkTarget -Target $windowsLiteralDirectoryTarget
+        Assert-PshBatch1 ($windowsLiteralDirectoryResult.ExitCode -eq 0 -and [string]@($windowsLiteralDirectoryItem.Target)[0] -ceq $windowsLiteralDirectoryTargetExpected -and $windowsLiteralDirectoryItem.PSIsContainer) 'Windows ln -s did not preserve a relative directory target or set the directory symbolic-link flag.'
         Set-Location -LiteralPath $fixtureRoot
     }
 

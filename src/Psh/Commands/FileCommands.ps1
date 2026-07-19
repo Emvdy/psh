@@ -230,12 +230,15 @@ function New-PshSymbolicLinkEntry {
     $nativeType = Get-PshWindowsSymbolicLinkNativeType
     $flags = 2
     if ($Directory) { $flags = $flags -bor 1 }
-    $created = $nativeType::CreateSymbolicLink($LinkPath, $TargetPath, $flags)
+    # CreateSymbolicLinkW expects Windows separators in relative targets. Keep
+    # the caller's operand unchanged everywhere else, including diagnostics.
+    $nativeTargetPath = $TargetPath.Replace('/', '\')
+    $created = $nativeType::CreateSymbolicLink($LinkPath, $nativeTargetPath, $flags)
     if (-not $created) {
         $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
         if ($errorCode -eq 87) {
             $flags = $flags -band (-bnot 2)
-            $created = $nativeType::CreateSymbolicLink($LinkPath, $TargetPath, $flags)
+            $created = $nativeType::CreateSymbolicLink($LinkPath, $nativeTargetPath, $flags)
             if (-not $created) {
                 $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
             }
