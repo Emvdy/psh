@@ -1,4 +1,4 @@
-# Copyright (C) 2026 Emvdy
+﻿# Copyright (C) 2026 Emvdy
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 [CmdletBinding()]
@@ -416,10 +416,11 @@ try {
         $nativeCapturePath = Join-Path $fixtureRoot 'base64-native-downstream.bin'
         $nativeDownstreamError = $null
         try {
-            & { ,'a' } | & (Get-Command -Name 'Psh\base64' -CommandType Function -ErrorAction Stop) -w0 | & $nativeTee.Source $nativeCapturePath | Out-Null
+            & { ,'a' } | & (Get-Command -Name 'Psh\base64' -CommandType Function -ErrorAction Stop) -w0 | & $nativeTee.Path $nativeCapturePath | Out-Null
         }
         catch { $nativeDownstreamError = $_ }
-        Assert-PshBatch2 ($null -ne $nativeDownstreamError -and [int]$nativeDownstreamError.Exception.Data['PshExitCode'] -eq 2 -and [IO.File]::Exists($nativeCapturePath) -and ([IO.FileInfo]$nativeCapturePath).Length -eq 0) 'base64 -w0 sent failure text or payload to a native downstream command.'
+        $nativeCaptureEmpty = -not [IO.File]::Exists($nativeCapturePath) -or ([IO.FileInfo]$nativeCapturePath).Length -eq 0
+        Assert-PshBatch2 ($null -ne $nativeDownstreamError -and [int]$nativeDownstreamError.Exception.Data['PshExitCode'] -eq 2 -and $nativeCaptureEmpty) 'base64 -w0 sent failure text or payload to a native downstream command.'
     }
     $base64Decode = Invoke-PshBatch2Command -Name base64 -Arguments @('-d') -PipelineInput @([Convert]::ToBase64String($smallBinary)) -UsePipeline
     Assert-PshBatch2 ($base64Decode.ExitCode -eq 0 -and (Test-PshByteSequence $base64Decode.RawBytes $smallBinary)) 'base64 binary decode/raw output failed.'
