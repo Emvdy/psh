@@ -91,23 +91,26 @@ function Get-PshVmSessionTreeFingerprint {
 function Get-PshVmSessionPromptEvidence {
     param(
         [Parameter(Mandatory = $true)]
+        [scriptblock]$PromptScriptBlock,
+
+        [Parameter(Mandatory = $true)]
         [string]$ExpectedPath,
 
         [Parameter(Mandatory = $true)]
         [string]$ExpectedBranch
     )
 
-    $promptCommand = Get-Command -Name prompt -CommandType Function -ErrorAction Stop
-    $promptOutput = @(& $promptCommand)
+    $promptOutput = @($PromptScriptBlock.Invoke())
     Assert-PshVmSessionCondition ($promptOutput.Count -eq 1) 'The prompt did not return exactly one value.'
     $promptText = [string]$promptOutput[0]
-    Assert-PshVmSessionCondition ($promptText.StartsWith('[0] ')) 'The prompt did not report a successful previous command.'
+    Assert-PshVmSessionCondition ($promptText.StartsWith('[0] ')) ("The prompt did not report a successful previous command: '{0}'" -f $promptText)
     Assert-PshVmSessionCondition ($promptText.Contains($ExpectedPath)) 'The prompt did not preserve the exact fixture path.'
     Assert-PshVmSessionCondition ($promptText.Contains(("(git:{0})" -f $ExpectedBranch))) 'The prompt did not show the active Git branch.'
     Assert-PshVmSessionCondition ($promptText.IndexOf([char]27) -lt 0) 'The prompt contains an ANSI escape character.'
 
     return [ordered]@{
-        commandType = [string]$promptCommand.CommandType
+        commandType = 'ScriptBlock'
+        sourcePath  = [string]$PromptScriptBlock.File
         text        = $promptText
     }
 }
@@ -154,7 +157,7 @@ Assert-PshVmSessionCondition ($processArchitecture -ceq 'Arm64') "PowerShell is 
 
 $edition = [string]$PSVersionTable.PSEdition
 Assert-PshVmSessionCondition (@('Desktop', 'Core') -ccontains $edition) "Unexpected PowerShell edition: $edition"
-$shellId = if ($edition -ceq 'Desktop') { 'winps51-arm64' } else { 'pwsh7-arm64' }
+$sessionShellId = if ($edition -ceq 'Desktop') { 'winps51-arm64' } else { 'pwsh7-arm64' }
 
 $policyScopes = @(
     Get-ExecutionPolicy -List |
@@ -317,6 +320,19 @@ $expectedShellIntegrationHash = '7d27a8cce8c3b9a7e6cb0045a2035f303c34d228b23b661
 Assert-PshVmSessionCondition ([IO.File]::Exists($shellIntegrationPath)) "VS Code shellIntegration.ps1 is missing: $shellIntegrationPath"
 $shellIntegrationHash = [string](Get-FileHash -LiteralPath $shellIntegrationPath -Algorithm SHA256).Hash.ToLowerInvariant()
 Assert-PshVmSessionCondition ($shellIntegrationHash -ceq $expectedShellIntegrationHash) 'VS Code shellIntegration.ps1 changed from the accepted 1.126.0 build.'
+$vscodeState = $vscodeStateVariable.Value
+Assert-PshVmSessionCondition ($vscodeState -is [Collections.IDictionary]) 'VS Code shell integration state has an unexpected type.'
+$vscodeOriginalPrompt = $vscodeState['OriginalPrompt']
+Assert-PshVmSessionCondition ($vscodeOriginalPrompt -is [scriptblock]) 'VS Code did not retain the original Psh prompt script block.'
+$expectedPshPromptSourcePath = Join-Path -Path $expectedPshModuleBase -ChildPath 'Interactive\Prompt.ps1'
+Assert-PshVmSessionCondition (Test-PshVmSessionPathEqual -Left ([string]$vscodeOriginalPrompt.File) -Right $expectedPshPromptSourcePath) 'VS Code retained a prompt from outside the selected Psh version.'
+$promptFunctions = @(Get-Command -Name prompt -CommandType Function -All -ErrorAction Stop)
+$vscodePromptWrapper = @(
+    $promptFunctions |
+        Where-Object { [string]$_.Definition -like '*__VSCodeState.OriginalPrompt*' }
+)
+Assert-PshVmSessionCondition ($vscodePromptWrapper.Count -eq 1) 'VS Code did not install exactly one prompt wrapper around the Psh prompt.'
+Assert-PshVmSessionCondition (Test-PshVmSessionPathEqual -Left ([string]$vscodePromptWrapper[0].ScriptBlock.File) -Right $shellIntegrationPath) 'The active VS Code prompt wrapper came from a different script.'
 
 $expectedBindings = [ordered]@{
     Tab       = 'MenuComplete'
@@ -394,30 +410,45 @@ if ([string]::IsNullOrWhiteSpace($gitPath)) {
 }
 Assert-PshVmSessionCondition ([IO.File]::Exists($gitPath)) "Git executable is missing: $gitPath"
 
-$gitVersionOutput = @(& $gitPath --version 2>&1)
-$gitVersionExitCode = $LASTEXITCODE
-Assert-PshVmSessionCondition ($gitVersionExitCode -eq 0 -and $gitVersionOutput.Count -eq 1) 'git --version failed or returned unexpected output.'
-$gitVersion = [string]$gitVersionOutput[0]
-Assert-PshVmSessionCondition ($gitVersion -like 'git version *') "Unexpected Git version output: $gitVersion"
+$originalConsoleOutputEncoding = [Console]::OutputEncoding
+try {
+    # Git for Windows emits path data as UTF-8. WinPS otherwise decodes
+    # redirected native output with the active legacy console code page.
+    [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 
-$gitRootOutput = @(& $gitPath -C $fixtureRoot rev-parse --show-toplevel 2>&1)
-$gitRootExitCode = $LASTEXITCODE
-Assert-PshVmSessionCondition ($gitRootExitCode -eq 0 -and $gitRootOutput.Count -eq 1) 'The fixture is not a Git work tree.'
-Assert-PshVmSessionCondition (Test-PshVmSessionPathEqual -Left ([string]$gitRootOutput[0]) -Right $fixtureRoot) 'The fixture resolves to a different Git work-tree root.'
+    $gitVersionOutput = @(& $gitPath --version 2>&1)
+    $gitVersionExitCode = $LASTEXITCODE
+    Assert-PshVmSessionCondition ($gitVersionExitCode -eq 0 -and $gitVersionOutput.Count -eq 1) 'git --version failed or returned unexpected output.'
+    $gitVersion = [string]$gitVersionOutput[0]
+    Assert-PshVmSessionCondition ($gitVersion -like 'git version *') "Unexpected Git version output: $gitVersion"
 
-$branchOutput = @(& $gitPath -C $fixtureRoot for-each-ref '--format=%(refname:short)' refs/heads 2>&1)
-$branchExitCode = $LASTEXITCODE
-Assert-PshVmSessionCondition ($branchExitCode -eq 0) 'Git branch enumeration failed.'
-$branches = @($branchOutput | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-Assert-PshVmSessionCondition ($branches -ccontains 'main') 'The fixture has no main branch.'
-Assert-PshVmSessionCondition ($branches -ccontains 'feature/vscode-acceptance') 'The fixture has no feature/vscode-acceptance branch.'
+    $gitRootOutput = @(& $gitPath -C $fixtureRoot rev-parse --show-toplevel 2>&1)
+    $gitRootExitCode = $LASTEXITCODE
+    Assert-PshVmSessionCondition ($gitRootExitCode -eq 0 -and $gitRootOutput.Count -eq 1) 'The fixture is not a Git work tree.'
+    Assert-PshVmSessionCondition `
+        (Test-PshVmSessionPathEqual -Left ([string]$gitRootOutput[0]) -Right $fixtureRoot) `
+        ("The fixture resolves to a different Git work-tree root: expected '{0}', actual '{1}'." -f $fixtureRoot, [string]$gitRootOutput[0])
 
-$activeBranchOutput = @(& $gitPath -C $fixtureRoot symbolic-ref --short HEAD 2>&1)
-$activeBranchExitCode = $LASTEXITCODE
-Assert-PshVmSessionCondition ($activeBranchExitCode -eq 0 -and $activeBranchOutput.Count -eq 1) 'The fixture has no active local branch.'
-$activeBranch = [string]$activeBranchOutput[0]
+    $branchOutput = @(& $gitPath -C $fixtureRoot for-each-ref '--format=%(refname:short)' refs/heads 2>&1)
+    $branchExitCode = $LASTEXITCODE
+    Assert-PshVmSessionCondition ($branchExitCode -eq 0) 'Git branch enumeration failed.'
+    $branches = @($branchOutput | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    Assert-PshVmSessionCondition ($branches -ccontains 'main') 'The fixture has no main branch.'
+    Assert-PshVmSessionCondition ($branches -ccontains 'feature/vscode-acceptance') 'The fixture has no feature/vscode-acceptance branch.'
 
-$promptBeforeWarm = Get-PshVmSessionPromptEvidence -ExpectedPath ([string]$location.Path) -ExpectedBranch $activeBranch
+    $activeBranchOutput = @(& $gitPath -C $fixtureRoot symbolic-ref --short HEAD 2>&1)
+    $activeBranchExitCode = $LASTEXITCODE
+    Assert-PshVmSessionCondition ($activeBranchExitCode -eq 0 -and $activeBranchOutput.Count -eq 1) 'The fixture has no active local branch.'
+    $activeBranch = [string]$activeBranchOutput[0]
+}
+finally {
+    [Console]::OutputEncoding = $originalConsoleOutputEncoding
+}
+
+$promptBeforeWarm = Get-PshVmSessionPromptEvidence `
+    -PromptScriptBlock ([scriptblock]$vscodeOriginalPrompt) `
+    -ExpectedPath ([string]$location.Path) `
+    -ExpectedBranch $activeBranch
 
 $warmOutput = @(& $initializeCommand -EnablePrompt)
 Assert-PshVmSessionCondition ($warmOutput.Count -eq 1) 'Warm initialization emitted output besides its diagnostic object.'
@@ -453,7 +484,11 @@ $postWarmPsCompletionsModules = @(Get-Module -Name PSCompletions)
 Assert-PshVmSessionCondition ($postWarmPsCompletionsModules.Count -eq 0) 'Warm initialization imported the network-capable PSCompletions original.'
 $jobsAfterWarm = @(Get-Job)
 Assert-PshVmSessionCondition ($jobsAfterWarm.Count -eq 0) 'Warm initialization created a background job.'
-$promptAfterWarm = Get-PshVmSessionPromptEvidence -ExpectedPath ([string]$location.Path) -ExpectedBranch $activeBranch
+$postWarmPromptCommand = Get-Command -Name prompt -CommandType Function -ErrorAction Stop
+$promptAfterWarm = Get-PshVmSessionPromptEvidence `
+    -PromptScriptBlock $postWarmPromptCommand.ScriptBlock `
+    -ExpectedPath ([string]$location.Path) `
+    -ExpectedBranch $activeBranch
 
 $sessionEvidence = [ordered]@{
     schemaVersion      = 1
@@ -466,7 +501,7 @@ $sessionEvidence = [ordered]@{
         version       = $PSVersionTable.PSVersion.ToString()
         edition       = $edition
         architecture  = $processArchitecture
-        shellId       = $shellId
+        shellId       = $sessionShellId
         hostName      = [string]$Host.Name
         term          = [string]$env:TERM
         termProgram   = [string]$env:TERM_PROGRAM
@@ -511,10 +546,12 @@ $sessionEvidence = [ordered]@{
         jobCountAfterWarm    = $jobsAfterWarm.Count
         appDomainAssemblies  = $loadedPsReadLineAssemblies
         vscodeWrapper        = [ordered]@{
-            functionCount        = $consoleReadLineFunctions.Count
-            shellIntegrationPath = $shellIntegrationPath
-            shellIntegrationHash = $shellIntegrationHash
-            stateType            = [string]$vscodeStateVariable.Value.GetType().FullName
+            functionCount         = $consoleReadLineFunctions.Count
+            promptFunctionCount   = $promptFunctions.Count
+            shellIntegrationPath  = $shellIntegrationPath
+            shellIntegrationHash  = $shellIntegrationHash
+            originalPromptPath    = [string]$vscodeOriginalPrompt.File
+            stateType             = [string]$vscodeStateVariable.Value.GetType().FullName
         }
     }
     warmInitialization = $warmDiagnostic
@@ -543,7 +580,7 @@ if ([IO.File]::Exists($evidenceRootPath)) {
     throw "Goal 2 VM session evidence failed: EvidenceRoot is a file: $evidenceRootPath"
 }
 [IO.Directory]::CreateDirectory($evidenceRootPath) | Out-Null
-$evidencePath = Join-Path -Path $evidenceRootPath -ChildPath ("{0}-{1}-session.json" -f $EvidenceId, $shellId)
+$evidencePath = Join-Path -Path $evidenceRootPath -ChildPath ("{0}-{1}-session.json" -f $EvidenceId, $sessionShellId)
 Write-PshVmSessionJson -Path $evidencePath -Value $sessionEvidence
 
-Write-Output ("PSH_GOAL2_VM_SESSION_OK {0} {1}" -f $EvidenceId, $shellId)
+Write-Output ("PSH_GOAL2_VM_SESSION_OK {0} {1}" -f $EvidenceId, $sessionShellId)
