@@ -82,9 +82,12 @@ function Test-PshBatch1RecognizedSymbolicLinkError {
 function ConvertTo-PshBatch1ExpectedSymbolicLinkTarget {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string]$Target
     )
 
+    if ($null -eq $Target) { return '' }
     if ($env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\') {
         return $Target.Replace('/', '\')
     }
@@ -121,7 +124,9 @@ function Compare-PshGoldenCase {
         [string]$Id,
 
         [Parameter(Mandatory = $true)]
-        [string[]]$ActualLines,
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$ActualLines = @(),
 
         [Parameter(Mandatory = $true)]
         [string]$CaseRoot,
@@ -132,6 +137,7 @@ function Compare-PshGoldenCase {
     $expectedPath = Join-Path -Path $GoldenRoot -ChildPath ($Id + '.txt')
     Assert-PshBatch1 ([IO.File]::Exists($expectedPath)) ('GNU golden file is missing: {0}' -f $expectedPath)
     $expected = Normalize-PshGoldenText -Text ([IO.File]::ReadAllText($expectedPath, $utf8NoBom)) -CaseRoot $CaseRoot -Mktemp:$Mktemp
+    if ($null -eq $ActualLines) { $ActualLines = @() }
     $actual = Normalize-PshGoldenText -Text ($ActualLines -join "`n") -CaseRoot $CaseRoot -Mktemp:$Mktemp
     Assert-PshBatch1 ([string]::Equals($actual, $expected, [StringComparison]::Ordinal)) ('GNU golden mismatch for {0}. Expected <{1}>, actual <{2}>.' -f $Id, $expected, $actual)
 }
@@ -731,15 +737,31 @@ try {
             Microsoft.PowerShell.Management\New-Item -Path 'dir-link' -ItemType SymbolicLink -Target 'real-dir' -ErrorAction Stop | Microsoft.PowerShell.Core\Out-Null
         }
         Set-Location -LiteralPath $fixtureRoot
+        $sourceFileLinkType = $null
+        $sourceFileLinkTarget = $null
+        $sourceDirectoryLinkType = $null
+        $sourceDirectoryLinkTarget = $null
+        if ($fileSymlinkSupported) {
+            $sourceFileLinkItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath (Join-Path $copyLinkSource 'file-link.txt') -Force -ErrorAction Stop
+            $sourceFileLinkType = [string]$sourceFileLinkItem.LinkType
+            $sourceFileLinkTarget = ConvertTo-PshBatch1ExpectedSymbolicLinkTarget -Target ([string]@($sourceFileLinkItem.Target)[0])
+        }
+        if ($directorySymlinkSupported) {
+            $sourceDirectoryLinkItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath (Join-Path $copyLinkSource 'dir-link') -Force -ErrorAction Stop
+            $sourceDirectoryLinkType = [string]$sourceDirectoryLinkItem.LinkType
+            $sourceDirectoryLinkTarget = ConvertTo-PshBatch1ExpectedSymbolicLinkTarget -Target ([string]@($sourceDirectoryLinkItem.Target)[0])
+        }
         $copyLinks = Invoke-PshBatch1Command -Name cp -Arguments @('-R', $copyLinkSource, $copyLinkTarget)
         Assert-PshBatch1 ($copyLinks.ExitCode -eq 0) 'cp -R failed while preserving supported symbolic-link types.'
         if ($fileSymlinkSupported) {
             $copiedFileLink = Microsoft.PowerShell.Management\Get-Item -LiteralPath (Join-Path $copyLinkTarget 'file-link.txt') -Force -ErrorAction Stop
-            Assert-PshBatch1 ([string]$copiedFileLink.LinkType -ceq 'SymbolicLink' -and [string]@($copiedFileLink.Target)[0] -ceq 'target.txt') 'cp -R dereferenced, rewrote, or changed the type of a nested file symbolic link.'
+            $copiedFileLinkTarget = ConvertTo-PshBatch1ExpectedSymbolicLinkTarget -Target ([string]@($copiedFileLink.Target)[0])
+            Assert-PshBatch1 ($sourceFileLinkType -ceq 'SymbolicLink' -and [string]$copiedFileLink.LinkType -ceq $sourceFileLinkType -and $copiedFileLinkTarget -ceq $sourceFileLinkTarget) ('cp -R changed a nested file symbolic link. Expected LinkType={0}, Target={1}; actual LinkType={2}, Target={3}.' -f $sourceFileLinkType, $sourceFileLinkTarget, [string]$copiedFileLink.LinkType, $copiedFileLinkTarget)
         }
         if ($directorySymlinkSupported) {
             $copiedDirLink = Microsoft.PowerShell.Management\Get-Item -LiteralPath (Join-Path $copyLinkTarget 'dir-link') -Force -ErrorAction Stop
-            Assert-PshBatch1 ([string]$copiedDirLink.LinkType -ceq 'SymbolicLink' -and [string]@($copiedDirLink.Target)[0] -ceq 'real-dir') 'cp -R traversed, rewrote, or changed the type of a nested directory symbolic link.'
+            $copiedDirectoryLinkTarget = ConvertTo-PshBatch1ExpectedSymbolicLinkTarget -Target ([string]@($copiedDirLink.Target)[0])
+            Assert-PshBatch1 ($sourceDirectoryLinkType -ceq 'SymbolicLink' -and [string]$copiedDirLink.LinkType -ceq $sourceDirectoryLinkType -and $copiedDirectoryLinkTarget -ceq $sourceDirectoryLinkTarget) ('cp -R changed a nested directory symbolic link. Expected LinkType={0}, Target={1}; actual LinkType={2}, Target={3}.' -f $sourceDirectoryLinkType, $sourceDirectoryLinkTarget, [string]$copiedDirLink.LinkType, $copiedDirectoryLinkTarget)
         }
     }
 

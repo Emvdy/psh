@@ -145,15 +145,18 @@ function Get-PshLinkTargetText {
         [object]$Item
     )
 
-    $property = $Item.PSObject.Properties['Target']
-    if ($null -eq $property) { $property = $Item.PSObject.Properties['LinkTarget'] }
-    if ($null -eq $property -or $null -eq $property.Value) { return $null }
-    $value = $property.Value
-    if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) {
-        $value = @($value)[0]
+    foreach ($propertyName in @('Target', 'LinkTarget')) {
+        $property = $Item.PSObject.Properties[$propertyName]
+        if ($null -eq $property -or $null -eq $property.Value) { continue }
+        $value = $property.Value
+        if ($value -is [System.Collections.IEnumerable] -and $value -isnot [string]) {
+            $value = @($value)[0]
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$value)) {
+            return [string]$value
+        }
     }
-    if ([string]::IsNullOrWhiteSpace([string]$value)) { return $null }
-    return [string]$value
+    return $null
 }
 
 function Get-PshWindowsSymbolicLinkNativeType {
@@ -574,6 +577,22 @@ function Get-PshItemTypeName {
         [Parameter(Mandatory = $true)]
         [object]$Item
     )
+
+    # Windows PowerShell can expose link metadata without retaining the
+    # ReparsePoint attribute on the provider item, especially for file links.
+    try {
+        $linkTypeProperty = $Item.PSObject.Properties['LinkType']
+        if ($null -ne $linkTypeProperty -and
+            -not [string]::IsNullOrWhiteSpace([string]$linkTypeProperty.Value)) {
+            return 'link'
+        }
+        $linkTarget = Get-PshLinkTargetText -Item $Item
+        if (-not [string]::IsNullOrWhiteSpace($linkTarget)) {
+            return 'link'
+        }
+    }
+    catch {
+    }
 
     try {
         if (([IO.FileAttributes]$Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
