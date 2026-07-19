@@ -439,9 +439,16 @@ try {
     $sedMetadataWriteTimeBefore = [IO.File]::GetLastWriteTimeUtc($sedMetadataPath)
     $isWindowsPlatform = $env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\'
     $sedMetadataBefore = $null
+    $sedMetadataControlFlagsBefore = '<not-windows>'
+    $sedMetadataHasAutoInheritedDacl = $false
     $sedUtf8BomSddlBefore = '<not-windows>'
     if ($isWindowsPlatform) {
-        $sedMetadataBefore = [string](Get-Acl -LiteralPath $sedMetadataPath -ErrorAction Stop).Sddl
+        $sedMetadataAclBefore = Get-Acl -LiteralPath $sedMetadataPath -ErrorAction Stop
+        $sedMetadataBefore = [string]$sedMetadataAclBefore.Sddl
+        $sedMetadataDescriptorBefore = [byte[]]$sedMetadataAclBefore.GetSecurityDescriptorBinaryForm()
+        $sedMetadataRawBefore = New-Object Security.AccessControl.RawSecurityDescriptor($sedMetadataDescriptorBefore, 0)
+        $sedMetadataControlFlagsBefore = [string]$sedMetadataRawBefore.ControlFlags
+        $sedMetadataHasAutoInheritedDacl = ($sedMetadataRawBefore.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclAutoInherited) -ne 0
         $sedUtf8BomSddlBefore = [string](Get-Acl -LiteralPath $sedUtf8BomPath -ErrorAction Stop).Sddl
     }
     else {
@@ -468,8 +475,12 @@ try {
     Assert-PshBatch3 ($sedMetadataEdit.ExitCode -eq 0 -and [IO.File]::ReadAllText($sedMetadataPath, $utf8NoBom) -ceq 'METADATA value') 'sed -i metadata fixture edit failed.'
     Assert-PshBatch3 ([IO.File]::GetLastWriteTimeUtc($sedMetadataPath) -gt $sedMetadataWriteTimeBefore) 'sed -i restored the stale source mtime instead of recording the edit.'
     if ($isWindowsPlatform) {
-        $sedMetadataAfter = [string](Get-Acl -LiteralPath $sedMetadataPath -ErrorAction Stop).Sddl
-        Assert-PshBatch3 ($sedMetadataAfter -ceq $sedMetadataBefore) ('sed -i changed the Windows security descriptor. Before={0}; After={1}' -f $sedMetadataBefore, $sedMetadataAfter)
+        $sedMetadataAclAfter = Get-Acl -LiteralPath $sedMetadataPath -ErrorAction Stop
+        $sedMetadataAfter = [string]$sedMetadataAclAfter.Sddl
+        $sedMetadataDescriptorAfter = [byte[]]$sedMetadataAclAfter.GetSecurityDescriptorBinaryForm()
+        $sedMetadataRawAfter = New-Object Security.AccessControl.RawSecurityDescriptor($sedMetadataDescriptorAfter, 0)
+        $sedMetadataControlFlagsAfter = [string]$sedMetadataRawAfter.ControlFlags
+        Assert-PshBatch3 (-not $sedMetadataHasAutoInheritedDacl -and $sedMetadataAfter -ceq $sedMetadataBefore) ('sed -i changed the Windows security descriptor or the source fixture did not satisfy the control-flag precondition. FlagsBefore={0}; FlagsAfter={1}; Before={2}; After={3}' -f $sedMetadataControlFlagsBefore, $sedMetadataControlFlagsAfter, $sedMetadataBefore, $sedMetadataAfter)
     }
     else {
         Assert-PshBatch3 ([string][IO.File]::GetUnixFileMode($sedMetadataPath) -ceq $sedMetadataBefore) 'sed -i changed or relaxed the Unix 0640 mode.'

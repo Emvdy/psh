@@ -3173,6 +3173,50 @@ function Test-PshTextFileBytesEqual {
     catch { return $false }
 }
 
+function Get-PshWindowsFileSecurityNativeType {
+    $typeName = 'Psh.TextCommands.WindowsFileSecurityNative_baf0d32a'
+    $nativeType = $typeName -as [type]
+    if ($null -ne $nativeType) { return $nativeType }
+
+    $nativeType = Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace Psh.TextCommands
+{
+    public static class WindowsFileSecurityNative_baf0d32a
+    {
+        [DllImport("advapi32.dll", EntryPoint = "SetFileSecurityW", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileSecurityNative(string path, uint securityInformation, IntPtr securityDescriptor);
+
+        public static int SetFileSecurity(string path, uint securityInformation, byte[] securityDescriptor)
+        {
+            if (path == null) throw new ArgumentNullException("path");
+            if (securityDescriptor == null) throw new ArgumentNullException("securityDescriptor");
+
+            GCHandle descriptorHandle = default(GCHandle);
+            try
+            {
+                descriptorHandle = GCHandle.Alloc(securityDescriptor, GCHandleType.Pinned);
+                if (SetFileSecurityNative(path, securityInformation, descriptorHandle.AddrOfPinnedObject()))
+                {
+                    return 0;
+                }
+                return Marshal.GetLastWin32Error();
+            }
+            finally
+            {
+                if (descriptorHandle.IsAllocated) descriptorHandle.Free();
+            }
+        }
+    }
+}
+'@ -PassThru -ErrorAction Stop
+
+    return $nativeType
+}
+
 function Write-PshWindowsSecuredFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -3190,7 +3234,7 @@ function Write-PshWindowsSecuredFile {
     try {
         $sharing = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
         $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, $sharing)
-        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $Acl -ErrorAction Stop
+        Set-PshWindowsFileSecurityExactly -Path $Path -Acl $Acl -Sddl ([string]$Acl.Sddl)
         if ($Bytes.Length -gt 0) { $stream.Write($Bytes, 0, $Bytes.Length) }
         $stream.Flush()
     }
@@ -3211,7 +3255,20 @@ function Set-PshWindowsFileSecurityExactly {
         [string]$Sddl
     )
 
-    Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $Acl -ErrorAction Stop
+    $descriptorBytes = [byte[]]$Acl.GetSecurityDescriptorBinaryForm()
+    $rawDescriptor = New-Object Security.AccessControl.RawSecurityDescriptor($descriptorBytes, 0)
+    $securityInformation = [uint32]4
+    if (($rawDescriptor.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0) {
+        $securityInformation = [uint32]2147483652
+    }
+
+    $nativeType = Get-PshWindowsFileSecurityNativeType
+    $errorCode = [int]$nativeType::SetFileSecurity($Path, $securityInformation, $descriptorBytes)
+    if ($errorCode -ne 0) {
+        $nativeError = New-Object ComponentModel.Win32Exception -ArgumentList $errorCode
+        throw ('Windows security descriptor application failed for {0}: {1} (Win32 error {2}).' -f $Path, $nativeError.Message, $errorCode)
+    }
+
     $actualSddl = [string](Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path -ErrorAction Stop).Sddl
     if (-not [string]::Equals($actualSddl, $Sddl, [StringComparison]::Ordinal)) {
         throw ('Windows security descriptor verification failed for {0}: expected {1}; actual {2}.' -f $Path, $Sddl, $actualSddl)
