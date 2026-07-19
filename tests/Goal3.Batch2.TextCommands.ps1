@@ -555,3 +555,6 @@ finally {
     }
     if ([IO.Directory]::Exists($testRoot)) { [IO.Directory]::Delete($testRoot, $true) }
 }
+
+# GitHub's PowerShell shell propagates a leftover native status after a successful script.
+$global:LASTEXITCODE = 0
