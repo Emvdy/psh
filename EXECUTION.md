@@ -10,8 +10,8 @@ condition has direct evidence.
 | --- | --- | --- | --- |
 | Goal 0 | COMPLETE | `1f87695` | Safety baseline and repository |
 | Goal 1 | COMPLETE | `83ed21f` | Module and machine-readable specification |
-| Goal 2 | IN_PROGRESS | `2412eb2` | Real VM DoneWhen passed; evidence commit and CI pending |
-| Goal 3 | PENDING | - | Blocked on Goal 2 DoneWhen |
+| Goal 2 | COMPLETE | `20a4e59` | Amendment 1 closeout merged to `main`; final branch and main CI green |
+| Goal 3 | IN_PROGRESS | - | Goal 2 prerequisite met; Batch 1 is in progress |
 | Goal 4 | PENDING | - | Blocked on Goal 3 DoneWhen |
 | Goal 5 | PENDING | - | Blocked on Goal 4 DoneWhen |
 | Goal 6 | PENDING | - | Blocked on Goal 5 DoneWhen |
@@ -209,11 +209,11 @@ Started: 2026-07-18 (Asia/Shanghai)
 ### Implementation Checklist
 
 - [x] Pin and bundle PSReadLine `2.4.5` from an official immutable package.
-- [x] Pin and bundle PSCompletions `6.10.0` from an official immutable package.
-- [x] Record source URLs and SHA256 values and retain both upstream licenses.
-- [x] Import fixed bundled PSReadLine only; validate the fixed PSCompletions
-  manifest without executing its network-capable `ScriptsToProcess`, and use a
-  Psh-owned offline Git completion adapter.
+- [x] Apply Amendment 1: PSCompletions is out of scope for v0.1.0 and is not
+  bundled; its package, verifier entries, and license entry were removed.
+- [x] Record the PSReadLine source URL/SHA256 and retain its upstream license.
+- [x] Import fixed bundled PSReadLine only and use a Psh-owned offline Git
+  completion adapter.
 - [x] Bind Tab to `MenuComplete` and Ctrl+R to reverse history search.
 - [x] Bind Up/Down arrows to prefix history search.
 - [x] Configure prediction source `History` and view style `ListView` when the
@@ -231,10 +231,10 @@ Started: 2026-07-18 (Asia/Shanghai)
   markers, and startup timing.
 - [x] Run the Goal 2 automated matrix in Windows PowerShell 5.1 and PowerShell
   7 CI.
-- [x] Verify Tab, ListView, Ctrl+R, Chinese/space paths, and Git completion in
-  VS Code on the real Windows 11 ARM64 VM.
+- [x] Retain the pre-Amendment real Windows 11 ARM64 interactive evidence as
+  grandfathered evidence; no VM or evidence redo is required.
 - [x] Review the Goal 2 diff for secrets, caches, binaries, and unrelated files.
-- [ ] Commit Goal 2, push it, and record commit, CI, VM logs, and screenshots.
+- [x] Commit Goal 2 closeout, push it, record final CI, and merge to `main`.
 
 ### StopIf Checks
 
@@ -242,7 +242,7 @@ Started: 2026-07-18 (Asia/Shanghai)
 | --- | --- | --- |
 | Existing profile markers are malformed | NOT HIT | Five unmatched, duplicated, reversed, inline, or modified variants caused whole-batch refusal with zero profile/state writes. Both real-VM strict session records verify one exact ordered marker pair in each target profile. |
 | VT is unavailable with no safe fallback | NOT HIT | Both real VS Code sessions reported supported terminal capabilities and enabled `History + ListView`. Redirected-output automation still verified the ANSI-free prompt and structured non-VT fallback. |
-| Shell startup becomes noticeably blocked | NOT HIT | Real ARM64 profile probes measured WinPS `832/730 ms` cold/warm and PowerShell 7 `866/807 ms`, all below `5000 ms`, with one output record, zero jobs, and no imported PSCompletions module. |
+| Profile adds more than 1000 ms to cold shell startup | NOT HIT | Real ARM64 profile probes measured WinPS `832/730 ms` cold/warm and PowerShell 7 `866/807 ms`; both cold measurements are below `1000 ms`, with one output record, zero jobs, and no PSCompletions import. |
 
 ### Execution Policy Authorization
 
@@ -258,26 +258,25 @@ Started: 2026-07-18 (Asia/Shanghai)
 
 ### DoneWhen Audit
 
-- [x] VS Code shows completions below the prompt in both shells: see the two
-  `git-command-menu` images in the retained evidence set.
-- [x] History view acceptance passes: both shells show `History + ListView`,
-  reverse search, and prefix Up/Down results.
-- [x] Chinese paths pass interactive acceptance: every final prompt and both
-  strict session JSON files retain `Psh 验收 空格`.
-- [x] Paths with spaces pass interactive acceptance in the same fixture.
-- [x] Git completion passes: command and ref menus appear below the prompt and
-  the completed ref is executed into `feature/vscode-acceptance` in both shells.
+- [x] On Windows x64 CI, `Get-PSReadLineKeyHandler` lists Tab `MenuComplete`,
+  Ctrl+R reverse history, and Up/Down prefix history bindings.
+- [x] On Windows x64 CI, prediction reports `History` with `ListView` (or the
+  documented safe fallback).
+- [x] On Windows x64 CI, the prompt renders previous status, a Chinese-and-space
+  path, and an optional Git branch in a headless session.
+- [x] On Windows x64 CI, profile install and uninstall round-trip bytes exactly.
+- [x] The pre-Amendment VM interaction evidence is retained as accepted
+  grandfathered evidence and is not redone.
 
 ### Automated Evidence
 
-- Dependency verifier output: `2 fixed components, 14 independently pinned`
-  `runtime files, and 2 verified licenses`. A negative fixture that changed a
-  vendored file and its lock entry together was still rejected by the
-  independent trusted manifest.
+- Dependency verifier output after Amendment 1: `1 fixed PSReadLine component, 7
+  independently pinned runtime files, and 1 verified license`. A negative
+  fixture that changed a vendored file and its lock entry together was still
+  rejected by the independent trusted manifest.
 - Package SHA256: PSReadLine `2.4.5`
   `cb9390e9733208456c234a7971d1ec4a917886c239502aab68f4b71aa4bba235`;
-  PSCompletions `6.10.0`
-  `9f2bf9c6d143d2dc0c50a531b964f9f6ff30393077405914ca7d746ef8e38cb7`.
+  PSCompletions is not present in the v0.1.0 dependency set.
 - Local runtime: official portable PowerShell `7.6.3` for macOS ARM64,
   archive SHA256
   `f0263c2072fe7d0953781c60497a574bea99b37237f2554a59ce4bad07de8d36`.
@@ -289,9 +288,18 @@ Started: 2026-07-18 (Asia/Shanghai)
   `ecaa674611a9f3c229456d59ead178e7135f800f`,
   `589650805b241c781d065a8102151f1e155f2b1e`, and
   `2412eb252481d8eafe2637090ac947a9337df4f6`.
-- Accepted runtime CI: <https://github.com/Emvdy/psh/actions/runs/29669928412>,
-  conclusion `success` at head `2412eb252481d8eafe2637090ac947a9337df4f6`.
-  Both jobs and every non-cleanup step succeeded.
+- Pre-closeout implementation CI: <https://github.com/Emvdy/psh/actions/runs/29669928412>,
+  conclusion `success` at head `2412eb252481d8eafe2637090ac947a9337df4f6`;
+  retained as historical evidence, not the final closeout run.
+- Final closeout branch CI: <https://github.com/Emvdy/psh/actions/runs/29682778462>,
+  conclusion `success` at cleanup commit `20a4e599c811d7c3ee9043af77b0588d8ff6e120`.
+  Windows PowerShell 5.1 job `88181796817` and PowerShell 7 job `88181796825`
+  both succeeded.
+- Final `main` CI: <https://github.com/Emvdy/psh/actions/runs/29682842951>,
+  conclusion `success` at the same commit. Windows PowerShell 5.1 job
+  `88181973143` and PowerShell 7 job `88181973157` both succeeded. Local
+  `main` and `origin/main` both point at
+  `20a4e599c811d7c3ee9043af77b0588d8ff6e120`.
 - Windows PowerShell job used `5.1.26100.32995`, PSEdition `Desktop`; the
   PowerShell job used `7.6.3`, PSEdition `Core`, platform `Win32NT`. Both used
   Git for Windows `2.55.0.windows.2` and passed generated-artifact checking,
@@ -326,19 +334,17 @@ Started: 2026-07-18 (Asia/Shanghai)
 - Diff review found no cache, temporary, credential, or unrelated files and no
   common private-key/token signatures. No dedicated secret-scanner executable
   was installed locally; later Goal 6 CI retains the mandatory scanner gate.
-- The PSCompletions Gallery original is retained byte-for-byte and audited. Its
-  import is intentionally suppressed because isolated review confirmed module
-  directory mutation, startup output, global state, and a network-capable
-  update job. `Test-ModuleManifest` metadata validation caused zero writes,
-  modules, variables, aliases, or jobs.
+- Amendment 1 removes PSCompletions from the shipped dependency set. The
+  grandfathered evidence records why its import was suppressed; no package,
+  verifier entry, or license entry remains in the v0.1.0 tree.
 - During early CI diagnosis the `Windows 11` VM was temporarily resumed only
   for read-only availability checks. The later user-authorized CurrentUser
   policy change and official Git/VS Code setup are fully captured by the final
   VM evidence below; no GPO or Windows PowerShell LocalMachine scope changed.
 
-### Real VM Evidence
+### Grandfathered Real VM Evidence (retained as-is; no redo)
 
-- Stable evidence root:
+- Stable pre-Amendment evidence root (preserved without rerun):
   `evidence/goal2/goal2-20260719T025655Z-2412eb25/`. Its `README.md` maps each
   DoneWhen item to direct screenshots, records the input method, and explains
   the PowerShell 7 packaged policy configuration. `SHA256SUMS` covers the
@@ -365,7 +371,43 @@ Started: 2026-07-18 (Asia/Shanghai)
 
 ### Remaining Work
 
-All implementation, automated, and real Windows 11 ARM64 DoneWhen checks now
-have direct evidence. The only remaining Goal 2 work is to commit and push the
-stable evidence set, obtain successful CI for that evidence commit, and record
-its commit/run in this ledger. Goal 3 must not start before that final gate.
+None. Goal 2 is complete at `20a4e599c811d7c3ee9043af77b0588d8ff6e120`:
+Amendment 1 cleanup is merged to `main`, both final CI workflows are green, and
+the automated Windows x64 DoneWhen checks plus grandfathered VM evidence are
+recorded. No VM or `evidence/goal2` redo was performed or required.
+
+## Goal 3: Command Compatibility Layer
+
+Started: 2026-07-19 (Asia/Shanghai)
+
+### Prerequisite
+
+- [x] Goal 2 is complete on `main` at `20a4e599c811d7c3ee9043af77b0588d8ff6e120`;
+  final branch and `main` CI runs above are green.
+
+### Batch Status
+
+| Batch | Scope | Status |
+| --- | --- | --- |
+| 1 | File commands | IN_PROGRESS |
+| 2 | Text search | PENDING |
+| 3 | Complex `sed`/`awk`/`jq`/`xargs` | PENDING |
+| 4 | System/network/archive | PENDING |
+
+Each batch must end with its own implementation, batch tests, commit, and green
+CI before the next batch begins. Goal 3 is not complete.
+
+### StopIf / DoneWhen
+
+- **StopIf:** Unsupported flags are silently accepted, text commands leak
+  formatted PowerShell objects, destructive tests escape their temporary
+  directory, or Core secretly uses Full tools.
+- **DoneWhen:** The specification generator `-Check` passes; every command has
+  at least one behavior test appropriate to its tier; Tier 1 text commands pass
+  golden comparison; Core/Full differences are documented.
+
+### Remaining Work
+
+Complete Batch 1 implementation, tests, commit, and CI; then proceed to Batches
+2 through 4 in order. Do not mark Goal 3 complete before all four batch gates
+pass.
