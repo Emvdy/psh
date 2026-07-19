@@ -656,11 +656,33 @@ try {
         $literalLinkItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath 'literal-link.txt' -Force -ErrorAction Stop
         $literalTarget = @($literalLinkItem.Target)[0]
         Assert-PshBatch1 ($literalLink.ExitCode -eq 0 -and [string]$literalTarget -ceq '../real/target.txt') 'ln -s did not preserve the relative target operand literally.'
+
+        if ($env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\') {
+            $windowsLiteralFileName = 'Windows target 空格.txt'
+            [IO.File]::WriteAllText((Join-Path $symlinkReal $windowsLiteralFileName), 'windows-literal-file', $utf8NoBom)
+            $windowsLiteralFileTarget = '../real/../real/' + $windowsLiteralFileName
+            $windowsLiteralFileLink = 'Windows literal file link.txt'
+            $windowsLiteralFileResult = Invoke-PshBatch1Command -Name ln -Arguments @('-s', $windowsLiteralFileTarget, $windowsLiteralFileLink)
+            $windowsLiteralFileItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $windowsLiteralFileLink -Force -ErrorAction Stop
+            Assert-PshBatch1 ($windowsLiteralFileResult.ExitCode -eq 0 -and [string]@($windowsLiteralFileItem.Target)[0] -ceq $windowsLiteralFileTarget -and [IO.File]::ReadAllText($windowsLiteralFileLink, $utf8NoBom) -ceq 'windows-literal-file') 'Windows ln -s did not preserve or resolve a relative file target containing spaces, Unicode, and .. components.'
+        }
         Set-Location -LiteralPath $fixtureRoot
     }
     else {
         Assert-PshBatch1 (Test-PshBatch1RecognizedSymbolicLinkError -Message $fileSymlinkFailure) ('File symbolic-link setup failed for an unexpected reason: {0}' -f $fileSymlinkFailure)
         Write-Output ('SKIP: file symbolic-link behavior unavailable: {0}' -f $fileSymlinkFailure)
+    }
+
+    if (($env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\') -and $directorySymlinkSupported) {
+        Set-Location -LiteralPath $symlinkLinks
+        $windowsLiteralDirectoryName = 'Windows directory 空格'
+        [void][IO.Directory]::CreateDirectory((Join-Path $symlinkReal $windowsLiteralDirectoryName))
+        $windowsLiteralDirectoryTarget = '../real/../real/' + $windowsLiteralDirectoryName
+        $windowsLiteralDirectoryLink = 'Windows literal directory link'
+        $windowsLiteralDirectoryResult = Invoke-PshBatch1Command -Name ln -Arguments @('-s', $windowsLiteralDirectoryTarget, $windowsLiteralDirectoryLink)
+        $windowsLiteralDirectoryItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $windowsLiteralDirectoryLink -Force -ErrorAction Stop
+        Assert-PshBatch1 ($windowsLiteralDirectoryResult.ExitCode -eq 0 -and [string]@($windowsLiteralDirectoryItem.Target)[0] -ceq $windowsLiteralDirectoryTarget -and $windowsLiteralDirectoryItem.PSIsContainer) 'Windows ln -s did not preserve a relative directory target or set the directory symbolic-link flag.'
+        Set-Location -LiteralPath $fixtureRoot
     }
 
     if ($directorySymlinkSupported -or $fileSymlinkSupported) {

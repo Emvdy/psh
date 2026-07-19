@@ -169,43 +169,105 @@ try {
 
     $localKnown = & {
         $globalBefore = Get-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Global -ErrorAction Stop)
-        Set-Alias -Name pwd -Value Get-Location -Description 'caller local known alias' -Scope Local -Force
-        $localBefore = Get-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Local -ErrorAction Stop)
-        Import-Module -Name $moduleManifest -Force -ErrorAction Stop
-        $during = Get-Command -Name pwd -ErrorAction Stop
-        Remove-Module -Name Psh -Force -ErrorAction Stop
-        $result = [PSCustomObject]@{
-            Projected = $during.CommandType -eq 'Function' -and $during.Source -eq 'Psh'
-            LocalRestored = Test-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Local -ErrorAction Stop) -Snapshot $localBefore
-            GlobalExact = Test-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Global -ErrorAction Stop) -Snapshot $globalBefore
+        $callerAlias = Get-Alias -Name pwd -Scope Local -ErrorAction SilentlyContinue
+        $callerHadLocal = $null -ne $callerAlias
+        $callerBefore = if ($callerHadLocal) { Get-PshAliasScopeSnapshot -Alias $callerAlias } else { $null }
+        $fixtureCreated = $false
+        $result = $null
+        try {
+            if ($callerHadLocal) {
+                # WinPS 5.1 cannot remove AllScope by overwriting the local alias in place.
+                Remove-Item -LiteralPath Alias:pwd -Force -ErrorAction Stop
+            }
+            Set-Alias -Name pwd -Value Get-Location -Description 'caller local known alias' -Option None -Scope Local -Force
+            $fixtureCreated = $true
+            $localBefore = Get-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Local -ErrorAction Stop)
+            Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+            $during = Get-Command -Name pwd -ErrorAction Stop
+            Remove-Module -Name Psh -Force -ErrorAction Stop
+            $result = [PSCustomObject]@{
+                Projected = $during.CommandType -eq 'Function' -and $during.Source -eq 'Psh'
+                LocalRestored = Test-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Local -ErrorAction Stop) -Snapshot $localBefore
+                CallerExact = $false
+                GlobalExact = $false
+            }
         }
-        Remove-Item -LiteralPath Alias:pwd -Force
+        finally {
+            Remove-Module -Name Psh -Force -ErrorAction SilentlyContinue
+            if ($fixtureCreated -and $null -ne (Get-Alias -Name pwd -Scope Local -ErrorAction SilentlyContinue)) {
+                Remove-Item -LiteralPath Alias:pwd -Force -ErrorAction SilentlyContinue
+            }
+            if ($callerHadLocal) {
+                Set-Alias -Name pwd -Value $callerBefore.Definition -Description $callerBefore.Description -Option $callerBefore.Options -Scope Local -Force
+                (Get-Alias -Name pwd -Scope Local -ErrorAction Stop).Visibility = $callerBefore.Visibility
+            }
+        }
+        $callerAfter = Get-Alias -Name pwd -Scope Local -ErrorAction SilentlyContinue
+        $result.CallerExact = if ($callerHadLocal) {
+            $null -ne $callerAfter -and (Test-PshAliasScopeSnapshot -Alias $callerAfter -Snapshot $callerBefore)
+        }
+        else {
+            $null -eq $callerAfter
+        }
+        $result.GlobalExact = Test-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Global -ErrorAction Stop) -Snapshot $globalBefore
         return $result
     }
-    Assert-PshAliasScope ($localKnown.Projected -and $localKnown.LocalRestored -and $localKnown.GlobalExact) 'A caller-local known alias was not restored locally or polluted global scope.'
+    Assert-PshAliasScope ($localKnown.Projected -and $localKnown.LocalRestored -and $localKnown.CallerExact -and $localKnown.GlobalExact) 'A caller-local known alias was not restored locally or polluted global scope.'
 
     $unknownAndPrivate = & {
-        Set-Alias -Name pwd -Value Get-Date -Description 'caller unknown alias' -Scope Local -Force
-        $unknownBefore = Get-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Local -ErrorAction Stop)
-        Import-Module -Name $moduleManifest -Force -ErrorAction Stop
-        $unknownDuring = Get-Command -Name pwd -ErrorAction Stop
-        Remove-Module -Name Psh -Force -ErrorAction Stop
-        $unknownExact = Test-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Local -ErrorAction Stop) -Snapshot $unknownBefore
-        Remove-Item -LiteralPath Alias:pwd -Force
+        $globalBefore = Get-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Global -ErrorAction Stop)
+        $callerAlias = Get-Alias -Name pwd -Scope Local -ErrorAction SilentlyContinue
+        $callerHadLocal = $null -ne $callerAlias
+        $callerBefore = if ($callerHadLocal) { Get-PshAliasScopeSnapshot -Alias $callerAlias } else { $null }
+        $fixtureCreated = $false
+        $result = $null
+        try {
+            if ($callerHadLocal) {
+                Remove-Item -LiteralPath Alias:pwd -Force -ErrorAction Stop
+            }
+            Set-Alias -Name pwd -Value Get-Date -Description 'caller unknown alias' -Option None -Scope Local -Force
+            $fixtureCreated = $true
+            $unknownBefore = Get-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Local -ErrorAction Stop)
+            Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+            $unknownDuring = Get-Command -Name pwd -ErrorAction Stop
+            Remove-Module -Name Psh -Force -ErrorAction Stop
+            $unknownExact = Test-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Local -ErrorAction Stop) -Snapshot $unknownBefore
+            Remove-Item -LiteralPath Alias:pwd -Force
 
-        Set-Alias -Name pwd -Value Get-Date -Description 'caller private alias' -Option Private -Scope Local -Force
-        $privateBefore = Get-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Local -ErrorAction Stop)
-        Import-Module -Name $moduleManifest -Force -ErrorAction Stop
-        $privateDuring = Get-Command -Name pwd -ErrorAction Stop
-        Remove-Module -Name Psh -Force -ErrorAction Stop
-        $privateExact = Test-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Local -ErrorAction Stop) -Snapshot $privateBefore
-        Remove-Item -LiteralPath Alias:pwd -Force
-        return [PSCustomObject]@{
-            Unknown = $unknownDuring.CommandType -eq 'Alias' -and [string]$unknownDuring.Definition -ceq 'Get-Date' -and $unknownExact
-            Private = $privateDuring.CommandType -eq 'Alias' -and [string]$privateDuring.Definition -ceq 'Get-Date' -and $privateExact
+            Set-Alias -Name pwd -Value Get-Date -Description 'caller private alias' -Option Private -Scope Local -Force
+            $privateBefore = Get-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Local -ErrorAction Stop)
+            Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+            $privateDuring = Get-Command -Name pwd -ErrorAction Stop
+            Remove-Module -Name Psh -Force -ErrorAction Stop
+            $privateExact = Test-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Local -ErrorAction Stop) -Snapshot $privateBefore
+            $result = [PSCustomObject]@{
+                Unknown = $unknownDuring.CommandType -eq 'Alias' -and [string]$unknownDuring.Definition -ceq 'Get-Date' -and $unknownExact
+                Private = $privateDuring.CommandType -eq 'Alias' -and [string]$privateDuring.Definition -ceq 'Get-Date' -and $privateExact
+                CallerExact = $false
+                GlobalExact = $false
+            }
         }
+        finally {
+            Remove-Module -Name Psh -Force -ErrorAction SilentlyContinue
+            if ($fixtureCreated -and $null -ne (Get-Alias -Name pwd -Scope Local -ErrorAction SilentlyContinue)) {
+                Remove-Item -LiteralPath Alias:pwd -Force -ErrorAction SilentlyContinue
+            }
+            if ($callerHadLocal) {
+                Set-Alias -Name pwd -Value $callerBefore.Definition -Description $callerBefore.Description -Option $callerBefore.Options -Scope Local -Force
+                (Get-Alias -Name pwd -Scope Local -ErrorAction Stop).Visibility = $callerBefore.Visibility
+            }
+        }
+        $callerAfter = Get-Alias -Name pwd -Scope Local -ErrorAction SilentlyContinue
+        $result.CallerExact = if ($callerHadLocal) {
+            $null -ne $callerAfter -and (Test-PshAliasScopeSnapshot -Alias $callerAfter -Snapshot $callerBefore)
+        }
+        else {
+            $null -eq $callerAfter
+        }
+        $result.GlobalExact = Test-PshAliasScopeSnapshot -Alias (Get-Alias -Name pwd -Scope Global -ErrorAction Stop) -Snapshot $globalBefore
+        return $result
     }
-    Assert-PshAliasScope ($unknownAndPrivate.Unknown -and $unknownAndPrivate.Private) 'Unknown or private caller aliases were overwritten by projection.'
+    Assert-PshAliasScope ($unknownAndPrivate.Unknown -and $unknownAndPrivate.Private -and $unknownAndPrivate.CallerExact -and $unknownAndPrivate.GlobalExact) 'Unknown or private caller aliases were overwritten by projection or leaked fixture state.'
 
     function Invoke-PshAliasScopeDeep {
         param([int]$Depth)

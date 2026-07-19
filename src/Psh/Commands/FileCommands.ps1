@@ -156,6 +156,97 @@ function Get-PshLinkTargetText {
     return [string]$value
 }
 
+function Get-PshWindowsSymbolicLinkNativeType {
+    $typeName = 'Psh.FileCommands.WindowsSymbolicLinkNative_baf0d32a'
+    $nativeType = $typeName -as [type]
+    if ($null -ne $nativeType) { return $nativeType }
+
+    $nativeType = Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+
+namespace Psh.FileCommands
+{
+    public static class WindowsSymbolicLinkNative_baf0d32a
+    {
+        [DllImport("kernel32.dll", EntryPoint = "CreateSymbolicLinkW", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool CreateSymbolicLink(string linkPath, string targetPath, int flags);
+    }
+}
+'@ -PassThru -ErrorAction Stop
+
+    return $nativeType
+}
+
+function Test-PshSymbolicLinkDirectoryTarget {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LinkPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TargetPath,
+
+        [AllowNull()]
+        [string]$ResolvedTargetPath
+    )
+
+    if ($TargetPath.EndsWith('/') -or $TargetPath.EndsWith('\')) { return $true }
+
+    try {
+        $candidate = $TargetPath
+        if ($TargetPath.IndexOf('::', [StringComparison]::Ordinal) -ge 0 -or
+            $TargetPath -eq '~' -or $TargetPath.StartsWith('~/') -or $TargetPath.StartsWith('~\') -or
+            $TargetPath -match '\A[^\\/:]+:') {
+            $candidate = $ResolvedTargetPath
+        }
+        elseif (-not [IO.Path]::IsPathRooted($TargetPath)) {
+            $linkParent = [IO.Path]::GetDirectoryName($LinkPath)
+            $candidate = [IO.Path]::GetFullPath((Join-Path -Path $linkParent -ChildPath $TargetPath))
+        }
+
+        return -not [string]::IsNullOrWhiteSpace($candidate) -and [IO.Directory]::Exists($candidate)
+    }
+    catch {
+        return $false
+    }
+}
+
+function New-PshSymbolicLinkEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LinkPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TargetPath,
+
+        [switch]$Directory
+    )
+
+    if ($env:OS -ne 'Windows_NT' -and [IO.Path]::DirectorySeparatorChar -ne '\') {
+        Microsoft.PowerShell.Management\New-Item -Path $LinkPath -ItemType SymbolicLink -Target $TargetPath -ErrorAction Stop | Microsoft.PowerShell.Core\Out-Null
+        return
+    }
+
+    $nativeType = Get-PshWindowsSymbolicLinkNativeType
+    $flags = 2
+    if ($Directory) { $flags = $flags -bor 1 }
+    $created = $nativeType::CreateSymbolicLink($LinkPath, $TargetPath, $flags)
+    if (-not $created) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        if ($errorCode -eq 87) {
+            $flags = $flags -band (-bnot 2)
+            $created = $nativeType::CreateSymbolicLink($LinkPath, $TargetPath, $flags)
+            if (-not $created) {
+                $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            }
+        }
+        if (-not $created) {
+            $nativeError = New-Object System.ComponentModel.Win32Exception -ArgumentList ([int]$errorCode)
+            throw ('cannot create symbolic link "{0}" -> "{1}": {2} (Win32 error {3}).' -f $LinkPath, $TargetPath, $nativeError.Message, $errorCode)
+        }
+    }
+}
+
 function ConvertTo-PshRawAbsoluteFileSystemPath {
     param(
         [Parameter(Mandatory = $true)]
@@ -1204,7 +1295,13 @@ function Copy-PshLinkEntry {
     $replacementCommitted = $false
     $backupRestored = $false
     try {
-        Microsoft.PowerShell.Management\New-Item -Path $temporaryLink -ItemType $itemType -Target $targetText -ErrorAction Stop | Microsoft.PowerShell.Core\Out-Null
+        if ($itemType -eq 'SymbolicLink') {
+            $directoryTarget = [bool]$SourceItem.PSIsContainer -or (Test-PshSymbolicLinkDirectoryTarget -LinkPath $temporaryLink -TargetPath $targetText)
+            New-PshSymbolicLinkEntry -LinkPath $temporaryLink -TargetPath $targetText -Directory:$directoryTarget
+        }
+        else {
+            Microsoft.PowerShell.Management\New-Item -Path $temporaryLink -ItemType $itemType -Target $targetText -ErrorAction Stop | Microsoft.PowerShell.Core\Out-Null
+        }
         if ($null -eq $destinationItem) {
             Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporaryLink -Destination $Destination -ErrorAction Stop
         }
@@ -2241,13 +2338,15 @@ function ln {
             throw ('link parent directory does not exist: {0}' -f $linkOriginal)
         }
 
-        $itemType = 'HardLink'
-        if ($symbolic) { $itemType = 'SymbolicLink' }
         $temporaryLink = New-PshSiblingTemporaryPath -Destination $linkResolved -Purpose 'link'
         try {
-            $linkTargetValue = $sourceResolved
-            if ($symbolic) { $linkTargetValue = $sourceOriginal }
-            Microsoft.PowerShell.Management\New-Item -Path $temporaryLink -ItemType $itemType -Target $linkTargetValue -ErrorAction Stop | Microsoft.PowerShell.Core\Out-Null
+            if ($symbolic) {
+                $directoryTarget = Test-PshSymbolicLinkDirectoryTarget -LinkPath $temporaryLink -TargetPath $sourceOriginal -ResolvedTargetPath $sourceResolved
+                New-PshSymbolicLinkEntry -LinkPath $temporaryLink -TargetPath $sourceOriginal -Directory:$directoryTarget
+            }
+            else {
+                Microsoft.PowerShell.Management\New-Item -Path $temporaryLink -ItemType HardLink -Target $sourceResolved -ErrorAction Stop | Microsoft.PowerShell.Core\Out-Null
+            }
             if ($linkExists) {
                 if ($linkType -eq 'link' -and $noDereference) {
                     Install-PshStagedEntry -Stage $temporaryLink -Destination $linkResolved
