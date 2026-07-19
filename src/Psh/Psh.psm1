@@ -651,20 +651,20 @@ function ConvertTo-PshCapabilityEntry {
     }
 
     $fieldMappings = @(
-        @('category', 'Category')
-        @('summary', 'Summary')
-        @('flags', 'Flags')
-        @('examples', 'Examples')
-        @('exitCodes', 'ExitCodes')
-        @('objectApi', 'ObjectApi')
-        @('coreBackend', 'CoreBackend')
-        @('fullBackend', 'FullBackend')
+        [PSCustomObject]@{ Capability = 'category'; Specification = 'Category' }
+        [PSCustomObject]@{ Capability = 'summary'; Specification = 'Summary' }
+        [PSCustomObject]@{ Capability = 'flags'; Specification = 'Flags' }
+        [PSCustomObject]@{ Capability = 'examples'; Specification = 'Examples' }
+        [PSCustomObject]@{ Capability = 'exitCodes'; Specification = 'ExitCodes' }
+        [PSCustomObject]@{ Capability = 'objectApi'; Specification = 'ObjectApi' }
+        [PSCustomObject]@{ Capability = 'coreBackend'; Specification = 'CoreBackend' }
+        [PSCustomObject]@{ Capability = 'fullBackend'; Specification = 'FullBackend' }
     )
 
     foreach ($mapping in $fieldMappings) {
-        $value = Get-PshPropertyValue -InputObject $Entry -Name ([string]$mapping[1])
+        $value = Get-PshPropertyValue -InputObject $Entry -Name ([string]$mapping.Specification)
         if ($null -ne $value) {
-            $capability[[string]$mapping[0]] = $value
+            $capability[[string]$mapping.Capability] = $value
         }
     }
 
@@ -1270,6 +1270,8 @@ $exportedFunctions = @(
     'Get-PshHead'
     'Get-PshTail'
     'Measure-PshText'
+    'Select-PshJson'
+    'Invoke-PshXArgs'
 )
 $exportedFunctions += @(Get-PshEnabledFileCommandNames)
 $exportedFunctions += @(Get-PshEnabledTextCommandNames)

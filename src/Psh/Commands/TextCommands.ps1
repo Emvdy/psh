@@ -5,8 +5,8 @@
 # rejected explicitly with Psh's stable usage exit code.
 
 $script:PshTextCommandNames = @(
-    'cat', 'bat', 'head', 'tail', 'grep', 'rg', 'cut', 'tr', 'sort', 'uniq',
-    'wc', 'tee', 'printf', 'echo', 'base64'
+    'cat', 'bat', 'head', 'tail', 'grep', 'rg', 'sed', 'awk', 'jq', 'cut',
+    'tr', 'sort', 'uniq', 'wc', 'tee', 'xargs', 'printf', 'echo', 'base64'
 )
 $script:PshRawByteSink = $null
 
@@ -427,6 +427,143 @@ function Resolve-PshPinnedTextTool {
     return [PSCustomObject]@{ Code = 4; Message = ('the pinned {0} dependency is unavailable.' -f $Name); Path = $null }
 }
 
+function ConvertTo-PshWindowsCommandLineArgument {
+    param(
+        [AllowNull()]
+        [string]$Argument
+    )
+
+    if ($null -eq $Argument) { $Argument = '' }
+    $builder = New-Object Text.StringBuilder
+    [void]$builder.Append('"')
+    $backslashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') { $backslashes++; continue }
+        if ($character -eq '"') {
+            for ($index = 0; $index -lt (($backslashes * 2) + 1); $index++) { [void]$builder.Append('\') }
+            [void]$builder.Append('"')
+            $backslashes = 0
+            continue
+        }
+        for ($index = 0; $index -lt $backslashes; $index++) { [void]$builder.Append('\') }
+        $backslashes = 0
+        [void]$builder.Append($character)
+    }
+    for ($index = 0; $index -lt ($backslashes * 2); $index++) { [void]$builder.Append('\') }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function Set-PshProcessArguments {
+    param(
+        [Parameter(Mandatory = $true)][Diagnostics.ProcessStartInfo]$StartInfo,
+        [AllowEmptyCollection()][string[]]$Arguments = @()
+    )
+
+    $argumentListProperty = $StartInfo.PSObject.Properties['ArgumentList']
+    if ($null -ne $argumentListProperty) {
+        foreach ($argument in $Arguments) { [void]$StartInfo.ArgumentList.Add([string]$argument) }
+        return
+    }
+    $quoted = @()
+    foreach ($argument in $Arguments) { $quoted += ConvertTo-PshWindowsCommandLineArgument -Argument $argument }
+    $StartInfo.Arguments = $quoted -join ' '
+}
+
+function ConvertFrom-PshProcessOutputBytes {
+    param(
+        [AllowNull()]
+        [byte[]]$Bytes
+    )
+
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) { return @() }
+    $text = ConvertFrom-PshStrictUtf8Bytes -Bytes $Bytes
+    $lines = New-Object System.Collections.ArrayList
+    foreach ($line in @(Split-PshTextLines -Text $text)) { [void]$lines.Add([string]$line.Text) }
+    return [object[]]$lines.ToArray()
+}
+
+function Invoke-PshCapturedProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [AllowEmptyCollection()][string[]]$Arguments = @(),
+        [AllowNull()][byte[]]$StandardInputBytes,
+        [bool]$RedirectStandardInput = $false,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory
+    )
+
+    if ($null -eq $StandardInputBytes) { $StandardInputBytes = [byte[]]@() }
+    $launchPath = $FilePath
+    $launchArguments = @($Arguments)
+    if ([string]::Equals([IO.Path]::GetExtension($FilePath), '.ps1', [StringComparison]::OrdinalIgnoreCase)) {
+        $launchPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $launchArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $FilePath) + @($Arguments)
+    }
+
+    $process = $null
+    $stdoutBuffer = New-Object IO.MemoryStream
+    $stderrBuffer = New-Object IO.MemoryStream
+    $stdoutTask = $null
+    $stderrTask = $null
+    try {
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $launchPath
+        $startInfo.WorkingDirectory = $WorkingDirectory
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $RedirectStandardInput
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        Set-PshProcessArguments -StartInfo $startInfo -Arguments $launchArguments
+
+        $process = New-Object Diagnostics.Process
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) { throw ('failed to start process: {0}' -f $FilePath) }
+        $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdoutBuffer)
+        $stderrTask = $process.StandardError.BaseStream.CopyToAsync($stderrBuffer)
+        if ($RedirectStandardInput) {
+            try {
+                if ($StandardInputBytes.Length -gt 0) {
+                    $process.StandardInput.BaseStream.Write($StandardInputBytes, 0, $StandardInputBytes.Length)
+                    $process.StandardInput.BaseStream.Flush()
+                }
+            }
+            catch [IO.IOException] {
+                # A child may exit successfully without consuming all redirected input.
+            }
+            catch [ObjectDisposedException] {
+                # The child closed its input pipe before the parent finished writing.
+            }
+            finally {
+                try { $process.StandardInput.Close() }
+                catch [IO.IOException] {}
+                catch [ObjectDisposedException] {}
+            }
+        }
+
+        $process.WaitForExit()
+        $stdoutTask.Wait()
+        $stderrTask.Wait()
+        $stdoutBytes = [byte[]]$stdoutBuffer.ToArray()
+        $stderrBytes = [byte[]]$stderrBuffer.ToArray()
+        return [PSCustomObject]@{
+            ExitCode = [int]$process.ExitCode
+            StdOutBytes = $stdoutBytes
+            StdErrBytes = $stderrBytes
+            StdOut = [object[]]@(ConvertFrom-PshProcessOutputBytes -Bytes $stdoutBytes)
+            StdErr = [object[]]@(ConvertFrom-PshProcessOutputBytes -Bytes $stderrBytes)
+        }
+    }
+    finally {
+        if ($null -ne $process) {
+            try { if (-not $process.HasExited) { $process.Kill() } } catch {}
+            $process.Dispose()
+        }
+        $stdoutBuffer.Dispose()
+        $stderrBuffer.Dispose()
+    }
+}
+
 function Invoke-PshPinnedTextTool {
     param(
         [Parameter(Mandatory = $true)]
@@ -447,15 +584,16 @@ function Invoke-PshPinnedTextTool {
         return
     }
     try {
-        if ($PipelineExpected) {
-            & {
-                foreach ($item in @($PipelineItems)) { ,$item }
-            } | & ([string]$native.Path) @Arguments
+        $inputBytes = [byte[]]@()
+        if ($PipelineExpected) { $inputBytes = [byte[]](New-PshPipelineTextSource -Items $PipelineItems).Bytes }
+        $location = Get-Location
+        if ($null -eq $location.Provider -or -not [string]::Equals([string]$location.Provider.Name, 'FileSystem', [StringComparison]::OrdinalIgnoreCase)) {
+            Throw-PshTextUsageError ('{0} requires a FileSystem current location for native process execution.' -f $Name)
         }
-        else {
-            & ([string]$native.Path) @Arguments
-        }
-        $nativeExit = [int]$LASTEXITCODE
+        $result = Invoke-PshCapturedProcess -FilePath ([string]$native.Path) -Arguments $Arguments -StandardInputBytes $inputBytes -RedirectStandardInput:$PipelineExpected -WorkingDirectory ([string]$location.ProviderPath)
+        foreach ($line in @($result.StdOut)) { Microsoft.PowerShell.Utility\Write-Output ([string]$line) }
+        foreach ($line in @($result.StdErr)) { Microsoft.PowerShell.Utility\Write-Output ([string]$line) }
+        $nativeExit = [int]$result.ExitCode
         if ($nativeExit -in @(0, 1, 2)) { Set-PshLastExitCode -Code $nativeExit }
         else { Set-PshLastExitCode -Code 3 }
     }
@@ -2934,5 +3072,2451 @@ function base64 {
     catch {
         $code = if ($_.Exception.Message -match '\Ainvalid Base64 input') { 3 } else { 3 }
         Write-PshCommandFailure -Command 'base64' -Code $code -Message $_.Exception.Message
+    }
+}
+
+function Throw-PshTextUsageError {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $exception = New-Object ArgumentException($Message)
+    $exception.Data['PshExitCode'] = 2
+    throw $exception
+}
+
+function Get-PshTextErrorCode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord,
+
+        [int]$Default = 3
+    )
+
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        if ($exception.Data.Contains('PshExitCode')) {
+            $code = 0
+            if ([int]::TryParse([string]$exception.Data['PshExitCode'], [ref]$code) -and $code -in @(1, 2, 3, 4, 5)) {
+                return $code
+            }
+        }
+        $exception = $exception.InnerException
+    }
+    return $Default
+}
+
+function ConvertTo-PshEncodedTextBytes {
+    param(
+        [AllowNull()]
+        [string]$Text,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EncodingName
+    )
+
+    if ($null -eq $Text) { $Text = '' }
+    $encoding = $null
+    $includePreamble = $false
+    switch ($EncodingName) {
+        'utf-8' { $encoding = New-Object Text.UTF8Encoding($false, $true) }
+        'utf-8-bom' { $encoding = New-Object Text.UTF8Encoding($true, $true); $includePreamble = $true }
+        'utf-16le' { $encoding = New-Object Text.UnicodeEncoding($false, $true, $true); $includePreamble = $true }
+        'utf-16be' { $encoding = New-Object Text.UnicodeEncoding($true, $true, $true); $includePreamble = $true }
+        'utf-32le' { $encoding = New-Object Text.UTF32Encoding($false, $true, $true); $includePreamble = $true }
+        'utf-32be' { $encoding = New-Object Text.UTF32Encoding($true, $true, $true); $includePreamble = $true }
+        default { Throw-PshTextUsageError ('unsupported text encoding for an in-place edit: {0}.' -f $EncodingName) }
+    }
+
+    $body = [byte[]]$encoding.GetBytes($Text)
+    if (-not $includePreamble) { return $body }
+    $preamble = [byte[]]$encoding.GetPreamble()
+    $result = New-Object byte[] ($preamble.Length + $body.Length)
+    if ($preamble.Length -gt 0) { [Array]::Copy($preamble, 0, $result, 0, $preamble.Length) }
+    if ($body.Length -gt 0) { [Array]::Copy($body, 0, $result, $preamble.Length, $body.Length) }
+    return $result
+}
+
+function Set-PshTextFileAtomically {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [AllowNull()]
+        [string]$Text,
+
+        [Parameter(Mandatory = $true)]
+        [string]$EncodingName
+    )
+
+    $isWindows = $env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\'
+    $sourceAcl = $null
+    if ($isWindows) {
+        $sourceAcl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path -ErrorAction Stop
+    }
+    [Reflection.MethodInfo]$getUnixFileMode = $null
+    [Reflection.MethodInfo]$setUnixFileMode = $null
+    $sourceUnixFileMode = $null
+    if (-not $isWindows) {
+        $getUnixFileMode = [Reflection.MethodInfo]@([IO.File].GetMethods() | Where-Object {
+            $_.Name -ceq 'GetUnixFileMode' -and $_.IsStatic -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType -eq [string]
+        } | Select-Object -First 1)[0]
+        $setUnixFileMode = [Reflection.MethodInfo]@([IO.File].GetMethods() | Where-Object {
+            $_.Name -ceq 'SetUnixFileMode' -and $_.IsStatic -and $_.GetParameters().Count -eq 2 -and $_.GetParameters()[0].ParameterType -eq [string]
+        } | Select-Object -First 1)[0]
+        if ($null -ne $getUnixFileMode -and $null -ne $setUnixFileMode) {
+            $sourceUnixFileMode = $getUnixFileMode.Invoke($null, [object[]](,[string]$Path))
+        }
+        else {
+            throw 'cannot preserve Unix file permissions because GetUnixFileMode/SetUnixFileMode is unavailable.'
+        }
+    }
+
+    $temporaryPath = New-PshSiblingTemporaryPath -Destination $Path -Purpose 'sed'
+    try {
+        [IO.File]::WriteAllBytes($temporaryPath, [byte[]](ConvertTo-PshEncodedTextBytes -Text $Text -EncodingName $EncodingName))
+        if ($null -ne $sourceAcl) {
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $temporaryPath -AclObject $sourceAcl -ErrorAction Stop
+        }
+        if ($null -ne $sourceUnixFileMode) {
+            $modeType = $setUnixFileMode.GetParameters()[1].ParameterType
+            $typedMode = [Enum]::ToObject($modeType, [int]$sourceUnixFileMode)
+            [void]$setUnixFileMode.Invoke($null, [object[]]@([string]$temporaryPath, $typedMode))
+        }
+        Replace-PshFileEntry -Replacement $temporaryPath -Destination $Path
+    }
+    finally {
+        if ([IO.File]::Exists($temporaryPath)) { [IO.File]::Delete($temporaryPath) }
+    }
+}
+
+function Move-PshTextIndexPastWhitespace {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$Index
+    )
+
+    while ($Index.Value -lt $Text.Length -and [char]::IsWhiteSpace($Text[$Index.Value])) { $Index.Value++ }
+}
+
+function Read-PshSedDelimitedText {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Script,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$Index,
+
+        [Parameter(Mandatory = $true)]
+        [char]$Delimiter,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Context
+    )
+
+    $builder = New-Object Text.StringBuilder
+    while ($Index.Value -lt $Script.Length) {
+        $character = $Script[$Index.Value]
+        $Index.Value++
+        if ($character -eq $Delimiter) { return $builder.ToString() }
+        if ($character -eq '\') {
+            if ($Index.Value -ge $Script.Length) {
+                Throw-PshTextUsageError ('unterminated escape in sed {0}.' -f $Context)
+            }
+            $next = $Script[$Index.Value]
+            $Index.Value++
+            if ($next -eq $Delimiter) { [void]$builder.Append($next) }
+            else {
+                [void]$builder.Append('\')
+                [void]$builder.Append($next)
+            }
+            continue
+        }
+        [void]$builder.Append($character)
+    }
+    Throw-PshTextUsageError ('unterminated sed {0}.' -f $Context)
+}
+
+function Read-PshSedAddress {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Script,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$Index,
+
+        [switch]$Extended
+    )
+
+    if ($Index.Value -ge $Script.Length) { return $null }
+    $character = $Script[$Index.Value]
+    if ([char]::IsDigit($character)) {
+        $start = $Index.Value
+        while ($Index.Value -lt $Script.Length -and [char]::IsDigit($Script[$Index.Value])) { $Index.Value++ }
+        $number = 0
+        if (-not [int]::TryParse($Script.Substring($start, $Index.Value - $start), [ref]$number) -or $number -lt 1) {
+            Throw-PshTextUsageError 'sed line addresses must be positive integers.'
+        }
+        return [PSCustomObject]@{ Kind = 'Number'; Number = $number; Regex = $null }
+    }
+    if ($character -eq '$') {
+        $Index.Value++
+        return [PSCustomObject]@{ Kind = 'Last'; Number = 0; Regex = $null }
+    }
+    if ($character -eq '/') {
+        $Index.Value++
+        $pattern = Read-PshSedDelimitedText -Script $Script -Index $Index -Delimiter '/' -Context 'address'
+        if ([string]::IsNullOrEmpty($pattern)) { Throw-PshTextUsageError 'empty sed address expressions are unsupported.' }
+        try {
+            $regex = New-PshSearchRegex -Pattern $pattern -Basic:(-not $Extended)
+        }
+        catch { Throw-PshTextUsageError $_.Exception.Message }
+        return [PSCustomObject]@{ Kind = 'Regex'; Number = 0; Regex = $regex }
+    }
+    return $null
+}
+
+function Read-PshSedProgram {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Script,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$Index,
+
+        [switch]$Extended
+    )
+
+    Move-PshTextIndexPastWhitespace -Text $Script -Index $Index
+    $firstAddress = Read-PshSedAddress -Script $Script -Index $Index -Extended:$Extended
+    $secondAddress = $null
+    if ($null -ne $firstAddress -and $Index.Value -lt $Script.Length -and $Script[$Index.Value] -eq ',') {
+        $Index.Value++
+        $secondAddress = Read-PshSedAddress -Script $Script -Index $Index -Extended:$Extended
+        if ($null -eq $secondAddress) { Throw-PshTextUsageError 'a sed address range requires an ending address.' }
+    }
+    Move-PshTextIndexPastWhitespace -Text $Script -Index $Index
+    if ($Index.Value -ge $Script.Length) { Throw-PshTextUsageError 'a sed address must be followed by a command.' }
+
+    $command = [string]$Script[$Index.Value]
+    $Index.Value++
+    $program = [ordered]@{
+        AddressStart = $firstAddress
+        AddressEnd = $secondAddress
+        Command = $command
+        Regex = $null
+        Replacement = ''
+        Global = $false
+        Print = $false
+        RangeActive = $false
+    }
+
+    if ($command -ceq 's') {
+        if ($Index.Value -ge $Script.Length) { Throw-PshTextUsageError 'sed substitution requires a delimiter.' }
+        $delimiter = $Script[$Index.Value]
+        if ([char]::IsLetterOrDigit($delimiter) -or [char]::IsWhiteSpace($delimiter) -or $delimiter -eq '\') {
+            Throw-PshTextUsageError 'sed substitution uses an invalid delimiter.'
+        }
+        $Index.Value++
+        $pattern = Read-PshSedDelimitedText -Script $Script -Index $Index -Delimiter $delimiter -Context 'substitution pattern'
+        $replacement = Read-PshSedDelimitedText -Script $Script -Index $Index -Delimiter $delimiter -Context 'substitution replacement'
+        if ([string]::IsNullOrEmpty($pattern)) { Throw-PshTextUsageError 'empty sed substitution patterns are unsupported.' }
+        try {
+            $program.Regex = New-PshSearchRegex -Pattern $pattern -Basic:(-not $Extended)
+        }
+        catch { Throw-PshTextUsageError $_.Exception.Message }
+        $groupNumbers = [int[]]$program.Regex.GetGroupNumbers()
+        for ($replacementIndex = 0; $replacementIndex -lt $replacement.Length; $replacementIndex++) {
+            if ($replacement[$replacementIndex] -ne '\' -or ($replacementIndex + 1) -ge $replacement.Length) { continue }
+            $replacementIndex++
+            $escapedReplacement = $replacement[$replacementIndex]
+            if ([char]::IsDigit($escapedReplacement)) {
+                $groupNumber = [int]([string]$escapedReplacement)
+                if ($groupNumbers -notcontains $groupNumber) {
+                    Throw-PshTextUsageError ('sed replacement references missing capture group \{0}.' -f $groupNumber)
+                }
+            }
+        }
+        $program.Replacement = $replacement
+        while ($Index.Value -lt $Script.Length -and $Script[$Index.Value] -ne ';' -and -not [char]::IsWhiteSpace($Script[$Index.Value])) {
+            $flag = [string]$Script[$Index.Value]
+            $Index.Value++
+            if ($flag -ceq 'g' -and -not $program.Global) { $program.Global = $true }
+            elseif ($flag -ceq 'p' -and -not $program.Print) { $program.Print = $true }
+            else { Throw-PshTextUsageError ('unsupported sed substitution flag "{0}".' -f $flag) }
+        }
+    }
+    elseif ($command -notin @('d', 'p', 'q')) {
+        Throw-PshTextUsageError ('unsupported sed command "{0}".' -f $command)
+    }
+    return [PSCustomObject]$program
+}
+
+function ConvertTo-PshSedPrograms {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Expressions,
+
+        [switch]$Extended
+    )
+
+    $programs = @()
+    foreach ($expression in $Expressions) {
+        if ([string]::IsNullOrWhiteSpace($expression)) { Throw-PshTextUsageError 'sed expressions cannot be empty.' }
+        $index = 0
+        while ($index -lt $expression.Length) {
+            Move-PshTextIndexPastWhitespace -Text $expression -Index ([ref]$index)
+            while ($index -lt $expression.Length -and $expression[$index] -eq ';') {
+                $index++
+                Move-PshTextIndexPastWhitespace -Text $expression -Index ([ref]$index)
+            }
+            if ($index -ge $expression.Length) { break }
+            $programs += Read-PshSedProgram -Script $expression -Index ([ref]$index) -Extended:$Extended
+            Move-PshTextIndexPastWhitespace -Text $expression -Index ([ref]$index)
+            if ($index -lt $expression.Length) {
+                if ($expression[$index] -ne ';') {
+                    Throw-PshTextUsageError ('unsupported text after sed command near "{0}".' -f $expression.Substring($index))
+                }
+                $index++
+            }
+        }
+    }
+    if ($programs.Count -eq 0) { Throw-PshTextUsageError 'at least one sed expression is required.' }
+    return $programs
+}
+
+function Test-PshSedAddressMatch {
+    param(
+        [AllowNull()]
+        [object]$Address,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Text,
+
+        [Parameter(Mandatory = $true)]
+        [int]$LineNumber,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$IsLast
+    )
+
+    if ($null -eq $Address) { return $true }
+    if ([string]$Address.Kind -ceq 'Number') { return $LineNumber -eq [int]$Address.Number }
+    if ([string]$Address.Kind -ceq 'Last') { return $IsLast }
+    return $Address.Regex.IsMatch($Text)
+}
+
+function Test-PshSedProgramSelected {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Program,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Text,
+
+        [Parameter(Mandatory = $true)]
+        [int]$LineNumber,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$IsLast
+    )
+
+    if ($null -eq $Program.AddressEnd) {
+        return (Test-PshSedAddressMatch -Address $Program.AddressStart -Text $Text -LineNumber $LineNumber -IsLast $IsLast)
+    }
+    if ($Program.RangeActive) {
+        if (Test-PshSedAddressMatch -Address $Program.AddressEnd -Text $Text -LineNumber $LineNumber -IsLast $IsLast) {
+            $Program.RangeActive = $false
+        }
+        return $true
+    }
+    if (-not (Test-PshSedAddressMatch -Address $Program.AddressStart -Text $Text -LineNumber $LineNumber -IsLast $IsLast)) {
+        return $false
+    }
+    $Program.RangeActive = $true
+    $numericEndAlreadyReached = [string]$Program.AddressEnd.Kind -ceq 'Number' -and [int]$Program.AddressEnd.Number -le $LineNumber
+    if ($numericEndAlreadyReached) { $Program.RangeActive = $false }
+    return $true
+}
+
+function Expand-PshSedReplacement {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Text.RegularExpressions.Match]$Match,
+
+        [AllowNull()]
+        [string]$Replacement
+    )
+
+    if ($null -eq $Replacement) { return '' }
+    $builder = New-Object Text.StringBuilder
+    for ($index = 0; $index -lt $Replacement.Length; $index++) {
+        $character = $Replacement[$index]
+        if ($character -eq '&') { [void]$builder.Append($Match.Value); continue }
+        if ($character -eq '\' -and ($index + 1) -lt $Replacement.Length) {
+            $index++
+            $next = $Replacement[$index]
+            if ([char]::IsDigit($next)) {
+                $groupNumber = [int]([string]$next)
+                if ($groupNumber -lt $Match.Groups.Count) { [void]$builder.Append($Match.Groups[$groupNumber].Value) }
+            }
+            else { [void]$builder.Append($next) }
+            continue
+        }
+        [void]$builder.Append($character)
+    }
+    return $builder.ToString()
+}
+
+function Invoke-PshSedPrograms {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Programs,
+
+        [AllowNull()]
+        [string]$Text,
+
+        [AllowNull()]
+        [object[]]$Records,
+
+        [switch]$NoAutoPrint
+    )
+
+    foreach ($program in $Programs) { $program.RangeActive = $false }
+    $lines = if ($PSBoundParameters.ContainsKey('Records')) { @($Records) } else { @(Split-PshTextLines -Text $Text) }
+    $builder = New-Object Text.StringBuilder
+    $quit = $false
+    for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
+        $current = [string]$lines[$lineIndex].Text
+        $terminator = [string]$lines[$lineIndex].Terminator
+        $deleted = $false
+        foreach ($program in $Programs) {
+            if (-not (Test-PshSedProgramSelected -Program $program -Text $current -LineNumber ($lineIndex + 1) -IsLast:($lineIndex -eq ($lines.Count - 1)))) {
+                continue
+            }
+            if ([string]$program.Command -ceq 's') {
+                $replacement = [string]$program.Replacement
+                $evaluator = [Text.RegularExpressions.MatchEvaluator]{
+                    param($match)
+                    Expand-PshSedReplacement -Match $match -Replacement $replacement
+                }
+                $count = if ($program.Global) { [int]::MaxValue } else { 1 }
+                $matched = $program.Regex.IsMatch($current)
+                $next = $program.Regex.Replace($current, $evaluator, $count)
+                $current = $next
+                if ($matched -and $program.Print) {
+                    [void]$builder.Append($current)
+                    [void]$builder.Append($terminator)
+                }
+            }
+            elseif ([string]$program.Command -ceq 'd') {
+                $deleted = $true
+                break
+            }
+            elseif ([string]$program.Command -ceq 'p') {
+                [void]$builder.Append($current)
+                [void]$builder.Append($terminator)
+            }
+            elseif ([string]$program.Command -ceq 'q') {
+                $quit = $true
+                break
+            }
+        }
+        if (-not $deleted -and -not $NoAutoPrint) {
+            [void]$builder.Append($current)
+            [void]$builder.Append($terminator)
+        }
+        if ($quit) { break }
+    }
+    return [PSCustomObject]@{ Text = $builder.ToString(); Quit = $quit }
+}
+
+function sed {
+    $arguments = @(ConvertTo-PshArgumentArray -InputArguments $args)
+    $pipelineItems = @($input)
+    Set-PshLastExitCode -Code 0
+    if (Test-PshLongHelp -Arguments $arguments) {
+        Write-PshCommandHelp -Usage 'Usage: sed [-nE] [-e script] [-i] [script] [file ...]'
+        return
+    }
+
+    try {
+        $noAutoPrint = $false
+        $inPlace = $false
+        $extended = $false
+        $expressions = @()
+        $positionals = @()
+        $parseOptions = $true
+        for ($index = 0; $index -lt $arguments.Count; $index++) {
+            $argument = $arguments[$index]
+            if ($parseOptions -and $argument -ceq '--') { $parseOptions = $false; continue }
+            if ($parseOptions -and $argument -ceq '-n') { $noAutoPrint = $true; continue }
+            if ($parseOptions -and $argument -ceq '-E') { $extended = $true; continue }
+            if ($parseOptions -and $argument -ceq '-i') { $inPlace = $true; continue }
+            if ($parseOptions -and $argument -match '\A-e(.+)\z') { $expressions += $matches[1]; continue }
+            if ($parseOptions -and $argument -ceq '-e') {
+                if (($index + 1) -ge $arguments.Count) { Throw-PshTextUsageError 'sed -e requires an expression.' }
+                $index++
+                $expressions += $arguments[$index]
+                continue
+            }
+            if ($parseOptions -and $argument.StartsWith('-') -and $argument -ne '-') {
+                $expanded = @(Expand-PshShortOptions -Token $argument -Allowed @('n', 'E'))
+                if ($expanded.Count -eq 0) { Throw-PshTextUsageError ('unsupported argument "{0}".' -f $argument) }
+                foreach ($item in $expanded) {
+                    if ($item -ceq 'n') { $noAutoPrint = $true } else { $extended = $true }
+                }
+                continue
+            }
+            $parseOptions = $false
+            $positionals += $argument
+        }
+        if ($expressions.Count -eq 0) {
+            if ($positionals.Count -eq 0) { Throw-PshTextUsageError 'a sed expression is required.' }
+            $expressions += $positionals[0]
+            if ($positionals.Count -gt 1) { $positionals = @($positionals[1..($positionals.Count - 1)]) } else { $positionals = @() }
+        }
+        $programs = @(ConvertTo-PshSedPrograms -Expressions $expressions -Extended:$extended)
+
+        if ($inPlace) {
+            if ($positionals.Count -eq 0 -or @($positionals | Where-Object { $_ -ceq '-' }).Count -gt 0) {
+                Throw-PshTextUsageError 'sed -i requires one or more file paths and does not accept standard input.'
+            }
+            foreach ($operand in $positionals) {
+                $source = Read-PshTextFileSource -Operand $operand
+                if ($source.IsBinary) { Throw-PshTextUsageError ('sed -i does not accept binary input: {0}.' -f $operand) }
+                $result = Invoke-PshSedPrograms -Programs $programs -Text ([string]$source.Text) -NoAutoPrint:$noAutoPrint
+                Set-PshTextFileAtomically -Path ([string]$source.Path) -Text ([string]$result.Text) -EncodingName ([string]$source.Encoding)
+                if ($result.Quit) { break }
+            }
+        }
+        else {
+            $sources = @(Get-PshTextSources -Paths $positionals -PipelineItems $pipelineItems)
+            $records = New-Object System.Collections.ArrayList
+            for ($sourceIndex = 0; $sourceIndex -lt $sources.Count; $sourceIndex++) {
+                $source = $sources[$sourceIndex]
+                if ($source.IsBinary) { Throw-PshTextUsageError ('sed does not accept binary input: {0}.' -f [string]$source.DisplayName) }
+                $sourceRecords = @(Split-PshTextLines -Text ([string]$source.Text))
+                for ($recordIndex = 0; $recordIndex -lt $sourceRecords.Count; $recordIndex++) {
+                    $terminator = [string]$sourceRecords[$recordIndex].Terminator
+                    if ($sourceIndex -lt ($sources.Count - 1) -and $recordIndex -eq ($sourceRecords.Count - 1) -and $terminator.Length -eq 0) {
+                        $terminator = "`n"
+                    }
+                    [void]$records.Add([PSCustomObject]@{ Text = [string]$sourceRecords[$recordIndex].Text; Terminator = $terminator })
+                }
+            }
+            $result = Invoke-PshSedPrograms -Programs $programs -Records @($records) -NoAutoPrint:$noAutoPrint
+            Write-PshTextValue -Text ([string]$result.Text)
+        }
+        Set-PshLastExitCode -Code 0
+    }
+    catch {
+        Write-PshCommandFailure -Command 'sed' -Code (Get-PshTextErrorCode -ErrorRecord $_) -Message $_.Exception.Message
+    }
+}
+
+function ConvertTo-PshAwkTokens {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Program
+    )
+
+    $tokens = @()
+    $index = 0
+    while ($index -lt $Program.Length) {
+        $character = $Program[$index]
+        if ($character -eq "`r" -or $character -eq "`n") {
+            if ($tokens.Count -eq 0 -or [string]$tokens[$tokens.Count - 1].Kind -cne ';') {
+                $tokens += [PSCustomObject]@{ Kind = ';'; Text = ';'; Value = $null }
+            }
+            $index++
+            continue
+        }
+        if ([char]::IsWhiteSpace($character)) { $index++; continue }
+        if ($character -in @('{', '}', '(', ')', ',', ';')) {
+            $tokens += [PSCustomObject]@{ Kind = [string]$character; Text = [string]$character; Value = $null }
+            $index++
+            continue
+        }
+        if ($character -eq '"' -or $character -eq "'") {
+            $quote = $character
+            $index++
+            $builder = New-Object Text.StringBuilder
+            $closed = $false
+            while ($index -lt $Program.Length) {
+                $current = $Program[$index]
+                $index++
+                if ($current -eq $quote) { $closed = $true; break }
+                if ($current -eq '\') {
+                    if ($index -ge $Program.Length) { Throw-PshTextUsageError 'unterminated escape in awk string literal.' }
+                    $escape = $Program[$index]
+                    $index++
+                    if ($escape -eq 'n') { [void]$builder.Append("`n") }
+                    elseif ($escape -eq 'r') { [void]$builder.Append("`r") }
+                    elseif ($escape -eq 't') { [void]$builder.Append("`t") }
+                    else { [void]$builder.Append($escape) }
+                }
+                else { [void]$builder.Append($current) }
+            }
+            if (-not $closed) { Throw-PshTextUsageError 'unterminated awk string literal.' }
+            $tokens += [PSCustomObject]@{ Kind = 'String'; Text = $builder.ToString(); Value = $builder.ToString() }
+            continue
+        }
+        if ($character -eq '/') {
+            $index++
+            $builder = New-Object Text.StringBuilder
+            $closed = $false
+            while ($index -lt $Program.Length) {
+                $current = $Program[$index]
+                $index++
+                if ($current -eq '/') { $closed = $true; break }
+                if ($current -eq '\') {
+                    if ($index -ge $Program.Length) { Throw-PshTextUsageError 'unterminated escape in awk regular expression.' }
+                    $next = $Program[$index]
+                    $index++
+                    if ($next -eq '/') { [void]$builder.Append('/') }
+                    else { [void]$builder.Append('\'); [void]$builder.Append($next) }
+                }
+                else { [void]$builder.Append($current) }
+            }
+            if (-not $closed) { Throw-PshTextUsageError 'unterminated awk regular expression.' }
+            try { $regex = New-Object Text.RegularExpressions.Regex($builder.ToString(), [Text.RegularExpressions.RegexOptions]::CultureInvariant) }
+            catch { Throw-PshTextUsageError ('invalid awk regular expression: {0}' -f $_.Exception.Message) }
+            $tokens += [PSCustomObject]@{ Kind = 'Regex'; Text = $builder.ToString(); Value = $regex }
+            continue
+        }
+        if ($character -eq '$') {
+            $index++
+            $start = $index
+            while ($index -lt $Program.Length -and ([char]::IsLetterOrDigit($Program[$index]) -or $Program[$index] -eq '_')) { $index++ }
+            if ($index -eq $start) { Throw-PshTextUsageError 'awk field references require a number or variable name after $.' }
+            $tokens += [PSCustomObject]@{ Kind = 'Field'; Text = $Program.Substring($start, $index - $start); Value = $null }
+            continue
+        }
+        if ([char]::IsDigit($character) -or ($character -eq '.' -and ($index + 1) -lt $Program.Length -and [char]::IsDigit($Program[$index + 1]))) {
+            $start = $index
+            $seenDot = $false
+            while ($index -lt $Program.Length) {
+                $current = $Program[$index]
+                if ([char]::IsDigit($current)) { $index++; continue }
+                if ($current -eq '.' -and -not $seenDot) { $seenDot = $true; $index++; continue }
+                break
+            }
+            $text = $Program.Substring($start, $index - $start)
+            $number = 0.0
+            if (-not [double]::TryParse($text, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$number)) {
+                Throw-PshTextUsageError ('invalid awk number "{0}".' -f $text)
+            }
+            $tokens += [PSCustomObject]@{ Kind = 'Number'; Text = $text; Value = $number }
+            continue
+        }
+        if ([char]::IsLetter($character) -or $character -eq '_') {
+            $start = $index
+            $index++
+            while ($index -lt $Program.Length -and ([char]::IsLetterOrDigit($Program[$index]) -or $Program[$index] -eq '_')) { $index++ }
+            $text = $Program.Substring($start, $index - $start)
+            $tokens += [PSCustomObject]@{ Kind = 'Identifier'; Text = $text; Value = $text }
+            continue
+        }
+
+        $operator = $null
+        if (($index + 1) -lt $Program.Length) {
+            $pair = $Program.Substring($index, 2)
+            if ($pair -in @('==', '!=', '<=', '>=', '!~', '+=', '++')) { $operator = $pair }
+        }
+        if ($null -ne $operator) {
+            $tokens += [PSCustomObject]@{ Kind = 'Operator'; Text = $operator; Value = $operator }
+            $index += 2
+            continue
+        }
+        if ($character -in @('=', '<', '>', '~', '+', '-', '*')) {
+            $tokens += [PSCustomObject]@{ Kind = 'Operator'; Text = [string]$character; Value = [string]$character }
+            $index++
+            continue
+        }
+        Throw-PshTextUsageError ('unsupported awk token near "{0}".' -f $Program.Substring($index))
+    }
+    $tokens += [PSCustomObject]@{ Kind = 'End'; Text = ''; Value = $null }
+    return $tokens
+}
+
+function Get-PshAwkToken {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Parser,
+
+        [int]$Offset = 0
+    )
+
+    $position = [int]$Parser.Index + $Offset
+    if ($position -ge @($Parser.Tokens).Count) { return @($Parser.Tokens)[@($Parser.Tokens).Count - 1] }
+    return @($Parser.Tokens)[$position]
+}
+
+function Move-PshAwkToken {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+    $token = Get-PshAwkToken -Parser $Parser
+    $Parser.Index = [int]$Parser.Index + 1
+    return $token
+}
+
+function Test-PshAwkToken {
+    param(
+        [Parameter(Mandatory = $true)][object]$Parser,
+        [Parameter(Mandatory = $true)][string]$Kind,
+        [AllowNull()][string]$Text
+    )
+    $token = Get-PshAwkToken -Parser $Parser
+    if ([string]$token.Kind -cne $Kind) { return $false }
+    if ($PSBoundParameters.ContainsKey('Text') -and [string]$token.Text -cne $Text) { return $false }
+    return $true
+}
+
+function Assert-PshAwkToken {
+    param(
+        [Parameter(Mandatory = $true)][object]$Parser,
+        [Parameter(Mandatory = $true)][string]$Kind,
+        [AllowNull()][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+    $matches = if ($PSBoundParameters.ContainsKey('Text')) {
+        Test-PshAwkToken -Parser $Parser -Kind $Kind -Text $Text
+    }
+    else { Test-PshAwkToken -Parser $Parser -Kind $Kind }
+    if (-not $matches) { Throw-PshTextUsageError $Message }
+    return (Move-PshAwkToken -Parser $Parser)
+}
+
+function Read-PshAwkPrimaryExpression {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+
+    $token = Get-PshAwkToken -Parser $Parser
+    if ([string]$token.Kind -in @('Number', 'String', 'Regex')) {
+        [void](Move-PshAwkToken -Parser $Parser)
+        return [PSCustomObject]@{ Type = [string]$token.Kind; Value = $token.Value; Left = $null; Right = $null }
+    }
+    if ([string]$token.Kind -ceq 'Identifier') {
+        [void](Move-PshAwkToken -Parser $Parser)
+        return [PSCustomObject]@{ Type = 'Variable'; Value = [string]$token.Text; Left = $null; Right = $null }
+    }
+    if ([string]$token.Kind -ceq 'Field') {
+        [void](Move-PshAwkToken -Parser $Parser)
+        return [PSCustomObject]@{ Type = 'Field'; Value = [string]$token.Text; Left = $null; Right = $null }
+    }
+    if ([string]$token.Kind -ceq '(') {
+        [void](Move-PshAwkToken -Parser $Parser)
+        $expression = Read-PshAwkExpression -Parser $Parser
+        [void](Assert-PshAwkToken -Parser $Parser -Kind ')' -Message 'awk expression is missing a closing parenthesis.')
+        return $expression
+    }
+    if ([string]$token.Kind -ceq 'Operator' -and [string]$token.Text -in @('+', '-')) {
+        [void](Move-PshAwkToken -Parser $Parser)
+        return [PSCustomObject]@{ Type = 'Unary'; Value = [string]$token.Text; Left = (Read-PshAwkPrimaryExpression -Parser $Parser); Right = $null }
+    }
+    Throw-PshTextUsageError ('unsupported awk expression near "{0}".' -f [string]$token.Text)
+}
+
+function Read-PshAwkMultiplicativeExpression {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+    $left = Read-PshAwkPrimaryExpression -Parser $Parser
+    while (Test-PshAwkToken -Parser $Parser -Kind 'Operator' -Text '*') {
+        $operator = [string](Move-PshAwkToken -Parser $Parser).Text
+        $right = Read-PshAwkPrimaryExpression -Parser $Parser
+        $left = [PSCustomObject]@{ Type = 'Binary'; Value = $operator; Left = $left; Right = $right }
+    }
+    return $left
+}
+
+function Read-PshAwkAdditiveExpression {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+    $left = Read-PshAwkMultiplicativeExpression -Parser $Parser
+    while ((Test-PshAwkToken -Parser $Parser -Kind 'Operator' -Text '+') -or (Test-PshAwkToken -Parser $Parser -Kind 'Operator' -Text '-')) {
+        $operator = [string](Move-PshAwkToken -Parser $Parser).Text
+        $right = Read-PshAwkMultiplicativeExpression -Parser $Parser
+        $left = [PSCustomObject]@{ Type = 'Binary'; Value = $operator; Left = $left; Right = $right }
+    }
+    return $left
+}
+
+function Read-PshAwkExpression {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+    $left = Read-PshAwkAdditiveExpression -Parser $Parser
+    $token = Get-PshAwkToken -Parser $Parser
+    if ([string]$token.Kind -ceq 'Operator' -and [string]$token.Text -in @('==', '!=', '<', '<=', '>', '>=', '~', '!~')) {
+        [void](Move-PshAwkToken -Parser $Parser)
+        $right = Read-PshAwkAdditiveExpression -Parser $Parser
+        return [PSCustomObject]@{ Type = 'Binary'; Value = [string]$token.Text; Left = $left; Right = $right }
+    }
+    return $left
+}
+
+function Read-PshAwkStatement {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+
+    $token = Get-PshAwkToken -Parser $Parser
+    if ([string]$token.Kind -cne 'Identifier') { Throw-PshTextUsageError ('unsupported awk statement near "{0}".' -f [string]$token.Text) }
+    $name = [string]$token.Text
+    [void](Move-PshAwkToken -Parser $Parser)
+
+    if ($name -cin @('print', 'printf')) {
+        $expressions = @()
+        if (-not (Test-PshAwkToken -Parser $Parser -Kind ';') -and -not (Test-PshAwkToken -Parser $Parser -Kind '}')) {
+            $expressions += Read-PshAwkExpression -Parser $Parser
+            while (Test-PshAwkToken -Parser $Parser -Kind ',') {
+                [void](Move-PshAwkToken -Parser $Parser)
+                $expressions += Read-PshAwkExpression -Parser $Parser
+            }
+        }
+        if ($name -ceq 'printf' -and $expressions.Count -eq 0) { Throw-PshTextUsageError 'awk printf requires a format expression.' }
+        return [PSCustomObject]@{ Type = if ($name -ceq 'print') { 'Print' } else { 'Printf' }; Name = ''; Expressions = $expressions; Expression = $null }
+    }
+
+    if ($name -in @('BEGIN', 'END')) { Throw-PshTextUsageError ('awk {0} is valid only before an action block.' -f $name) }
+    $operator = Assert-PshAwkToken -Parser $Parser -Kind 'Operator' -Message ('awk variable "{0}" must be assigned with =, +=, or ++.' -f $name)
+    if ([string]$operator.Text -ceq '++') {
+        return [PSCustomObject]@{ Type = 'Increment'; Name = $name; Expressions = @(); Expression = $null }
+    }
+    if ([string]$operator.Text -notin @('=', '+=')) { Throw-PshTextUsageError ('unsupported awk assignment operator "{0}".' -f [string]$operator.Text) }
+    $expression = Read-PshAwkExpression -Parser $Parser
+    return [PSCustomObject]@{ Type = if ([string]$operator.Text -ceq '=') { 'Assign' } else { 'AddAssign' }; Name = $name; Expressions = @(); Expression = $expression }
+}
+
+function Read-PshAwkActionBlock {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+    [void](Assert-PshAwkToken -Parser $Parser -Kind '{' -Message 'awk action is missing an opening brace.')
+    $statements = @()
+    while (-not (Test-PshAwkToken -Parser $Parser -Kind '}')) {
+        if (Test-PshAwkToken -Parser $Parser -Kind 'End') { Throw-PshTextUsageError 'awk action is missing a closing brace.' }
+        if (Test-PshAwkToken -Parser $Parser -Kind ';') { [void](Move-PshAwkToken -Parser $Parser); continue }
+        $statements += Read-PshAwkStatement -Parser $Parser
+        if (Test-PshAwkToken -Parser $Parser -Kind ';') { [void](Move-PshAwkToken -Parser $Parser) }
+        elseif (-not (Test-PshAwkToken -Parser $Parser -Kind '}')) { Throw-PshTextUsageError 'awk statements must be separated by semicolons.' }
+    }
+    [void](Move-PshAwkToken -Parser $Parser)
+    return $statements
+}
+
+function ConvertTo-PshAwkProgram {
+    param([Parameter(Mandatory = $true)][string]$Program)
+
+    $parser = [PSCustomObject]@{ Tokens = @(ConvertTo-PshAwkTokens -Program $Program); Index = 0 }
+    $actions = @()
+    while (-not (Test-PshAwkToken -Parser $parser -Kind 'End')) {
+        if (Test-PshAwkToken -Parser $parser -Kind ';') { [void](Move-PshAwkToken -Parser $parser); continue }
+        $phase = 'Record'
+        $pattern = $null
+        if ((Test-PshAwkToken -Parser $parser -Kind 'Identifier' -Text 'BEGIN') -or (Test-PshAwkToken -Parser $parser -Kind 'Identifier' -Text 'END')) {
+            $phase = [string](Move-PshAwkToken -Parser $parser).Text
+        }
+        elseif (-not (Test-PshAwkToken -Parser $parser -Kind '{')) {
+            $pattern = Read-PshAwkExpression -Parser $parser
+        }
+        if (-not (Test-PshAwkToken -Parser $parser -Kind '{')) {
+            if ($phase -cne 'Record' -or ((-not (Test-PshAwkToken -Parser $parser -Kind ';')) -and (-not (Test-PshAwkToken -Parser $parser -Kind 'End')))) {
+                Throw-PshTextUsageError 'awk patterns without action blocks must end at a statement boundary.'
+            }
+            $actions += [PSCustomObject]@{
+                Phase = 'Record'
+                Pattern = $pattern
+                Statements = @([PSCustomObject]@{ Type = 'Print'; Name = ''; Expressions = @(); Expression = $null })
+            }
+            if (Test-PshAwkToken -Parser $parser -Kind ';') { [void](Move-PshAwkToken -Parser $parser) }
+            continue
+        }
+        $statements = @(Read-PshAwkActionBlock -Parser $parser)
+        $actions += [PSCustomObject]@{ Phase = $phase; Pattern = $pattern; Statements = $statements }
+    }
+    if ($actions.Count -eq 0) { Throw-PshTextUsageError 'an awk program must contain at least one action.' }
+    return $actions
+}
+
+function ConvertTo-PshAwkNumber {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return 0.0 }
+    if ($Value -is [byte] -or $Value -is [int16] -or $Value -is [int32] -or $Value -is [int64] -or $Value -is [single] -or $Value -is [double] -or $Value -is [decimal]) {
+        return [double]$Value
+    }
+    $number = 0.0
+    if ([double]::TryParse([string]$Value, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$number)) { return $number }
+    return 0.0
+}
+
+function Test-PshAwkNumericValue {
+    param([AllowNull()][object]$Value)
+    if ($Value -is [byte] -or $Value -is [int16] -or $Value -is [int32] -or $Value -is [int64] -or $Value -is [single] -or $Value -is [double] -or $Value -is [decimal]) { return $true }
+    $number = 0.0
+    return [double]::TryParse([string]$Value, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$number)
+}
+
+function ConvertTo-PshAwkText {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return '' }
+    if ($Value -is [bool]) { return $(if ([bool]$Value) { '1' } else { '0' }) }
+    if ($Value -is [double]) { return ([double]$Value).ToString('0.###############', [Globalization.CultureInfo]::InvariantCulture) }
+    return [string]$Value
+}
+
+function Test-PshAwkTruth {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $false }
+    if ($Value -is [bool]) { return [bool]$Value }
+    if (Test-PshAwkNumericValue -Value $Value) { return (ConvertTo-PshAwkNumber -Value $Value) -ne 0 }
+    return -not [string]::IsNullOrEmpty([string]$Value)
+}
+
+function Get-PshAwkVariableValue {
+    param(
+        [Parameter(Mandatory = $true)][object]$Context,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    if ($Name -ceq 'NR') { return [double]$Context.NR }
+    if ($Name -ceq 'NF') { return [double]$Context.NF }
+    if ($Name -ceq 'FS') { return [string]$Context.FS }
+    if ($Name -ceq 'OFS') { return [string]$Context.OFS }
+    if ($Name -ceq 'ORS') { return [string]$Context.ORS }
+    if ($Context.Variables.ContainsKey($Name)) { return $Context.Variables[$Name] }
+    return 0.0
+}
+
+function Get-PshAwkExpressionValue {
+    param(
+        [Parameter(Mandatory = $true)][object]$Expression,
+        [Parameter(Mandatory = $true)][object]$Context
+    )
+
+    switch ([string]$Expression.Type) {
+        'Number' { return [double]$Expression.Value }
+        'String' { return [string]$Expression.Value }
+        'Regex' { return $Expression.Value }
+        'Variable' { return (Get-PshAwkVariableValue -Context $Context -Name ([string]$Expression.Value)) }
+        'Field' {
+            $fieldText = [string]$Expression.Value
+            $fieldNumber = 0
+            if (-not [int]::TryParse($fieldText, [ref]$fieldNumber)) {
+                $fieldNumber = [int](ConvertTo-PshAwkNumber -Value (Get-PshAwkVariableValue -Context $Context -Name $fieldText))
+            }
+            if ($fieldNumber -eq 0) { return [string]$Context.Record }
+            if ($fieldNumber -lt 0 -or $fieldNumber -gt @($Context.Fields).Count) { return '' }
+            return [string]@($Context.Fields)[$fieldNumber - 1]
+        }
+        'Unary' {
+            $number = ConvertTo-PshAwkNumber -Value (Get-PshAwkExpressionValue -Expression $Expression.Left -Context $Context)
+            if ([string]$Expression.Value -ceq '-') { return -$number }
+            return $number
+        }
+        'Binary' {
+            $left = Get-PshAwkExpressionValue -Expression $Expression.Left -Context $Context
+            $right = Get-PshAwkExpressionValue -Expression $Expression.Right -Context $Context
+            $operator = [string]$Expression.Value
+            if ($operator -ceq '+') { return (ConvertTo-PshAwkNumber $left) + (ConvertTo-PshAwkNumber $right) }
+            if ($operator -ceq '-') { return (ConvertTo-PshAwkNumber $left) - (ConvertTo-PshAwkNumber $right) }
+            if ($operator -ceq '*') { return (ConvertTo-PshAwkNumber $left) * (ConvertTo-PshAwkNumber $right) }
+            if ($operator -in @('~', '!~')) {
+                $regex = $right
+                if ($regex -isnot [Text.RegularExpressions.Regex]) {
+                    try { $regex = New-Object Text.RegularExpressions.Regex([string]$right, [Text.RegularExpressions.RegexOptions]::CultureInvariant) }
+                    catch { Throw-PshTextUsageError ('invalid awk matching expression: {0}' -f $_.Exception.Message) }
+                }
+                $matched = $regex.IsMatch([string]$left)
+                if ($operator -ceq '!~') { $matched = -not $matched }
+                return $matched
+            }
+            $comparison = 0
+            if ((Test-PshAwkNumericValue $left) -and (Test-PshAwkNumericValue $right)) {
+                $leftNumber = ConvertTo-PshAwkNumber $left
+                $rightNumber = ConvertTo-PshAwkNumber $right
+                if ($leftNumber -lt $rightNumber) { $comparison = -1 } elseif ($leftNumber -gt $rightNumber) { $comparison = 1 }
+            }
+            else { $comparison = [string]::Compare([string]$left, [string]$right, [StringComparison]::Ordinal) }
+            if ($operator -ceq '==') { return $comparison -eq 0 }
+            if ($operator -ceq '!=') { return $comparison -ne 0 }
+            if ($operator -ceq '<') { return $comparison -lt 0 }
+            if ($operator -ceq '<=') { return $comparison -le 0 }
+            if ($operator -ceq '>') { return $comparison -gt 0 }
+            if ($operator -ceq '>=') { return $comparison -ge 0 }
+        }
+    }
+    Throw-PshTextUsageError ('unsupported awk expression type "{0}".' -f [string]$Expression.Type)
+}
+
+function Set-PshAwkVariableValue {
+    param(
+        [Parameter(Mandatory = $true)][object]$Context,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowNull()][object]$Value
+    )
+    if ($Name -ceq 'NR' -or $Name -ceq 'NF') { Throw-PshTextUsageError ('awk variable {0} is read-only.' -f $Name) }
+    if ($Name -ceq 'FS') { $Context.FS = [string]$Value; return }
+    if ($Name -ceq 'OFS') { $Context.OFS = [string]$Value; return }
+    if ($Name -ceq 'ORS') { $Context.ORS = [string]$Value; return }
+    $Context.Variables[$Name] = $Value
+}
+
+function Invoke-PshAwkStatements {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Statements,
+        [Parameter(Mandatory = $true)][object]$Context,
+        [Parameter(Mandatory = $true)][Text.StringBuilder]$Output
+    )
+    foreach ($statement in $Statements) {
+        if ([string]$statement.Type -ceq 'Print') {
+            $values = @()
+            if (@($statement.Expressions).Count -eq 0) { $values = @([string]$Context.Record) }
+            else {
+                foreach ($expression in @($statement.Expressions)) { $values += ConvertTo-PshAwkText (Get-PshAwkExpressionValue -Expression $expression -Context $Context) }
+            }
+            [void]$Output.Append(($values -join [string]$Context.OFS))
+            [void]$Output.Append([string]$Context.ORS)
+        }
+        elseif ([string]$statement.Type -ceq 'Printf') {
+            $values = @()
+            foreach ($expression in @($statement.Expressions)) { $values += ConvertTo-PshAwkText (Get-PshAwkExpressionValue -Expression $expression -Context $Context) }
+            $format = [string]$values[0]
+            $arguments = @()
+            if ($values.Count -gt 1) { $arguments = @($values[1..($values.Count - 1)]) }
+            $formatted = Format-PshPrintfText -Format $format -Values $arguments
+            [void]$Output.Append([string]$formatted.Text)
+        }
+        elseif ([string]$statement.Type -ceq 'Assign') {
+            Set-PshAwkVariableValue -Context $Context -Name ([string]$statement.Name) -Value (Get-PshAwkExpressionValue -Expression $statement.Expression -Context $Context)
+        }
+        elseif ([string]$statement.Type -ceq 'AddAssign') {
+            $value = (ConvertTo-PshAwkNumber (Get-PshAwkVariableValue -Context $Context -Name ([string]$statement.Name))) + (ConvertTo-PshAwkNumber (Get-PshAwkExpressionValue -Expression $statement.Expression -Context $Context))
+            Set-PshAwkVariableValue -Context $Context -Name ([string]$statement.Name) -Value $value
+        }
+        elseif ([string]$statement.Type -ceq 'Increment') {
+            $value = (ConvertTo-PshAwkNumber (Get-PshAwkVariableValue -Context $Context -Name ([string]$statement.Name))) + 1
+            Set-PshAwkVariableValue -Context $Context -Name ([string]$statement.Name) -Value $value
+        }
+    }
+}
+
+function Set-PshAwkRecordContext {
+    param(
+        [Parameter(Mandatory = $true)][object]$Context,
+        [Parameter(Mandatory = $true)][string]$Record,
+        [Parameter(Mandatory = $true)][int]$RecordNumber
+    )
+
+    $fields = @()
+    if ([string]$Context.FS -ceq ' ') {
+        $trimmed = $Record.Trim()
+        if ($trimmed.Length -gt 0) { $fields = @([Text.RegularExpressions.Regex]::Split($trimmed, '\s+')) }
+    }
+    else {
+        try { $fields = @([Text.RegularExpressions.Regex]::Split($Record, [string]$Context.FS)) }
+        catch { Throw-PshTextUsageError ('invalid awk field separator: {0}' -f $_.Exception.Message) }
+    }
+    $Context.Record = $Record
+    $Context.Fields = $fields
+    $Context.NR = $RecordNumber
+    $Context.NF = $fields.Count
+}
+
+function Invoke-PshAwkProgram {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Actions,
+        [Parameter(Mandatory = $true)][object[]]$Sources,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Variables,
+        [Parameter(Mandatory = $true)][string]$FieldSeparator
+    )
+
+    $context = [PSCustomObject]@{
+        Variables = $Variables
+        FS = $FieldSeparator
+        OFS = ' '
+        ORS = "`n"
+        Record = ''
+        Fields = @()
+        NR = 0
+        NF = 0
+    }
+    if ($Variables.ContainsKey('FS')) { $context.FS = [string]$Variables['FS'] }
+    if ($Variables.ContainsKey('OFS')) { $context.OFS = [string]$Variables['OFS'] }
+    if ($Variables.ContainsKey('ORS')) { $context.ORS = [string]$Variables['ORS'] }
+    $output = New-Object Text.StringBuilder
+    foreach ($action in @($Actions | Where-Object { [string]$_.Phase -ceq 'BEGIN' })) {
+        Invoke-PshAwkStatements -Statements @($action.Statements) -Context $context -Output $output
+    }
+    $recordNumber = 0
+    foreach ($source in $Sources) {
+        if ($source.IsBinary) { Throw-PshTextUsageError ('awk does not accept binary input: {0}.' -f [string]$source.DisplayName) }
+        foreach ($line in @(Split-PshTextLines -Text ([string]$source.Text))) {
+            $recordNumber++
+            Set-PshAwkRecordContext -Context $context -Record ([string]$line.Text) -RecordNumber $recordNumber
+            foreach ($action in @($Actions | Where-Object { [string]$_.Phase -ceq 'Record' })) {
+                $selected = $true
+                if ($null -ne $action.Pattern) {
+                    if ([string]$action.Pattern.Type -ceq 'Regex') { $selected = $action.Pattern.Value.IsMatch([string]$context.Record) }
+                    else { $selected = Test-PshAwkTruth (Get-PshAwkExpressionValue -Expression $action.Pattern -Context $context) }
+                }
+                if ($selected) { Invoke-PshAwkStatements -Statements @($action.Statements) -Context $context -Output $output }
+            }
+        }
+    }
+    foreach ($action in @($Actions | Where-Object { [string]$_.Phase -ceq 'END' })) {
+        Invoke-PshAwkStatements -Statements @($action.Statements) -Context $context -Output $output
+    }
+    return $output.ToString()
+}
+
+function awk {
+    $arguments = @(ConvertTo-PshArgumentArray -InputArguments $args)
+    $pipelineItems = @($input)
+    Set-PshLastExitCode -Code 0
+    if (Test-PshLongHelp -Arguments $arguments) {
+        Write-PshCommandHelp -Usage 'Usage: awk [-F separator] [-v name=value] program [file ...]'
+        return
+    }
+
+    try {
+        $fieldSeparator = ' '
+        $variables = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+        $positionals = @()
+        $parseOptions = $true
+        for ($index = 0; $index -lt $arguments.Count; $index++) {
+            $argument = $arguments[$index]
+            if ($parseOptions -and $argument -ceq '--') { $parseOptions = $false; continue }
+            $option = $null
+            $value = $null
+            if ($parseOptions -and $argument -match '\A-F(.+)\z') { $option = '-F'; $value = $matches[1] }
+            elseif ($parseOptions -and $argument -match '\A-v(.+)\z') { $option = '-v'; $value = $matches[1] }
+            elseif ($parseOptions -and $argument -in @('-F', '-v')) {
+                if (($index + 1) -ge $arguments.Count) { Throw-PshTextUsageError ('awk {0} requires a value.' -f $argument) }
+                $option = $argument
+                $index++
+                $value = $arguments[$index]
+            }
+            if ($null -ne $option) {
+                if ($option -ceq '-F') {
+                    if ([string]::IsNullOrEmpty($value)) { Throw-PshTextUsageError 'awk -F requires a nonempty separator.' }
+                    try { [void](New-Object Text.RegularExpressions.Regex($value, [Text.RegularExpressions.RegexOptions]::CultureInvariant)) }
+                    catch { Throw-PshTextUsageError ('invalid awk field separator: {0}' -f $_.Exception.Message) }
+                    $fieldSeparator = $value
+                }
+                else {
+                    if ($value -notmatch '\A([A-Za-z_][A-Za-z0-9_]*)=(.*)\z') { Throw-PshTextUsageError 'awk -v requires name=value.' }
+                    $variables[$matches[1]] = $matches[2]
+                }
+                continue
+            }
+            if ($parseOptions -and $argument.StartsWith('-') -and $argument -ne '-') { Throw-PshTextUsageError ('unsupported argument "{0}".' -f $argument) }
+            $parseOptions = $false
+            $positionals += $argument
+        }
+        if ($positionals.Count -eq 0) { Throw-PshTextUsageError 'an awk program is required.' }
+        $program = $positionals[0]
+        $paths = @()
+        if ($positionals.Count -gt 1) { $paths = @($positionals[1..($positionals.Count - 1)]) }
+        $actions = @(ConvertTo-PshAwkProgram -Program $program)
+        $sources = @(Get-PshTextSources -Paths $paths -PipelineItems $pipelineItems)
+        $output = Invoke-PshAwkProgram -Actions $actions -Sources $sources -Variables $variables -FieldSeparator $fieldSeparator
+        Write-PshTextValue -Text $output
+        Set-PshLastExitCode -Code 0
+    }
+    catch {
+        Write-PshCommandFailure -Command 'awk' -Code (Get-PshTextErrorCode -ErrorRecord $_) -Message $_.Exception.Message
+    }
+}
+
+function New-PshJsonValueEnvelope {
+    param([AllowNull()][object]$Value)
+    return [PSCustomObject]@{ Value = $Value }
+}
+
+function Split-PshJqTopLevel {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][char]$Delimiter
+    )
+
+    $parts = @()
+    $start = 0
+    $parentheses = 0
+    $brackets = 0
+    $inString = $false
+    $escaped = $false
+    for ($index = 0; $index -lt $Text.Length; $index++) {
+        $character = $Text[$index]
+        if ($inString) {
+            if ($escaped) { $escaped = $false; continue }
+            if ($character -eq '\') { $escaped = $true; continue }
+            if ($character -eq '"') { $inString = $false }
+            continue
+        }
+        if ($character -eq '"') { $inString = $true; continue }
+        if ($character -eq '(') { $parentheses++; continue }
+        if ($character -eq ')') { $parentheses--; if ($parentheses -lt 0) { Throw-PshTextUsageError 'jq filter has an unmatched closing parenthesis.' }; continue }
+        if ($character -eq '[') { $brackets++; continue }
+        if ($character -eq ']') { $brackets--; if ($brackets -lt 0) { Throw-PshTextUsageError 'jq filter has an unmatched closing bracket.' }; continue }
+        if ($character -eq $Delimiter -and $parentheses -eq 0 -and $brackets -eq 0) {
+            $parts += $Text.Substring($start, $index - $start).Trim()
+            $start = $index + 1
+        }
+    }
+    if ($inString -or $parentheses -ne 0 -or $brackets -ne 0) { Throw-PshTextUsageError 'jq filter contains an unterminated string or grouping.' }
+    $parts += $Text.Substring($start).Trim()
+    if (@($parts | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) { Throw-PshTextUsageError 'jq pipes cannot contain an empty stage.' }
+    return $parts
+}
+
+function ConvertTo-PshJqPathComponents {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not $Path.StartsWith('.')) { Throw-PshTextUsageError ('jq path must start with a dot: {0}.' -f $Path) }
+    $components = @()
+    $index = 1
+    while ($index -lt $Path.Length) {
+        if ($Path[$index] -eq '.') { $index++; if ($index -ge $Path.Length) { Throw-PshTextUsageError 'jq path cannot end with a dot.' } }
+        if ($Path[$index] -eq '[') {
+            $index++
+            if ($index -lt $Path.Length -and $Path[$index] -eq ']') {
+                $index++
+                $components += [PSCustomObject]@{ Kind = 'Iterate'; Value = $null }
+                continue
+            }
+            if ($index -lt $Path.Length -and $Path[$index] -eq '"') {
+                $start = $index
+                $index++
+                $escaped = $false
+                while ($index -lt $Path.Length) {
+                    $current = $Path[$index]
+                    if ($escaped) { $escaped = $false; $index++; continue }
+                    if ($current -eq '\') { $escaped = $true; $index++; continue }
+                    if ($current -eq '"') { $index++; break }
+                    $index++
+                }
+                if ($index -gt $Path.Length -or $Path[$index - 1] -ne '"') { Throw-PshTextUsageError 'jq quoted path property is unterminated.' }
+                $jsonText = $Path.Substring($start, $index - $start)
+                try { $property = $jsonText | ConvertFrom-Json -ErrorAction Stop }
+                catch { Throw-PshTextUsageError ('invalid jq quoted property: {0}' -f $_.Exception.Message) }
+                if ($index -ge $Path.Length -or $Path[$index] -ne ']') { Throw-PshTextUsageError 'jq quoted path property is missing ].' }
+                $index++
+                $components += [PSCustomObject]@{ Kind = 'Property'; Value = [string]$property }
+                continue
+            }
+            $start = $index
+            if ($index -lt $Path.Length -and $Path[$index] -eq '-') { $index++ }
+            while ($index -lt $Path.Length -and [char]::IsDigit($Path[$index])) { $index++ }
+            if ($index -eq $start -or ($Path[$start] -eq '-' -and $index -eq ($start + 1))) { Throw-PshTextUsageError 'jq array index must be an integer.' }
+            $number = 0
+            if (-not [int]::TryParse($Path.Substring($start, $index - $start), [ref]$number)) { Throw-PshTextUsageError 'jq array index is out of range.' }
+            if ($index -ge $Path.Length -or $Path[$index] -ne ']') { Throw-PshTextUsageError 'jq array index is missing ].' }
+            $index++
+            $components += [PSCustomObject]@{ Kind = 'Index'; Value = $number }
+            continue
+        }
+
+        $start = $index
+        while ($index -lt $Path.Length -and ([char]::IsLetterOrDigit($Path[$index]) -or $Path[$index] -in @('_', '-'))) { $index++ }
+        if ($index -eq $start) { Throw-PshTextUsageError ('unsupported jq path syntax near "{0}".' -f $Path.Substring($index)) }
+        $components += [PSCustomObject]@{ Kind = 'Property'; Value = $Path.Substring($start, $index - $start) }
+    }
+    return $components
+}
+
+function Get-PshJsonObjectProperty {
+    param(
+        [AllowNull()][object]$InputObject,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][ref]$Found
+    )
+    $Found.Value = $false
+    if ($null -eq $InputObject) { return (New-PshJsonValueEnvelope -Value $null) }
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        foreach ($key in $InputObject.Keys) {
+            if ([string]::Equals([string]$key, $Name, [StringComparison]::Ordinal)) {
+                $Found.Value = $true
+                return (New-PshJsonValueEnvelope -Value $InputObject[$key])
+            }
+        }
+        return (New-PshJsonValueEnvelope -Value $null)
+    }
+    if ($InputObject -isnot [PSCustomObject]) {
+        $typeName = $InputObject.GetType().Name
+        throw ('cannot index JSON {0} with property "{1}".' -f $typeName, $Name)
+    }
+    foreach ($property in $InputObject.PSObject.Properties) {
+        if ([string]::Equals([string]$property.Name, $Name, [StringComparison]::Ordinal)) {
+            $Found.Value = $true
+            return (New-PshJsonValueEnvelope -Value $property.Value)
+        }
+    }
+    return (New-PshJsonValueEnvelope -Value $null)
+}
+
+function Get-PshJsonSequenceValues {
+    param([AllowNull()][object]$Value)
+
+    $values = New-Object System.Collections.ArrayList
+    if ($null -eq $Value -or $Value -is [string]) { return $values }
+    if ($Value -is [System.Collections.IDictionary]) {
+        foreach ($key in $Value.Keys) { [void]$values.Add($Value[$key]) }
+        return $values
+    }
+    if ($Value -isnot [ValueType] -and @($Value.PSObject.Properties).Count -gt 0 -and $Value -isnot [System.Collections.IEnumerable]) {
+        foreach ($property in $Value.PSObject.Properties) { [void]$values.Add($property.Value) }
+        return $values
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        foreach ($item in $Value) { [void]$values.Add($item) }
+        return $values
+    }
+    return $values
+}
+
+function Test-PshJsonArrayValue {
+    param([AllowNull()][object]$Value)
+    return ($null -ne $Value -and $Value -isnot [string] -and
+        $Value -is [System.Collections.IEnumerable] -and $Value -isnot [System.Collections.IDictionary])
+}
+
+function Test-PshJsonObjectValue {
+    param([AllowNull()][object]$Value)
+    return ($Value -is [System.Collections.IDictionary] -or $Value -is [PSCustomObject])
+}
+
+function Test-PshJsonIterableValue {
+    param([AllowNull()][object]$Value)
+    return ((Test-PshJsonArrayValue -Value $Value) -or (Test-PshJsonObjectValue -Value $Value))
+}
+
+function Invoke-PshJqPath {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Components,
+        [AllowNull()][object]$InputValue
+    )
+
+    $current = New-Object System.Collections.ArrayList
+    [void]$current.Add((New-PshJsonValueEnvelope -Value $InputValue))
+    foreach ($component in $Components) {
+        $next = New-Object System.Collections.ArrayList
+        foreach ($envelope in $current) {
+            $value = $envelope.Value
+            if ([string]$component.Kind -ceq 'Property') {
+                $found = $false
+                $propertyValue = Get-PshJsonObjectProperty -InputObject $value -Name ([string]$component.Value) -Found ([ref]$found)
+                if ($found) { [void]$next.Add($propertyValue) }
+                else { [void]$next.Add((New-PshJsonValueEnvelope -Value $null)) }
+            }
+            elseif ([string]$component.Kind -ceq 'Index') {
+                if (-not (Test-PshJsonArrayValue -Value $value)) {
+                    throw 'jq array indexing requires an array input.'
+                }
+                $sequence = @(Get-PshJsonSequenceValues -Value $value)
+                $position = [int]$component.Value
+                if ($position -lt 0) { $position = $sequence.Count + $position }
+                $indexed = $null
+                if ($position -ge 0 -and $position -lt $sequence.Count) { $indexed = $sequence[$position] }
+                [void]$next.Add((New-PshJsonValueEnvelope -Value $indexed))
+            }
+            else {
+                if (-not (Test-PshJsonIterableValue -Value $value)) {
+                    throw 'jq iteration requires an array or object input.'
+                }
+                foreach ($item in @(Get-PshJsonSequenceValues -Value $value)) {
+                    [void]$next.Add((New-PshJsonValueEnvelope -Value $item))
+                }
+            }
+        }
+        $current = $next
+    }
+    return @($current)
+}
+
+function Get-PshJsonKeys {
+    param([AllowNull()][object]$Value)
+
+    if ($Value -is [System.Collections.IDictionary]) { return @($Value.Keys | ForEach-Object { [string]$_ } | Sort-Object) }
+    if ($null -ne $Value -and $Value -isnot [string] -and $Value -is [System.Collections.IEnumerable]) {
+        $sequence = @(Get-PshJsonSequenceValues -Value $Value)
+        $indices = @()
+        for ($index = 0; $index -lt $sequence.Count; $index++) { $indices += $index }
+        return $indices
+    }
+    if ($null -ne $Value -and $Value -isnot [ValueType] -and $Value -isnot [string]) {
+        return @($Value.PSObject.Properties.Name | Sort-Object)
+    }
+    Throw-PshTextUsageError 'jq keys requires an object or array.'
+}
+
+function Get-PshJsonLength {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return 0 }
+    if ($Value -is [string]) { return ([string]$Value).Length }
+    if ($Value -is [System.Collections.IDictionary]) { return $Value.Count }
+    if ($Value -is [System.Collections.IEnumerable]) { return @(Get-PshJsonSequenceValues -Value $Value).Count }
+    $properties = @($Value.PSObject.Properties)
+    if ($properties.Count -gt 0 -and $Value -isnot [ValueType]) { return $properties.Count }
+    Throw-PshTextUsageError 'jq length does not accept numeric or Boolean input in the documented subset.'
+}
+
+function Find-PshJqComparison {
+    param([Parameter(Mandatory = $true)][string]$Expression)
+
+    $operators = @('==', '!=', '<=', '>=', '<', '>')
+    $inString = $false
+    $escaped = $false
+    $parentheses = 0
+    $brackets = 0
+    for ($index = 0; $index -lt $Expression.Length; $index++) {
+        $character = $Expression[$index]
+        if ($inString) {
+            if ($escaped) { $escaped = $false; continue }
+            if ($character -eq '\') { $escaped = $true; continue }
+            if ($character -eq '"') { $inString = $false }
+            continue
+        }
+        if ($character -eq '"') { $inString = $true; continue }
+        if ($character -eq '(') { $parentheses++; continue }
+        if ($character -eq ')') { $parentheses--; continue }
+        if ($character -eq '[') { $brackets++; continue }
+        if ($character -eq ']') { $brackets--; continue }
+        if ($parentheses -ne 0 -or $brackets -ne 0) { continue }
+        foreach ($operator in $operators) {
+            if (($index + $operator.Length) -le $Expression.Length -and $Expression.Substring($index, $operator.Length) -ceq $operator) {
+                return [PSCustomObject]@{ Index = $index; Operator = $operator }
+            }
+        }
+    }
+    return $null
+}
+
+function ConvertFrom-PshJqLiteral {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][ref]$IsLiteral
+    )
+    $IsLiteral.Value = $false
+    $trimmed = $Text.Trim()
+    if ($trimmed -match '\A(?:true|false|null|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?)\z' -or ($trimmed.StartsWith('"') -and $trimmed.EndsWith('"'))) {
+        try {
+            $value = $trimmed | ConvertFrom-Json -ErrorAction Stop
+            $IsLiteral.Value = $true
+            return $value
+        }
+        catch { Throw-PshTextUsageError ('invalid jq literal: {0}' -f $_.Exception.Message) }
+    }
+    return $null
+}
+
+function Compare-PshJqValues {
+    param(
+        [AllowNull()][object]$Left,
+        [AllowNull()][object]$Right,
+        [Parameter(Mandatory = $true)][string]$Operator
+    )
+    $leftKind = if ($null -eq $Left) { 0 } elseif ($Left -is [bool]) { 1 } elseif ($Left -is [byte] -or $Left -is [int16] -or $Left -is [int32] -or $Left -is [int64] -or $Left -is [single] -or $Left -is [double] -or $Left -is [decimal]) { 2 } elseif ($Left -is [string]) { 3 } elseif ($Left -is [System.Collections.IEnumerable] -and $Left -isnot [System.Collections.IDictionary]) { 4 } else { 5 }
+    $rightKind = if ($null -eq $Right) { 0 } elseif ($Right -is [bool]) { 1 } elseif ($Right -is [byte] -or $Right -is [int16] -or $Right -is [int32] -or $Right -is [int64] -or $Right -is [single] -or $Right -is [double] -or $Right -is [decimal]) { 2 } elseif ($Right -is [string]) { 3 } elseif ($Right -is [System.Collections.IEnumerable] -and $Right -isnot [System.Collections.IDictionary]) { 4 } else { 5 }
+    $comparison = 0
+    if ($leftKind -ne $rightKind) {
+        $comparison = if ($leftKind -lt $rightKind) { -1 } else { 1 }
+    }
+    elseif ($leftKind -eq 0) { $comparison = 0 }
+    elseif ($leftKind -eq 1) {
+        if ([bool]$Left -ne [bool]$Right) { $comparison = if ([bool]$Left) { 1 } else { -1 } }
+    }
+    elseif ($leftKind -eq 2) {
+        $leftNumber = [double]$Left
+        $rightNumber = [double]$Right
+        if ($leftNumber -lt $rightNumber) { $comparison = -1 } elseif ($leftNumber -gt $rightNumber) { $comparison = 1 }
+    }
+    elseif ($leftKind -eq 3) { $comparison = [string]::Compare([string]$Left, [string]$Right, [StringComparison]::Ordinal) }
+    elseif ($leftKind -eq 4) {
+        $leftItems = @(Get-PshJsonSequenceValues -Value $Left)
+        $rightItems = @(Get-PshJsonSequenceValues -Value $Right)
+        $sharedCount = [Math]::Min($leftItems.Count, $rightItems.Count)
+        for ($index = 0; $index -lt $sharedCount; $index++) {
+            if (Compare-PshJqValues -Left $leftItems[$index] -Right $rightItems[$index] -Operator '<') { $comparison = -1; break }
+            if (Compare-PshJqValues -Left $leftItems[$index] -Right $rightItems[$index] -Operator '>') { $comparison = 1; break }
+        }
+        if ($comparison -eq 0 -and $leftItems.Count -ne $rightItems.Count) { $comparison = if ($leftItems.Count -lt $rightItems.Count) { -1 } else { 1 } }
+    }
+    else {
+        $leftKeys = [string[]]@(Get-PshJsonKeys -Value $Left)
+        $rightKeys = [string[]]@(Get-PshJsonKeys -Value $Right)
+        [Array]::Sort($leftKeys, [StringComparer]::Ordinal)
+        [Array]::Sort($rightKeys, [StringComparer]::Ordinal)
+        $sharedCount = [Math]::Min($leftKeys.Count, $rightKeys.Count)
+        for ($index = 0; $index -lt $sharedCount; $index++) {
+            $keyComparison = [string]::Compare($leftKeys[$index], $rightKeys[$index], [StringComparison]::Ordinal)
+            if ($keyComparison -lt 0) { $comparison = -1; break }
+            if ($keyComparison -gt 0) { $comparison = 1; break }
+        }
+        if ($comparison -eq 0 -and $leftKeys.Count -ne $rightKeys.Count) {
+            $comparison = if ($leftKeys.Count -lt $rightKeys.Count) { -1 } else { 1 }
+        }
+        if ($comparison -eq 0) {
+            for ($index = 0; $index -lt $leftKeys.Count; $index++) {
+                $leftFound = $false
+                $rightFound = $false
+                $leftValue = Get-PshJsonObjectProperty -InputObject $Left -Name $leftKeys[$index] -Found ([ref]$leftFound)
+                $rightValue = Get-PshJsonObjectProperty -InputObject $Right -Name $rightKeys[$index] -Found ([ref]$rightFound)
+                if (Compare-PshJqValues -Left $leftValue.Value -Right $rightValue.Value -Operator '<') { $comparison = -1; break }
+                if (Compare-PshJqValues -Left $leftValue.Value -Right $rightValue.Value -Operator '>') { $comparison = 1; break }
+            }
+        }
+    }
+    if ($Operator -ceq '==') { return $comparison -eq 0 }
+    if ($Operator -ceq '!=') { return $comparison -ne 0 }
+    if ($Operator -ceq '<') { return $comparison -lt 0 }
+    if ($Operator -ceq '<=') { return $comparison -le 0 }
+    if ($Operator -ceq '>') { return $comparison -gt 0 }
+    if ($Operator -ceq '>=') { return $comparison -ge 0 }
+    return $false
+}
+
+function Test-PshJqTruth {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value) { return $false }
+    if ($Value -is [bool]) { return [bool]$Value }
+    return $true
+}
+
+function Get-PshJqExpressionValues {
+    param(
+        [Parameter(Mandatory = $true)][string]$Expression,
+        [AllowNull()][object]$InputValue
+    )
+    $isLiteral = $false
+    $literal = ConvertFrom-PshJqLiteral -Text $Expression -IsLiteral ([ref]$isLiteral)
+    if ($isLiteral) { return @((New-PshJsonValueEnvelope -Value $literal)) }
+    return @(Invoke-PshJqFilterValue -Filter $Expression -InputValue $InputValue)
+}
+
+function Test-PshJqCondition {
+    param(
+        [Parameter(Mandatory = $true)][string]$Condition,
+        [AllowNull()][object]$InputValue
+    )
+    $comparison = Find-PshJqComparison -Expression $Condition
+    if ($null -eq $comparison) {
+        $values = @(Get-PshJqExpressionValues -Expression $Condition -InputValue $InputValue)
+        if ($values.Count -eq 0) { return $false }
+        return (Test-PshJqTruth -Value $values[$values.Count - 1].Value)
+    }
+    $leftText = $Condition.Substring(0, [int]$comparison.Index).Trim()
+    $rightStart = [int]$comparison.Index + ([string]$comparison.Operator).Length
+    $rightText = $Condition.Substring($rightStart).Trim()
+    if ([string]::IsNullOrEmpty($leftText) -or [string]::IsNullOrEmpty($rightText)) { Throw-PshTextUsageError 'jq comparison requires expressions on both sides.' }
+    $leftValues = @(Get-PshJqExpressionValues -Expression $leftText -InputValue $InputValue)
+    $rightValues = @(Get-PshJqExpressionValues -Expression $rightText -InputValue $InputValue)
+    if ($leftValues.Count -eq 0 -or $rightValues.Count -eq 0) { return $false }
+    return (Compare-PshJqValues -Left $leftValues[$leftValues.Count - 1].Value -Right $rightValues[$rightValues.Count - 1].Value -Operator ([string]$comparison.Operator))
+}
+
+function Invoke-PshJqStage {
+    param(
+        [Parameter(Mandatory = $true)][string]$Stage,
+        [AllowNull()][object]$InputValue
+    )
+    $trimmed = $Stage.Trim()
+    if ($trimmed.StartsWith('.')) {
+        return @(Invoke-PshJqPath -Components @(ConvertTo-PshJqPathComponents -Path $trimmed) -InputValue $InputValue)
+    }
+    if ($trimmed -ceq 'length') { return @((New-PshJsonValueEnvelope -Value (Get-PshJsonLength -Value $InputValue))) }
+    if ($trimmed -ceq 'keys') {
+        $keys = [object[]](Get-PshJsonKeys -Value $InputValue)
+        return @((New-PshJsonValueEnvelope -Value $keys))
+    }
+    if ($trimmed -match '\Amap\((.*)\)\z') {
+        $inner = $matches[1].Trim()
+        if ([string]::IsNullOrEmpty($inner)) { Throw-PshTextUsageError 'jq map requires a filter.' }
+        if (-not (Test-PshJsonIterableValue -Value $InputValue)) { throw 'jq map requires an array or object input.' }
+        $mapped = New-Object System.Collections.ArrayList
+        foreach ($item in @(Get-PshJsonSequenceValues -Value $InputValue)) {
+            foreach ($result in @(Invoke-PshJqFilterValue -Filter $inner -InputValue $item)) { [void]$mapped.Add($result.Value) }
+        }
+        return @((New-PshJsonValueEnvelope -Value ([object[]]$mapped.ToArray())))
+    }
+    if ($trimmed -match '\Aselect\((.*)\)\z') {
+        $condition = $matches[1].Trim()
+        if ([string]::IsNullOrEmpty($condition)) { Throw-PshTextUsageError 'jq select requires a condition.' }
+        if (Test-PshJqCondition -Condition $condition -InputValue $InputValue) { return @((New-PshJsonValueEnvelope -Value $InputValue)) }
+        return @()
+    }
+    $isLiteral = $false
+    $literal = ConvertFrom-PshJqLiteral -Text $trimmed -IsLiteral ([ref]$isLiteral)
+    if ($isLiteral) { return @((New-PshJsonValueEnvelope -Value $literal)) }
+    Throw-PshTextUsageError ('unsupported jq filter stage "{0}".' -f $trimmed)
+}
+
+function Invoke-PshJqFilterValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$Filter,
+        [AllowNull()][object]$InputValue
+    )
+    $current = New-Object System.Collections.ArrayList
+    [void]$current.Add((New-PshJsonValueEnvelope -Value $InputValue))
+    foreach ($stage in @(Split-PshJqTopLevel -Text $Filter -Delimiter '|')) {
+        $next = New-Object System.Collections.ArrayList
+        foreach ($envelope in $current) {
+            foreach ($result in @(Invoke-PshJqStage -Stage $stage -InputValue $envelope.Value)) { [void]$next.Add($result) }
+        }
+        $current = $next
+    }
+    return @($current)
+}
+
+function Move-PshJsonPastWhitespace {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+    while ($Parser.Index -lt $Parser.Text.Length) {
+        $codePoint = [int]$Parser.Text[$Parser.Index]
+        if ($codePoint -ne 9 -and $codePoint -ne 10 -and $codePoint -ne 13 -and $codePoint -ne 32) { break }
+        $Parser.Index++
+    }
+}
+
+function Read-PshJsonStringValue {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+
+    if ($Parser.Index -ge $Parser.Text.Length -or $Parser.Text[$Parser.Index] -ne '"') { throw 'JSON string must start with a quotation mark.' }
+    $Parser.Index++
+    $builder = New-Object Text.StringBuilder
+    while ($Parser.Index -lt $Parser.Text.Length) {
+        $character = $Parser.Text[$Parser.Index]
+        $Parser.Index++
+        if ($character -eq '"') { return $builder.ToString() }
+        if ([int]$character -lt 32) { throw 'JSON strings cannot contain unescaped control characters.' }
+        if ($character -ne '\') {
+            if ([char]::IsHighSurrogate($character)) {
+                if ($Parser.Index -ge $Parser.Text.Length -or -not [char]::IsLowSurrogate($Parser.Text[$Parser.Index])) {
+                    throw 'JSON strings contain an unpaired high surrogate.'
+                }
+                [void]$builder.Append($character)
+                [void]$builder.Append($Parser.Text[$Parser.Index])
+                $Parser.Index++
+                continue
+            }
+            if ([char]::IsLowSurrogate($character)) { throw 'JSON strings contain an unpaired low surrogate.' }
+            [void]$builder.Append($character)
+            continue
+        }
+        if ($Parser.Index -ge $Parser.Text.Length) { throw 'JSON string ends with an incomplete escape.' }
+        $escape = $Parser.Text[$Parser.Index]
+        $Parser.Index++
+        if ($escape -eq '"' -or $escape -eq '\' -or $escape -eq '/') { [void]$builder.Append($escape); continue }
+        if ($escape -eq 'b') { [void]$builder.Append([char]8); continue }
+        if ($escape -eq 'f') { [void]$builder.Append([char]12); continue }
+        if ($escape -eq 'n') { [void]$builder.Append([char]10); continue }
+        if ($escape -eq 'r') { [void]$builder.Append([char]13); continue }
+        if ($escape -eq 't') { [void]$builder.Append([char]9); continue }
+        if ($escape -ne 'u' -or ($Parser.Index + 4) -gt $Parser.Text.Length) { throw 'JSON string contains an unsupported escape.' }
+        $hex = $Parser.Text.Substring($Parser.Index, 4)
+        $Parser.Index += 4
+        $codePoint = 0
+        if (-not [int]::TryParse($hex, [Globalization.NumberStyles]::HexNumber, [Globalization.CultureInfo]::InvariantCulture, [ref]$codePoint)) {
+            throw 'JSON string contains an invalid Unicode escape.'
+        }
+        $unicodeCharacter = [char]$codePoint
+        if ([char]::IsHighSurrogate($unicodeCharacter)) {
+            if (($Parser.Index + 6) -gt $Parser.Text.Length -or $Parser.Text[$Parser.Index] -ne '\' -or $Parser.Text[$Parser.Index + 1] -ne 'u') {
+                throw 'JSON string contains an unpaired high surrogate.'
+            }
+            $lowHex = $Parser.Text.Substring($Parser.Index + 2, 4)
+            $lowCodePoint = 0
+            if (-not [int]::TryParse($lowHex, [Globalization.NumberStyles]::HexNumber, [Globalization.CultureInfo]::InvariantCulture, [ref]$lowCodePoint) -or
+                -not [char]::IsLowSurrogate([char]$lowCodePoint)) {
+                throw 'JSON string contains an invalid low surrogate.'
+            }
+            $Parser.Index += 6
+            [void]$builder.Append($unicodeCharacter)
+            [void]$builder.Append([char]$lowCodePoint)
+            continue
+        }
+        if ([char]::IsLowSurrogate($unicodeCharacter)) { throw 'JSON string contains an unpaired low surrogate.' }
+        [void]$builder.Append($unicodeCharacter)
+    }
+    throw 'JSON string is unterminated.'
+}
+
+function Read-PshJsonNumberEnvelope {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+
+    $remaining = $Parser.Text.Substring($Parser.Index)
+    $match = [Text.RegularExpressions.Regex]::Match($remaining, '\A-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?')
+    if (-not $match.Success) { throw 'JSON contains an invalid number.' }
+    $text = $match.Value
+    $Parser.Index += $text.Length
+    if ($text.IndexOfAny([char[]]@('.', 'e', 'E')) -lt 0) {
+        $integer = 0L
+        if ([long]::TryParse($text, [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$integer)) {
+            return (New-PshJsonValueEnvelope -Value $integer)
+        }
+    }
+
+    $exponentIndex = $text.IndexOfAny([char[]]@('e', 'E'))
+    $mantissa = if ($exponentIndex -ge 0) { $text.Substring(0, $exponentIndex) } else { $text }
+    $hasNonzeroMantissa = $mantissa -match '[1-9]'
+    if ($exponentIndex -ge 0) {
+        $doubleValue = 0.0
+        if ([double]::TryParse($text, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$doubleValue) -and
+            -not [double]::IsInfinity($doubleValue) -and -not [double]::IsNaN($doubleValue)) {
+            if ($doubleValue -eq 0.0 -and $hasNonzeroMantissa) { throw 'JSON number underflows the supported finite range.' }
+            return (New-PshJsonValueEnvelope -Value $doubleValue)
+        }
+        throw 'JSON number is outside the supported finite range.'
+    }
+
+    $decimalValue = 0D
+    if ([decimal]::TryParse($text, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$decimalValue)) {
+        if ($decimalValue -ne 0D -or -not $hasNonzeroMantissa) {
+            return (New-PshJsonValueEnvelope -Value $decimalValue)
+        }
+    }
+    $doubleValue = 0.0
+    if ([double]::TryParse($text, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$doubleValue) -and
+        -not [double]::IsInfinity($doubleValue) -and -not [double]::IsNaN($doubleValue)) {
+        if ($doubleValue -eq 0.0 -and $hasNonzeroMantissa) { throw 'JSON number underflows the supported finite range.' }
+        return (New-PshJsonValueEnvelope -Value $doubleValue)
+    }
+    throw 'JSON number is outside the supported finite range.'
+}
+
+function Read-PshJsonArrayEnvelope {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+
+    $Parser.Index++
+    Move-PshJsonPastWhitespace -Parser $Parser
+    $items = New-Object System.Collections.ArrayList
+    if ($Parser.Index -lt $Parser.Text.Length -and $Parser.Text[$Parser.Index] -eq ']') {
+        $Parser.Index++
+        return (New-PshJsonValueEnvelope -Value ([object[]]$items.ToArray()))
+    }
+    while ($true) {
+        $item = Read-PshJsonValueEnvelope -Parser $Parser
+        [void]$items.Add($item.Value)
+        Move-PshJsonPastWhitespace -Parser $Parser
+        if ($Parser.Index -ge $Parser.Text.Length) { throw 'JSON array is unterminated.' }
+        $delimiter = $Parser.Text[$Parser.Index]
+        $Parser.Index++
+        if ($delimiter -eq ']') { break }
+        if ($delimiter -ne ',') { throw 'JSON array items must be separated by commas.' }
+        Move-PshJsonPastWhitespace -Parser $Parser
+    }
+    return (New-PshJsonValueEnvelope -Value ([object[]]$items.ToArray()))
+}
+
+function Read-PshJsonObjectEnvelope {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+
+    $Parser.Index++
+    Move-PshJsonPastWhitespace -Parser $Parser
+    $values = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+    $caseInsensitiveNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $hasCaseCollision = $false
+    if ($Parser.Index -lt $Parser.Text.Length -and $Parser.Text[$Parser.Index] -eq '}') {
+        $Parser.Index++
+        return (New-PshJsonValueEnvelope -Value ([PSCustomObject][ordered]@{}))
+    }
+    while ($true) {
+        Move-PshJsonPastWhitespace -Parser $Parser
+        $name = Read-PshJsonStringValue -Parser $Parser
+        $isDuplicate = $values.ContainsKey($name)
+        if (-not $isDuplicate -and -not $caseInsensitiveNames.Add($name)) { $hasCaseCollision = $true }
+        Move-PshJsonPastWhitespace -Parser $Parser
+        if ($Parser.Index -ge $Parser.Text.Length -or $Parser.Text[$Parser.Index] -ne ':') { throw 'JSON object property is missing a colon.' }
+        $Parser.Index++
+        Move-PshJsonPastWhitespace -Parser $Parser
+        $value = Read-PshJsonValueEnvelope -Parser $Parser
+        if ($isDuplicate) { $values[$name] = $value.Value }
+        else { $values.Add($name, $value.Value) }
+        Move-PshJsonPastWhitespace -Parser $Parser
+        if ($Parser.Index -ge $Parser.Text.Length) { throw 'JSON object is unterminated.' }
+        $delimiter = $Parser.Text[$Parser.Index]
+        $Parser.Index++
+        if ($delimiter -eq '}') { break }
+        if ($delimiter -ne ',') { throw 'JSON object properties must be separated by commas.' }
+    }
+    if ($hasCaseCollision) { return (New-PshJsonValueEnvelope -Value $values) }
+    $ordered = [ordered]@{}
+    foreach ($name in $values.Keys) { $ordered[$name] = $values[$name] }
+    return (New-PshJsonValueEnvelope -Value ([PSCustomObject]$ordered))
+}
+
+function Read-PshJsonValueEnvelope {
+    param([Parameter(Mandatory = $true)][object]$Parser)
+
+    Move-PshJsonPastWhitespace -Parser $Parser
+    if ($Parser.Index -ge $Parser.Text.Length) { throw 'JSON input is empty or incomplete.' }
+    $character = $Parser.Text[$Parser.Index]
+    if ($character -eq '"') { return (New-PshJsonValueEnvelope -Value (Read-PshJsonStringValue -Parser $Parser)) }
+    if ($character -eq '{') { return (Read-PshJsonObjectEnvelope -Parser $Parser) }
+    if ($character -eq '[') { return (Read-PshJsonArrayEnvelope -Parser $Parser) }
+    if ($character -eq '-' -or [char]::IsDigit($character)) { return (Read-PshJsonNumberEnvelope -Parser $Parser) }
+    foreach ($literal in @(
+        [PSCustomObject]@{ Text = 'true'; Value = $true },
+        [PSCustomObject]@{ Text = 'false'; Value = $false },
+        [PSCustomObject]@{ Text = 'null'; Value = $null }
+    )) {
+        if (($Parser.Index + $literal.Text.Length) -le $Parser.Text.Length -and
+            [string]::Equals($Parser.Text.Substring($Parser.Index, $literal.Text.Length), $literal.Text, [StringComparison]::Ordinal)) {
+            $Parser.Index += $literal.Text.Length
+            return (New-PshJsonValueEnvelope -Value $literal.Value)
+        }
+    }
+    throw ('JSON contains an unexpected token near "{0}".' -f $Parser.Text.Substring($Parser.Index, [Math]::Min(16, $Parser.Text.Length - $Parser.Index)))
+}
+
+function ConvertFrom-PshJsonTextEnvelope {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text
+    )
+
+    $parser = [PSCustomObject]@{ Text = $Text; Index = 0 }
+    $value = Read-PshJsonValueEnvelope -Parser $parser
+    Move-PshJsonPastWhitespace -Parser $parser
+    if ($parser.Index -ne $parser.Text.Length) { throw 'JSON input contains trailing content.' }
+    return $value
+}
+
+function ConvertFrom-PshJsonTextStream {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text
+    )
+
+    $parser = [PSCustomObject]@{ Text = $Text; Index = 0 }
+    $values = New-Object System.Collections.ArrayList
+    Move-PshJsonPastWhitespace -Parser $parser
+    while ($parser.Index -lt $parser.Text.Length) {
+        $value = Read-PshJsonValueEnvelope -Parser $parser
+        [void]$values.Add($value)
+        $valueEnd = $parser.Index
+        Move-PshJsonPastWhitespace -Parser $parser
+        if ($parser.Index -lt $parser.Text.Length -and $parser.Index -eq $valueEnd) {
+            throw 'top-level JSON values must be separated by JSON whitespace.'
+        }
+    }
+    return [object[]]$values.ToArray()
+}
+
+function ConvertFrom-PshJsonSource {
+    param([Parameter(Mandatory = $true)][object]$Source)
+
+    if ($Source.IsBinary) { Throw-PshTextUsageError ('jq does not accept binary input: {0}.' -f [string]$Source.DisplayName) }
+    $text = [string]$Source.Text
+    try {
+        return @(ConvertFrom-PshJsonTextStream -Text $text)
+    }
+    catch { throw ('invalid JSON input: {0}' -f $_.Exception.Message) }
+}
+
+function ConvertTo-PshJqJsonText {
+    param(
+        [AllowNull()][object]$Value,
+        [switch]$Raw,
+        [switch]$Compact
+    )
+    if ($Raw -and $Value -is [string]) { return [string]$Value }
+    if ($Raw -and $null -eq $Value) { return 'null' }
+    if ($Raw -and ($Value -is [ValueType])) {
+        if ($Value -is [bool]) { return $(if ($Value) { 'true' } else { 'false' }) }
+        return [Convert]::ToString($Value, [Globalization.CultureInfo]::InvariantCulture)
+    }
+    if ($Compact) { return (ConvertTo-Json -InputObject $Value -Depth 100 -Compress) }
+    return (ConvertTo-Json -InputObject $Value -Depth 100)
+}
+
+function Select-PshJson {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]$Filter,
+
+        [Parameter(ValueFromPipeline = $true)]
+        [AllowNull()]
+        [object]$InputObject,
+
+        [string[]]$Path = @()
+    )
+    begin { $items = @() }
+    process { $items += ,$InputObject }
+    end {
+        $documents = @()
+        if (@($Path).Count -gt 0) {
+            foreach ($source in @(Get-PshTextSources -Paths $Path -PipelineItems @())) { $documents += ConvertFrom-PshJsonSource -Source $source }
+        }
+        else {
+            foreach ($item in $items) {
+                if ($item -is [string] -or $item -is [byte[]]) {
+                    $source = New-PshPipelineTextSource -Items ([object[]](,$item))
+                    $documents += ConvertFrom-PshJsonSource -Source $source
+                }
+                else { $documents += New-PshJsonValueEnvelope -Value $item }
+            }
+        }
+        foreach ($document in $documents) {
+            foreach ($result in @(Invoke-PshJqFilterValue -Filter $Filter -InputValue $document.Value)) {
+                if ($result.Value -is [Array]) { Microsoft.PowerShell.Utility\Write-Output (, $result.Value) }
+                else { Microsoft.PowerShell.Utility\Write-Output $result.Value }
+            }
+        }
+    }
+}
+
+function jq {
+    $arguments = @(ConvertTo-PshArgumentArray -InputArguments $args)
+    $pipelineItems = @($input)
+    Set-PshLastExitCode -Code 0
+    if ((Resolve-PshEdition) -eq 'Full') {
+        Invoke-PshPinnedTextTool -Name 'jq' -Arguments $arguments -PipelineItems $pipelineItems -PipelineExpected:([bool]$MyInvocation.ExpectingInput)
+        return
+    }
+    if (Test-PshLongHelp -Arguments $arguments) {
+        Write-PshCommandHelp -Usage 'Usage: jq [-rce] filter [file ...]'
+        return
+    }
+
+    try {
+        $raw = $false
+        $compact = $false
+        $exitStatus = $false
+        $positionals = @()
+        $parseOptions = $true
+        foreach ($argument in $arguments) {
+            if ($parseOptions -and $argument -ceq '--') { $parseOptions = $false; continue }
+            if ($parseOptions -and $argument.StartsWith('-') -and $argument -ne '-') {
+                $expanded = @(Expand-PshShortOptions -Token $argument -Allowed @('r', 'c', 'e'))
+                if ($expanded.Count -eq 0) { Throw-PshTextUsageError ('unsupported argument "{0}".' -f $argument) }
+                foreach ($item in $expanded) {
+                    if ($item -ceq 'r') { $raw = $true }
+                    elseif ($item -ceq 'c') { $compact = $true }
+                    else { $exitStatus = $true }
+                }
+                continue
+            }
+            $parseOptions = $false
+            $positionals += $argument
+        }
+        if ($positionals.Count -eq 0) { Throw-PshTextUsageError 'a jq filter is required.' }
+        $filter = $positionals[0]
+        $paths = @()
+        if ($positionals.Count -gt 1) { $paths = @($positionals[1..($positionals.Count - 1)]) }
+        $sources = @(Get-PshTextSources -Paths $paths -PipelineItems $pipelineItems)
+        $results = @()
+        foreach ($source in $sources) {
+            foreach ($document in @(ConvertFrom-PshJsonSource -Source $source)) {
+                $results += Invoke-PshJqFilterValue -Filter $filter -InputValue $document.Value
+            }
+        }
+        foreach ($result in $results) {
+            Write-PshTextValue -Text (ConvertTo-PshJqJsonText -Value $result.Value -Raw:$raw -Compact:$compact) -EmitEmpty
+        }
+        if ($exitStatus -and ($results.Count -eq 0 -or -not (Test-PshJqTruth -Value $results[$results.Count - 1].Value))) {
+            Set-PshLastExitCode -Code 1
+        }
+        else { Set-PshLastExitCode -Code 0 }
+    }
+    catch {
+        $code = Get-PshTextErrorCode -ErrorRecord $_
+        if ($code -eq 3 -and $_.Exception.Message -match '\Ainvalid JSON input') { $code = 3 }
+        Write-PshCommandFailure -Command 'jq' -Code $code -Message $_.Exception.Message
+    }
+}
+
+function ConvertFrom-PshXArgsWhitespaceText {
+    param(
+        [AllowNull()]
+        [string]$Text
+    )
+
+    if ($null -eq $Text) { return @() }
+    $items = New-Object System.Collections.ArrayList
+    $builder = New-Object Text.StringBuilder
+    $quote = [char]0
+    $escaped = $false
+    $started = $false
+    foreach ($character in $Text.ToCharArray()) {
+        if ($quote -ne [char]0) {
+            if ($character -eq $quote) { $quote = [char]0 }
+            else { [void]$builder.Append($character) }
+            $started = $true
+            continue
+        }
+        if ($escaped) {
+            [void]$builder.Append($character)
+            $escaped = $false
+            $started = $true
+            continue
+        }
+        if ($character -eq '\') {
+            $escaped = $true
+            $started = $true
+            continue
+        }
+        if ($character -eq '"' -or $character -eq "'") {
+            $quote = $character
+            $started = $true
+            continue
+        }
+        if ([char]::IsWhiteSpace($character)) {
+            if ($started) {
+                [void]$items.Add($builder.ToString())
+                [void]$builder.Clear()
+                $started = $false
+            }
+            continue
+        }
+        [void]$builder.Append($character)
+        $started = $true
+    }
+    if ($escaped) { Throw-PshTextUsageError 'xargs input ends with an incomplete backslash escape.' }
+    if ($quote -ne [char]0) { Throw-PshTextUsageError 'xargs input contains an unterminated quoted item.' }
+    if ($started) { [void]$items.Add($builder.ToString()) }
+    return [object[]]$items.ToArray()
+}
+
+function ConvertFrom-PshXArgsNullText {
+    param(
+        [AllowNull()]
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrEmpty($Text)) { return @() }
+    $parts = $Text.Split([char[]]@([char]0), [StringSplitOptions]::None)
+    $count = $parts.Count
+    if ($Text[$Text.Length - 1] -eq [char]0) { $count-- }
+    $items = New-Object System.Collections.ArrayList
+    for ($index = 0; $index -lt $count; $index++) { [void]$items.Add([string]$parts[$index]) }
+    return [object[]]$items.ToArray()
+}
+
+function ConvertFrom-PshXArgsLogicalLines {
+    param(
+        [AllowNull()]
+        [string]$Text
+    )
+
+    $items = New-Object System.Collections.ArrayList
+    foreach ($line in @(Split-PshTextLines -Text $Text)) {
+        $value = ([string]$line.Text).Trim()
+        if ($value.Length -gt 0) { [void]$items.Add($value) }
+    }
+    return [object[]]$items.ToArray()
+}
+
+function New-PshXArgsException {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [Parameter(Mandatory = $true)][ValidateSet(2, 3, 4, 5)][int]$Code
+    )
+
+    $exception = New-Object InvalidOperationException($Message)
+    $exception.Data['PshExitCode'] = $Code
+    return $exception
+}
+
+function Resolve-PshXArgsCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Command
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Command)) { throw (New-PshXArgsException -Message 'xargs requires a nonempty command name.' -Code 2) }
+    if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($Command)) {
+        throw (New-PshXArgsException -Message ('wildcard command names are unsupported: {0}' -f $Command) -Code 2)
+    }
+    $module = $ExecutionContext.SessionState.Module
+    $moduleName = if ($null -ne $module) { [string]$module.Name } else { 'Psh' }
+    $moduleRoot = if ($null -ne $module) { [string]$module.ModuleBase } else { Split-Path -Path $PSScriptRoot -Parent }
+    $moduleManifest = Join-Path -Path $moduleRoot -ChildPath 'Psh.psd1'
+
+    $resolved = $null
+    if ([string]::Equals($Command, 'echo', [StringComparison]::Ordinal)) {
+        $resolved = Get-Command -Name ('{0}\echo' -f $moduleName) -CommandType Function -ErrorAction SilentlyContinue
+    }
+    if ($null -eq $resolved) {
+        try { $resolved = Get-Command -Name $Command -ErrorAction Stop | Select-Object -First 1 }
+        catch { throw (New-PshXArgsException -Message ('command not found: {0}' -f $Command) -Code 4) }
+    }
+    if ($null -eq $resolved) { throw (New-PshXArgsException -Message ('command not found: {0}' -f $Command) -Code 4) }
+
+    $commandType = [string]$resolved.CommandType
+    if ($commandType -ceq 'Alias') {
+        throw (New-PshXArgsException -Message ('aliases cannot be projected into xargs worker runspaces: {0}' -f $Command) -Code 2)
+    }
+    if ($commandType -in @('Function', 'Filter')) {
+        if (-not ([string]::Equals([string]$resolved.Source, $moduleName, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]::Equals([string]$resolved.ModuleName, $moduleName, [StringComparison]::OrdinalIgnoreCase))) {
+            throw (New-PshXArgsException -Message ('caller-local functions cannot be projected into xargs worker runspaces: {0}' -f $Command) -Code 2)
+        }
+        return [PSCustomObject]@{
+            DisplayName = $Command
+            Target = ('{0}\{1}' -f $moduleName, [string]$resolved.Name)
+            Kind = 'PshFunction'
+            ModuleManifest = $moduleManifest
+        }
+    }
+    if ($commandType -ceq 'Application' -or $commandType -ceq 'ExternalScript') {
+        $target = [string]$resolved.Path
+        if ([string]::IsNullOrWhiteSpace($target)) { $target = [string]$resolved.Source }
+        if ([string]::IsNullOrWhiteSpace($target)) {
+            throw (New-PshXArgsException -Message ('cannot resolve command path: {0}' -f $Command) -Code 4)
+        }
+        return [PSCustomObject]@{ DisplayName = $Command; Target = $target; Kind = 'External'; ModuleManifest = $moduleManifest }
+    }
+    if ($commandType -ceq 'Cmdlet') {
+        return [PSCustomObject]@{ DisplayName = $Command; Target = [string]$resolved.Name; Kind = 'Cmdlet'; ModuleManifest = $moduleManifest }
+    }
+    throw (New-PshXArgsException -Message ('unsupported xargs command type {0}: {1}' -f $commandType, $Command) -Code 2)
+}
+
+function New-PshXArgsInvocationPlans {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [AllowEmptyCollection()][string[]]$ArgumentList = @(),
+        [AllowNull()][AllowEmptyCollection()][string[]]$Items = @(),
+        [int]$MaxArguments = 0,
+        [AllowNull()][string]$ReplaceString,
+        [bool]$HasReplaceString = $false
+    )
+
+    $plans = New-Object System.Collections.ArrayList
+    $itemCount = if ($null -eq $Items) { 0 } else { $Items.Count }
+    if ($itemCount -eq 0) { return @() }
+    if ($HasReplaceString) {
+        foreach ($item in $Items) {
+            $invocationArguments = New-Object System.Collections.ArrayList
+            foreach ($argument in $ArgumentList) {
+                [void]$invocationArguments.Add(([string]$argument).Replace($ReplaceString, [string]$item))
+            }
+            [void]$plans.Add([PSCustomObject]@{
+                Index = $plans.Count
+                Command = $Command
+                Arguments = [object[]]$invocationArguments.ToArray()
+            })
+        }
+        return [object[]]$plans.ToArray()
+    }
+
+    $batchSize = if ($MaxArguments -gt 0) { $MaxArguments } else { $itemCount }
+    for ($start = 0; $start -lt $itemCount; $start += $batchSize) {
+        $invocationArguments = New-Object System.Collections.ArrayList
+        foreach ($argument in @($ArgumentList)) { [void]$invocationArguments.Add([string]$argument) }
+        $end = [Math]::Min($start + $batchSize, $itemCount)
+        for ($index = $start; $index -lt $end; $index++) { [void]$invocationArguments.Add([string]$Items[$index]) }
+        [void]$plans.Add([PSCustomObject]@{
+            Index = $plans.Count
+            Command = $Command
+            Arguments = [object[]]$invocationArguments.ToArray()
+        })
+    }
+    return [object[]]$plans.ToArray()
+}
+
+function ConvertTo-PshXArgsAggregateExitCode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$Rows
+    )
+
+    $aggregate = 0
+    foreach ($row in $Rows) {
+        $childCode = [int]$row.ExitCode
+        $normalized = if ($childCode -eq 0) { 0 } elseif ($childCode -eq 5) { 5 } elseif ($childCode -eq 4) { 4 } else { 3 }
+        if ($normalized -gt $aggregate) { $aggregate = $normalized }
+    }
+    return $aggregate
+}
+
+function Invoke-PshXArgsInvocationPlans {
+    param(
+        [Parameter(Mandatory = $true)][object]$ResolvedCommand,
+        [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][object[]]$Plans,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 2147483647)][int]$MaxParallelism,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory
+    )
+
+    if ($null -eq $Plans -or $Plans.Count -eq 0) { return @() }
+    $workerScript = {
+        param($Target, $InvocationArguments, $Kind, $ModuleManifest, $WorkingDirectory)
+        Set-StrictMode -Version 2.0
+        $ErrorActionPreference = 'Stop'
+        $captured = New-Object System.Collections.ArrayList
+        $rawOutput = [byte[]]@()
+        $rawStream = $null
+        $pshModule = $null
+        try {
+            Set-Location -LiteralPath $WorkingDirectory -ErrorAction Stop
+            $commandTarget = $Target
+            if ([string]$Kind -ceq 'External') {
+                $moduleName = [IO.Path]::GetFileNameWithoutExtension($ModuleManifest)
+                $importedModules = @(Import-Module -Name $ModuleManifest -Force -PassThru -ErrorAction Stop)
+                $pshModule = @($importedModules | Where-Object { [string]::Equals([string]$_.Name, $moduleName, [StringComparison]::OrdinalIgnoreCase) })[-1]
+                $processResult = & $pshModule {
+                    param($ProcessPath, $ProcessArguments, $ProcessWorkingDirectory)
+                    Invoke-PshCapturedProcess -FilePath ([string]$ProcessPath) -Arguments ([string[]]$ProcessArguments) -StandardInputBytes ([byte[]]@()) -RedirectStandardInput:$true -WorkingDirectory ([string]$ProcessWorkingDirectory)
+                } $Target ([string[]]$InvocationArguments) $WorkingDirectory
+                foreach ($value in @($processResult.StdOut)) { [void]$captured.Add([string]$value) }
+                foreach ($value in @($processResult.StdErr)) { [void]$captured.Add([string]$value) }
+                return [PSCustomObject]@{ Output = [object[]]$captured.ToArray(); RawOutput = [byte[]]@(); ExitCode = [int]$processResult.ExitCode; ErrorMessage = '' }
+            }
+            if ([string]$Kind -ceq 'PshFunction') {
+                $moduleName = [IO.Path]::GetFileNameWithoutExtension($ModuleManifest)
+                $importedModules = @(Import-Module -Name $ModuleManifest -Force -PassThru -ErrorAction Stop)
+                $pshModule = @($importedModules | Where-Object { [string]::Equals([string]$_.Name, $moduleName, [StringComparison]::OrdinalIgnoreCase) })[-1]
+                $commandTarget = Get-Command -Name $Target -CommandType Function -ErrorAction Stop
+                $rawStream = New-Object IO.MemoryStream
+                & $pshModule { param($Sink) $script:PshRawByteSink = $Sink } $rawStream
+            }
+            elseif ([string]$Kind -ceq 'Cmdlet') {
+                $commandTarget = Get-Command -Name $Target -CommandType Cmdlet -ErrorAction Stop
+            }
+            $global:LASTEXITCODE = 0
+            try { $values = @(& $commandTarget @InvocationArguments 2>&1) }
+            finally {
+                if ($null -ne $rawStream) {
+                    & $pshModule { $script:PshRawByteSink = $null }
+                    $rawOutput = [byte[]]$rawStream.ToArray()
+                }
+            }
+            foreach ($value in $values) { [void]$captured.Add([string]$value) }
+            $exitCode = if ([string]$Kind -ceq 'PshFunction') { [int]$global:LASTEXITCODE } else { 0 }
+            [PSCustomObject]@{ Output = [object[]]$captured.ToArray(); RawOutput = $rawOutput; ExitCode = $exitCode; ErrorMessage = '' }
+        }
+        catch {
+            if ($null -ne $pshModule -and $null -ne $rawStream) {
+                try { & $pshModule { $script:PshRawByteSink = $null } } catch {}
+                try { $rawOutput = [byte[]]$rawStream.ToArray() } catch {}
+            }
+            [void]$captured.Add([string]$_.Exception.Message)
+            [PSCustomObject]@{ Output = [object[]]$captured.ToArray(); RawOutput = $rawOutput; ExitCode = 3; ErrorMessage = [string]$_.Exception.Message }
+        }
+        finally { if ($null -ne $rawStream) { $rawStream.Dispose() } }
+    }
+
+    $pool = [Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, [Math]::Min($MaxParallelism, $Plans.Count))
+    $activeTasks = New-Object System.Collections.ArrayList
+    try {
+        $pool.Open()
+        $rows = New-Object object[] $Plans.Count
+        $nextPlanIndex = 0
+        while ($nextPlanIndex -lt $Plans.Count -or $activeTasks.Count -gt 0) {
+            while ($nextPlanIndex -lt $Plans.Count -and $activeTasks.Count -lt $MaxParallelism) {
+                $plan = $Plans[$nextPlanIndex]
+                $powershell = $null
+                $asyncResult = $null
+                try {
+                    $powershell = [Management.Automation.PowerShell]::Create()
+                    $powershell.RunspacePool = $pool
+                    [void]$powershell.AddScript($workerScript.ToString()).AddArgument([string]$ResolvedCommand.Target).AddArgument([string[]]$plan.Arguments).AddArgument([string]$ResolvedCommand.Kind).AddArgument([string]$ResolvedCommand.ModuleManifest).AddArgument($WorkingDirectory)
+                    $asyncResult = $powershell.BeginInvoke()
+                    [void]$activeTasks.Add([PSCustomObject]@{ Plan = $plan; PowerShell = $powershell; AsyncResult = $asyncResult })
+                    $nextPlanIndex++
+                }
+                catch {
+                    if ($null -ne $powershell) {
+                        if ($null -ne $asyncResult) {
+                            try { if (-not $asyncResult.IsCompleted) { $powershell.Stop() } } catch {}
+                            try { [void]$powershell.EndInvoke($asyncResult) } catch {}
+                        }
+                        $powershell.Dispose()
+                    }
+                    throw
+                }
+            }
+
+            $task = $null
+            while ($null -eq $task) {
+                foreach ($candidate in $activeTasks) {
+                    if ($candidate.AsyncResult.IsCompleted) { $task = $candidate; break }
+                }
+                if ($null -eq $task) { [Threading.Thread]::Sleep(10) }
+            }
+
+            try {
+                $workerResults = @($task.PowerShell.EndInvoke($task.AsyncResult))
+                if ($workerResults.Count -eq 0) { throw 'xargs worker returned no invocation result.' }
+                $workerResult = $workerResults[$workerResults.Count - 1]
+                $output = @($workerResult.Output | ForEach-Object { [string]$_ })
+                $rawOutput = if ($null -eq $workerResult.RawOutput) { [byte[]]@() } else { [byte[]]$workerResult.RawOutput }
+                $rows[[int]$task.Plan.Index] = [PSCustomObject]@{
+                    Index = [int]$task.Plan.Index
+                    Command = [string]$task.Plan.Command
+                    Arguments = [object[]]@($task.Plan.Arguments)
+                    Output = [object[]]$output
+                    RawOutput = $rawOutput
+                    ExitCode = [int]$workerResult.ExitCode
+                }
+            }
+            catch {
+                $message = [string]$_.Exception.Message
+                $rows[[int]$task.Plan.Index] = [PSCustomObject]@{
+                    Index = [int]$task.Plan.Index
+                    Command = [string]$task.Plan.Command
+                    Arguments = [object[]]@($task.Plan.Arguments)
+                    Output = [object[]]@($message)
+                    RawOutput = [byte[]]@()
+                    ExitCode = 3
+                }
+            }
+            finally {
+                try { $task.PowerShell.Dispose() } catch {}
+                [void]$activeTasks.Remove($task)
+            }
+        }
+        return [object[]]$rows
+    }
+    finally {
+        foreach ($task in @($activeTasks)) {
+            if ($null -ne $task.PowerShell) {
+                try { if (-not $task.AsyncResult.IsCompleted) { $task.PowerShell.Stop() } } catch {}
+                try { [void]$task.PowerShell.EndInvoke($task.AsyncResult) } catch {}
+                try { $task.PowerShell.Dispose() } catch {}
+            }
+        }
+        if ($null -ne $pool) {
+            try { $pool.Close() } catch {}
+            finally { try { $pool.Dispose() } catch {} }
+        }
+    }
+}
+
+function Invoke-PshXArgsCore {
+    param(
+        [Parameter(Mandatory = $true)][string]$Command,
+        [AllowEmptyCollection()][string[]]$ArgumentList = @(),
+        [AllowNull()][object[]]$InputItems,
+        [ValidateRange(0, 2147483647)][int]$MaxArguments = 0,
+        [ValidateRange(1, 2147483647)][int]$MaxParallelism = 1,
+        [switch]$NullDelimited,
+        [AllowNull()][string]$ReplaceString,
+        [bool]$HasReplaceString = $false
+    )
+
+    $location = Get-Location
+    if ($null -eq $location.Provider -or -not [string]::Equals([string]$location.Provider.Name, 'FileSystem', [StringComparison]::OrdinalIgnoreCase)) {
+        Throw-PshTextUsageError 'xargs requires a FileSystem current location for worker projection.'
+    }
+    $workingDirectory = [string]$location.ProviderPath
+    $source = New-PshPipelineTextSource -Items $InputItems
+    if ($NullDelimited -or $source.HasRawByteInput) {
+        try { $inputText = ConvertFrom-PshStrictUtf8Bytes -Bytes ([byte[]]$source.Bytes) }
+        catch { Throw-PshTextUsageError ('xargs input is not valid UTF-8: {0}' -f $_.Exception.Message) }
+    }
+    else { $inputText = [string]$source.Text }
+    $items = if ($HasReplaceString) {
+        if ($NullDelimited) { @(ConvertFrom-PshXArgsNullText -Text $inputText) }
+        else { @(ConvertFrom-PshXArgsLogicalLines -Text $inputText) }
+    }
+    elseif ($NullDelimited) {
+        @(ConvertFrom-PshXArgsNullText -Text $inputText)
+    }
+    else {
+        @(ConvertFrom-PshXArgsWhitespaceText -Text $inputText)
+    }
+    if ($null -eq $items -or @($items).Count -eq 0) { return @() }
+    $resolved = Resolve-PshXArgsCommand -Command $Command
+    $plans = @(New-PshXArgsInvocationPlans -Command $Command -ArgumentList $ArgumentList -Items $items -MaxArguments $MaxArguments -ReplaceString $ReplaceString -HasReplaceString:$HasReplaceString)
+    return @(Invoke-PshXArgsInvocationPlans -ResolvedCommand $resolved -Plans $plans -MaxParallelism $MaxParallelism -WorkingDirectory $workingDirectory)
+}
+
+function Invoke-PshXArgs {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]$Command,
+
+        [AllowEmptyCollection()]
+        [string[]]$ArgumentList = @(),
+
+        [Parameter(ValueFromPipeline = $true)]
+        [AllowNull()]
+        [object]$InputObject,
+
+        [ValidateRange(0, 2147483647)]
+        [int]$MaxArguments = 0,
+
+        [ValidateRange(1, 2147483647)]
+        [int]$MaxParallelism = 1,
+
+        [switch]$NullDelimited,
+
+        [AllowNull()]
+        [string]$ReplaceString
+    )
+    begin { $inputItems = New-Object System.Collections.ArrayList }
+    process {
+        if ($PSBoundParameters.ContainsKey('InputObject')) { [void]$inputItems.Add($InputObject) }
+    }
+    end {
+        $hasReplaceString = $PSBoundParameters.ContainsKey('ReplaceString')
+        $rows = @(Invoke-PshXArgsCore -Command $Command -ArgumentList $ArgumentList -InputItems ([object[]]$inputItems.ToArray()) -MaxArguments $MaxArguments -MaxParallelism $MaxParallelism -NullDelimited:$NullDelimited -ReplaceString $ReplaceString -HasReplaceString:$hasReplaceString)
+        Set-PshLastExitCode -Code (ConvertTo-PshXArgsAggregateExitCode -Rows $rows)
+        foreach ($row in $rows) { Microsoft.PowerShell.Utility\Write-Output $row }
+    }
+}
+
+function xargs {
+    $arguments = @(ConvertTo-PshArgumentArray -InputArguments $args)
+    $pipelineItems = @($input)
+    Set-PshLastExitCode -Code 0
+    if (Test-PshLongHelp -Arguments $arguments) {
+        Write-PshCommandHelp -Usage 'Usage: xargs [-0] [-n count] [-I replacement] [-P count] [command [argument ...]]'
+        return
+    }
+
+    try {
+        $nullDelimited = $false
+        $maxArguments = 0
+        $maxParallelism = 1
+        $replaceString = $null
+        $hasReplaceString = $false
+        $positionals = @()
+        $parseOptions = $true
+        for ($index = 0; $index -lt $arguments.Count; $index++) {
+            $argument = $arguments[$index]
+            if ($parseOptions -and $argument -ceq '--') { $parseOptions = $false; continue }
+            if ($parseOptions -and $argument -ceq '-0') { $nullDelimited = $true; continue }
+            $option = $null
+            $value = $null
+            if ($parseOptions -and $argument -match '\A(-n|-P|-I)(.+)\z') { $option = $matches[1]; $value = $matches[2] }
+            elseif ($parseOptions -and $argument -in @('-n', '-P', '-I')) {
+                if (($index + 1) -ge $arguments.Count) { Throw-PshTextUsageError ('xargs {0} requires a value.' -f $argument) }
+                $option = $argument
+                $index++
+                $value = $arguments[$index]
+            }
+            if ($null -ne $option) {
+                if ($option -ceq '-I') {
+                    if ([string]::IsNullOrEmpty($value)) { Throw-PshTextUsageError 'xargs -I requires a nonempty replacement string.' }
+                    $replaceString = $value
+                    $hasReplaceString = $true
+                }
+                else {
+                    $number = 0
+                    if (-not [int]::TryParse($value, [ref]$number) -or $number -lt 1) { Throw-PshTextUsageError ('xargs {0} requires a positive integer.' -f $option) }
+                    if ($option -ceq '-n') { $maxArguments = $number } else { $maxParallelism = $number }
+                }
+                continue
+            }
+            if ($parseOptions -and $argument.StartsWith('-') -and $argument -ne '-') { Throw-PshTextUsageError ('unsupported argument "{0}".' -f $argument) }
+            $parseOptions = $false
+            $positionals += $argument
+        }
+
+        $command = 'Psh\echo'
+        $commandArguments = @()
+        if ($positionals.Count -gt 0) {
+            $command = $positionals[0]
+            if ($positionals.Count -gt 1) { $commandArguments = @($positionals[1..($positionals.Count - 1)]) }
+        }
+        $rows = @(Invoke-PshXArgsCore -Command $command -ArgumentList $commandArguments -InputItems $pipelineItems -MaxArguments $maxArguments -MaxParallelism $maxParallelism -NullDelimited:$nullDelimited -ReplaceString $replaceString -HasReplaceString:$hasReplaceString)
+        foreach ($row in $rows) {
+            foreach ($value in @($row.Output)) { Microsoft.PowerShell.Utility\Write-Output ([string]$value) }
+            if ($null -ne $row.RawOutput -and ([byte[]]$row.RawOutput).Length -gt 0) { Write-PshRawBytes -Bytes ([byte[]]$row.RawOutput) }
+        }
+        Set-PshLastExitCode -Code (ConvertTo-PshXArgsAggregateExitCode -Rows $rows)
+    }
+    catch {
+        Write-PshCommandFailure -Command 'xargs' -Code (Get-PshTextErrorCode -ErrorRecord $_) -Message $_.Exception.Message
     }
 }
