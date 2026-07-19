@@ -632,9 +632,14 @@ try {
         $danglingLink = Join-Path $symlinkLinks 'dangling-link.txt'
         $loopLinkA = Join-Path $symlinkLinks 'loop-a'
         $loopLinkB = Join-Path $symlinkLinks 'loop-b'
-        Microsoft.PowerShell.Management\New-Item -Path $danglingLink -ItemType SymbolicLink -Target '../real/missing-target.txt' -ErrorAction Stop | Microsoft.PowerShell.Core\Out-Null
-        Microsoft.PowerShell.Management\New-Item -Path $loopLinkA -ItemType SymbolicLink -Target 'loop-b' -ErrorAction Stop | Microsoft.PowerShell.Core\Out-Null
-        Microsoft.PowerShell.Management\New-Item -Path $loopLinkB -ItemType SymbolicLink -Target 'loop-a' -ErrorAction Stop | Microsoft.PowerShell.Core\Out-Null
+        $danglingLinkResult = Invoke-PshBatch1Command -Name ln -Arguments @('-s', '../real/missing-target.txt', $danglingLink)
+        $loopLinkAResult = Invoke-PshBatch1Command -Name ln -Arguments @('-s', 'loop-b', $loopLinkA)
+        $loopLinkBResult = Invoke-PshBatch1Command -Name ln -Arguments @('-s', 'loop-a', $loopLinkB)
+        Assert-PshBatch1 (
+            $danglingLinkResult.ExitCode -eq 0 -and
+            $loopLinkAResult.ExitCode -eq 0 -and
+            $loopLinkBResult.ExitCode -eq 0
+        ) ('ln -s could not create the dangling and loop symbolic links: {0}' -f (@($danglingLinkResult.Output + $loopLinkAResult.Output + $loopLinkBResult.Output) -join ' | '))
         $danglingRealpath = Invoke-PshBatch1Command -Name realpath -Arguments @($danglingLink)
         $loopRealpath = Invoke-PshBatch1Command -Name realpath -Arguments @($loopLinkA)
         Assert-PshBatch1 ($danglingRealpath.ExitCode -eq 3) 'realpath did not classify a dangling symbolic link as runtime failure 3.'
@@ -672,7 +677,10 @@ try {
             $windowsLiteralFileLink = 'Windows literal file link.txt'
             $windowsLiteralFileResult = Invoke-PshBatch1Command -Name ln -Arguments @('-s', $windowsLiteralFileTarget, $windowsLiteralFileLink)
             $windowsLiteralFileItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $windowsLiteralFileLink -Force -ErrorAction Stop
-            $windowsLiteralFilePath = [IO.Path]::GetFullPath((Join-Path -Path (Get-Location).ProviderPath -ChildPath $windowsLiteralFileLink))
+            $windowsLiteralFilePath =
+                $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
+                    $windowsLiteralFileLink
+                )
             Assert-PshBatch1 ($windowsLiteralFileResult.ExitCode -eq 0 -and [string]@($windowsLiteralFileItem.Target)[0] -ceq $windowsLiteralFileTarget -and [IO.File]::ReadAllText($windowsLiteralFilePath, $utf8NoBom) -ceq 'windows-literal-file') 'Windows ln -s did not preserve or resolve a relative file target containing spaces, Unicode, and .. components.'
         }
         Set-Location -LiteralPath $fixtureRoot
