@@ -161,7 +161,6 @@ function Invoke-PshVmProfileStartupProbe {
 $ErrorActionPreference = 'Stop'
 $psh = @(Get-Module -Name Psh)
 $psReadLine = @(Get-Module -Name PSReadLine)
-$psCompletions = @(Get-Module -Name PSCompletions)
 $jobs = @(Get-Job)
 $setOption = @(Get-Command -Name Set-PSReadLineOption -CommandType Cmdlet -All -ErrorAction Stop)
 $activeSetOption = $setOption | Select-Object -First 1
@@ -188,7 +187,6 @@ $assemblies = @(
     implementingDllPath = $activeAssemblyPath
     implementingDllHash = $activeAssemblyHash
     assemblies = $assemblies
-    psCompletionsCount = $psCompletions.Count
     jobCount = $jobs.Count
     profile = [string]$PROFILE.CurrentUserAllHosts
 } | ConvertTo-Json -Depth 5 -Compress
@@ -218,7 +216,6 @@ exit 0
     Assert-PshVmCondition (@($probe.assemblies).Count -eq 1) "$Name loaded more than one PSReadLine implementation assembly."
     Assert-PshVmCondition ([string]$probe.assemblies[0].sha256 -ceq $expectedAssemblyHash) "$Name loaded a different PSReadLine AppDomain assembly."
     Assert-PshVmCondition ([string]::Equals([IO.Path]::GetFullPath([string]$probe.assemblies[0].path), [IO.Path]::GetFullPath([string]$probe.implementingDllPath), [StringComparison]::OrdinalIgnoreCase)) "$Name uses a different PSReadLine command assembly than the AppDomain preload."
-    Assert-PshVmCondition ([int]$probe.psCompletionsCount -eq 0) "$Name imported the network-capable PSCompletions original."
     Assert-PshVmCondition ([int]$probe.jobCount -eq 0) "$Name created a background job during profile startup."
     Assert-PshVmCondition ($durationMilliseconds -lt 5000) "$Name profile startup took ${durationMilliseconds}ms, exceeding 5000ms."
 

@@ -432,15 +432,10 @@ foreach ($pattern in $forbiddenIntegrationPatterns) {
 }
 
 $lock = Get-Content -LiteralPath (Join-Path $dependencyRoot 'interactive.lock.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-$psCompletionsLock = @($lock.components | Where-Object { $_.name -ceq 'PSCompletions' })[0]
-Assert-PshGoal2Condition ([bool]$psCompletionsLock.runtimeAudit.startsUpdateJobOnImport) 'The lock does not record the PSCompletions update-job risk.'
-Assert-PshGoal2Condition ([bool]$psCompletionsLock.runtimeAudit.mayContactNetworkAfterImport) 'The lock does not record the PSCompletions network risk.'
-Assert-PshGoal2Condition (-not [bool]$psCompletionsLock.runtimeAudit.gitCompletionIncluded) 'The lock incorrectly claims that the Gallery package contains Git completion.'
+Assert-PshGoal2Condition (@($lock.components).Count -eq 1 -and [string]$lock.components[0].name -ceq 'PSReadLine') 'The interactive lock must contain only PSReadLine.'
 
 $dependencyTreeBefore = @(Get-PshGoal2TreeFingerprint -Root $dependencyRoot)
 $jobCountBefore = @(Get-Job -ErrorAction Ignore).Count
-$globalPsCompletionsBefore = Get-Variable -Name PSCompletions -Scope Global -ErrorAction Ignore
-Assert-PshGoal2Condition ($null -eq $globalPsCompletionsBefore) 'The acceptance session was not clean: global PSCompletions state already exists.'
 
 $originalPrompt = (Get-Item -LiteralPath 'Function:\prompt').ScriptBlock
 $interactiveTemporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ("psh-goal2-interactive-{0}" -f [Guid]::NewGuid().ToString('N'))
@@ -1128,12 +1123,11 @@ $initialization = Initialize-PshInteractive
         Assert-PshGoal2Condition ([int]$preloadTreeMismatchResult.keyBindingCount -eq 0 -and [string]$preloadTreeMismatchResult.predictionReason -ceq 'DependencyValidationFailed') "A $($preloadTreeMismatchCase.Name) preload configured PSReadLine interaction."
         Assert-PshGoal2Condition (-not [bool]$preloadTreeMismatchResult.gitCompletionRegistered -and -not [bool]$preloadTreeMismatchResult.promptEnabled) "A $($preloadTreeMismatchCase.Name) preload configured Git completion or the prompt."
     }
-    Assert-PshGoal2Condition ([bool]$diagnostic.dependencies.psCompletions.validated) 'Bundled PSCompletions metadata was not validated.'
-    Assert-PshGoal2Condition (-not [bool]$diagnostic.dependencies.psCompletions.imported) 'The unsafe PSCompletions ScriptsToProcess path was executed.'
-    Assert-PshGoal2Condition ([bool]$diagnostic.dependencies.psCompletions.executionSuppressed) 'PSCompletions execution suppression was not reported.'
-    Assert-PshGoal2Condition ([string]$diagnostic.dependencies.psCompletions.integrationMode -ceq 'PshOfflineAdapter') 'The offline PSCompletions integration mode was not reported.'
-    Assert-PshGoal2Condition ($null -eq (Get-Module -Name PSCompletions)) 'PSCompletions was loaded despite the metadata-only integration contract.'
-    Assert-PshGoal2Condition ($null -eq (Get-Variable -Name PSCompletions -Scope Global -ErrorAction Ignore)) 'PSCompletions created mutable global state during initialization.'
+    $dependencyPropertyNames = @(
+        $diagnostic.dependencies.PSObject.Properties |
+            ForEach-Object { [string]$_.Name }
+    )
+    Assert-PshGoal2Condition ($dependencyPropertyNames.Count -eq 1 -and $dependencyPropertyNames[0] -ceq 'psReadLine') 'Interactive diagnostics must report only the PSReadLine dependency.'
     Assert-PshGoal2Condition (@(Get-Job -ErrorAction Ignore).Count -eq $jobCountBefore) 'Interactive initialization created a background job.'
     Assert-PshGoal2Condition (@(Compare-Object $dependencyTreeBefore @(Get-PshGoal2TreeFingerprint -Root $dependencyRoot)).Count -eq 0) 'Interactive initialization changed the locked dependency tree.'
 
@@ -1382,13 +1376,10 @@ $initialization = Initialize-PshInteractive
     [IO.File]::Delete((Join-Path $missingPromptModuleRoot 'Interactive/Prompt.ps1'))
     Import-Module -Name (Join-Path $missingPromptModuleRoot 'Psh.psd1') -Force -ErrorAction Stop
     $fixedPsReadLineManifest = Join-Path $dependencyRoot 'PSReadLine/2.4.5/PSReadLine.psd1'
-    $fixedPsCompletionsManifest = Join-Path $dependencyRoot 'PSCompletions/6.10.0/PSCompletions.psd1'
     $missingPromptDisabled = Initialize-PshInteractive `
-        -PSReadLinePath $fixedPsReadLineManifest `
-        -PSCompletionsPath $fixedPsCompletionsManifest
+        -PSReadLinePath $fixedPsReadLineManifest
     $missingPromptEnabled = Initialize-PshInteractive `
         -PSReadLinePath $fixedPsReadLineManifest `
-        -PSCompletionsPath $fixedPsCompletionsManifest `
         -EnablePrompt
     Assert-PshGoal2Condition ([bool]$missingPromptDisabled.success) 'A missing prompt implementation broke initialization when the prompt was not requested.'
     Assert-PshGoal2Condition (-not [bool]$missingPromptEnabled.success) 'A missing requested prompt was not reported as a structured failure.'

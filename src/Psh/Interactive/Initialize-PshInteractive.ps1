@@ -304,8 +304,6 @@ function Import-PshBundledModule {
         [AllowNull()]
         [string]$ExplicitPath,
 
-        [switch]$MetadataOnly,
-
         [switch]$ReplaceLoadedConflicts
     )
 
@@ -337,9 +335,6 @@ function Import-PshBundledModule {
         restartRequired = $false
         mutationSuppressed = $false
         importScope     = 'Global'
-        integrationMode = 'ManifestImport'
-        executionSuppressed = $false
-        suppressionReason = $null
         removedConflicts = @()
         restoredConflicts = @()
         restorationErrors = @()
@@ -376,13 +371,6 @@ function Import-PshBundledModule {
             throw ('Expected {0} {1}, but the manifest declares {2}.' -f $Name, $Version, $manifest.Version)
         }
         $result.validated = $true
-
-        if ($MetadataOnly) {
-            $result.integrationMode = 'PshOfflineAdapter'
-            $result.executionSuppressed = $true
-            $result.suppressionReason = 'The pinned upstream manifest starts a network-capable update job and writes below its module directory. Psh validates the bundle but does not execute ScriptsToProcess.'
-            return [PSCustomObject]$result
-        }
 
         $expectedBase = [IO.Path]::GetFullPath((Split-Path -Path $resolvedPath -Parent)).TrimEnd('\', '/')
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
@@ -859,9 +847,6 @@ function Initialize-PshInteractive {
         [AllowNull()]
         [string]$PSReadLinePath,
 
-        [AllowNull()]
-        [string]$PSCompletionsPath,
-
         [switch]$EnablePrompt,
 
         [switch]$DisableGitPrompt,
@@ -891,22 +876,12 @@ function Initialize-PshInteractive {
         -DependencyRoot $DependencyRoot `
         -ExplicitPath $PSReadLinePath `
         -ReplaceLoadedConflicts
-    $psCompletions = Import-PshBundledModule `
-        -Name 'PSCompletions' `
-        -Version ([version]'6.10.0') `
-        -DependencyRoot $DependencyRoot `
-        -ExplicitPath $PSCompletionsPath `
-        -MetadataOnly
-
     if (-not $psReadLine.imported) {
         $errors += ('PSReadLine: {0}' -f [string]$psReadLine.error)
     }
-    if (-not $psCompletions.validated) {
-        $errors += ('PSCompletions: {0}' -f [string]$psCompletions.error)
-    }
 
     $bindings = @()
-    $dependenciesReady = [bool]$psReadLine.imported -and [bool]$psCompletions.validated
+    $dependenciesReady = [bool]$psReadLine.imported
     if ($dependenciesReady) {
         $bindingSpecifications = @(
             [PSCustomObject]@{ Chord = 'Tab';       Function = 'MenuComplete' }
@@ -1040,8 +1015,7 @@ function Initialize-PshInteractive {
         }
         terminal       = $terminalStatus
         dependencies   = [PSCustomObject][ordered]@{
-            psReadLine    = $psReadLine
-            psCompletions = $psCompletions
+            psReadLine = $psReadLine
         }
         keyBindings    = @($bindings)
         prediction     = $prediction

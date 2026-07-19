@@ -7,18 +7,14 @@ bundled with Psh at these fixed module-relative paths:
 
 ```text
 Dependencies/PSReadLine/2.4.5/PSReadLine.psd1
-Dependencies/PSCompletions/6.10.0/PSCompletions.psd1
 Dependencies/interactive.lock.json
 ```
 
-The initializer verifies both manifest names and exact versions from literal
-paths and imports bundled PSReadLine 2.4.5 globally. It deliberately does not
-execute the PSCompletions manifest: the unmodified 6.10.0 upstream manifest
-starts a network-capable update job, writes below its module directory, and its
-Gallery package does not contain Git completion. The original files remain
-bundled and hash-verified for provenance; Psh uses an offline native Git
-completion adapter instead. This avoids executing `ScriptsToProcess` while
-retaining the pinned upstream artifact for audit and future review.
+The initializer verifies the manifest name and exact version from a literal
+path and imports bundled PSReadLine 2.4.5 globally. PSCompletions is not bundled
+in v0.1.0 because its manifest starts a network-capable update job and writes
+below its module directory. Psh provides its own offline native Git completion
+adapter instead.
 
 Interactive hosts commonly preload another PSReadLine copy. After validating
 the fixed manifest, Psh removes loaded `PSReadLine` modules whose module base is
@@ -46,21 +42,19 @@ Initialize-PshInteractive -EnablePrompt
 ```
 
 The complete optional parameters are `-DependencyRoot`, `-PSReadLinePath`,
-`-PSCompletionsPath`, `-EnablePrompt`, `-DisableGitPrompt`, and
-`-GitTimeoutMilliseconds` (25 through 2000 ms, default 150 ms). Without
-`-EnablePrompt`, the initializer does not replace the session's existing
-`prompt` function.
+`-EnablePrompt`, `-DisableGitPrompt`, and `-GitTimeoutMilliseconds` (25 through
+2000 ms, default 150 ms). Without `-EnablePrompt`, the initializer does not
+replace the session's existing `prompt` function.
 
 Initialization returns one diagnostic object instead of emitting setup text.
 Its top-level fields are `schemaVersion`, `component`, `success`,
 `dependencyRoot`, `powershell`, `terminal`, `dependencies`, `keyBindings`,
 `prediction`, `gitCompletion`, `prompt`, `errors`, and `warnings`. Dependency
 diagnostics record the expected, manifest, and loaded versions and paths, plus
-the expected and actual implementation assembly paths and hashes and whether
-execution was suppressed for the offline adapter. Binding, prediction, Git
-completion, and prompt diagnostics distinguish requested, configured, safely
-degraded, and failed states so `psh doctor` and tests can inspect behavior
-without parsing display text.
+the expected and actual implementation assembly paths and hashes. Binding,
+prediction, Git completion, and prompt diagnostics distinguish requested,
+configured, safely degraded, and failed states so `psh doctor` and tests can
+inspect behavior without parsing display text.
 
 ## Keys and prediction
 

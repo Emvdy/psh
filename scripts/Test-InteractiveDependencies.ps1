@@ -102,7 +102,7 @@ $lock = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8 | ConvertFrom-Jso
 Assert-PshDependencyCondition ([int]$lock.schemaVersion -eq 1) 'Unsupported lock schemaVersion.'
 Assert-PshDependencyCondition ([string]$lock.dependencyRoot -ceq 'src/Psh/Dependencies') 'Unexpected dependencyRoot.'
 $components = @($lock.components)
-Assert-PshDependencyCondition ($components.Count -eq 2) 'The lock must contain exactly two components.'
+Assert-PshDependencyCondition ($components.Count -eq 1) 'The lock must contain exactly one component.'
 
 $expectedPins = @{
     PSReadLine = @{
@@ -153,57 +153,6 @@ $expectedPins = @{
                 PackagePath = 'netstd/Microsoft.PowerShell.PSReadLine.Polyfiller.dll'
                 Size        = 16928
                 Sha256      = '2e63dc86d9240243ccfb07da5d0b4fce2bc5ce5f9952658a7ce68c26bcd3e14c'
-            }
-        )
-    }
-    PSCompletions = @{
-        Version       = '6.10.0'
-        PackageSha256 = '9f2bf9c6d143d2dc0c50a531b964f9f6ff30393077405914ca7d746ef8e38cb7'
-        Commit        = '427212789d4df206d37d1d3c3d12b4341ac73644'
-        License       = 'MIT'
-        LicenseSha256 = 'ff823ba75e90563c3876fbe28df694c0cde5817c721397af7879db19e8ecdd5b'
-        Files         = @(
-            @{
-                Path        = 'PSCompletions/6.10.0/PSCompletions.ps1'
-                PackagePath = 'PSCompletions.ps1'
-                Size        = 120700
-                Sha256      = 'b32a5bc04e9dbb099daf9aa1cc9b6e2d2927b589ac4847ddffa8e11f357b8df5'
-            }
-            @{
-                Path        = 'PSCompletions/6.10.0/PSCompletions.psd1'
-                PackagePath = 'PSCompletions.psd1'
-                Size        = 1631
-                Sha256      = '17b4203e9ade01a56c01c3e6cafd94db9e55f8d7d76d599ff64645c4a8a3c1ff'
-            }
-            @{
-                Path        = 'PSCompletions/6.10.0/PSCompletions.psm1'
-                PackagePath = 'PSCompletions.psm1'
-                Size        = 55557
-                Sha256      = 'ab67a3e31d1a57d8c53f5dbf20586a0e6cc00ab781033c2c6eed5e320f3bb610'
-            }
-            @{
-                Path        = 'PSCompletions/6.10.0/completions/psc/config.json'
-                PackagePath = 'completions/psc/config.json'
-                Size        = 73
-                Sha256      = '78954abccf6a908cba29635b3e3eb54263f628390857714c1e3128f1c3326c9b'
-            }
-            @{
-                Path        = 'PSCompletions/6.10.0/completions/psc/hooks.ps1'
-                PackagePath = 'completions/psc/hooks.ps1'
-                Size        = 7089
-                Sha256      = '8892db60ca6580a6a157902f8bb92e30ce85ae109b7c1fdf3eb47e02daf5efb5'
-            }
-            @{
-                Path        = 'PSCompletions/6.10.0/completions/psc/language/en-US.json'
-                PackagePath = 'completions/psc/language/en-US.json'
-                Size        = 95436
-                Sha256      = 'baaab326319e9f7615ef93211b84dacc928f3620bc52b2fe37ae992060eae0d1'
-            }
-            @{
-                Path        = 'PSCompletions/6.10.0/completions/psc/language/zh-CN.json'
-                PackagePath = 'completions/psc/language/zh-CN.json'
-                Size        = 93191
-                Sha256      = '0383d95e2a3dba30e07de1d074997360d31a05267e22467d317bc21d39214074'
             }
         )
     }
@@ -288,7 +237,7 @@ foreach ($component in $components) {
     Assert-PshDependencyCondition ((Get-PshFileSha256 -Path $licensePath) -ceq $pin.LicenseSha256) "$name license SHA-256 changed."
 }
 
-Assert-PshDependencyCondition ($verifiedFileCount -eq 14) "Expected 14 locked files, verified $verifiedFileCount."
+Assert-PshDependencyCondition ($verifiedFileCount -eq 7) "Expected 7 locked files, verified $verifiedFileCount."
 $actualFiles = @(
     Get-ChildItem -LiteralPath $dependencyRoot -Recurse -File |
         Where-Object { $_.FullName -cne $lockPath }
@@ -299,9 +248,4 @@ foreach ($file in $actualFiles) {
 }
 Assert-PshDependencyCondition ($actualFiles.Count -eq $expectedFiles.Count) 'The dependency directory is not the exact locked file set.'
 
-$psCompletions = @($components | Where-Object { $_.name -ceq 'PSCompletions' })[0]
-Assert-PshDependencyCondition ([bool]$psCompletions.runtimeAudit.startsUpdateJobOnImport) 'PSCompletions import-side update job risk is not recorded.'
-Assert-PshDependencyCondition ([bool]$psCompletions.runtimeAudit.mayContactNetworkAfterImport) 'PSCompletions network risk is not recorded.'
-Assert-PshDependencyCondition ([bool]$psCompletions.runtimeAudit.integrationReviewRequired) 'PSCompletions integration review gate is not recorded.'
-
-Write-Output "Interactive dependency verification passed: 2 fixed components, $verifiedFileCount independently pinned runtime files, and 2 verified licenses."
+Write-Output "Interactive dependency verification passed: 1 fixed component, $verifiedFileCount independently pinned runtime files, and 1 verified license."

@@ -268,8 +268,6 @@ Assert-PshVmSessionCondition ($psReadLineModules.Count -eq 1) 'PSReadLine was no
 $psReadLineModule = $psReadLineModules[0]
 Assert-PshVmSessionCondition ([string]$psReadLineModule.Version -ceq '2.4.5') "The loaded PSReadLine version is not 2.4.5: $($psReadLineModule.Version)"
 Assert-PshVmSessionCondition (Test-PshVmSessionPathEqual -Left ([string]$psReadLineModule.ModuleBase) -Right $expectedPsReadLineBase) 'The loaded PSReadLine module is not the fixed bundled copy.'
-$psCompletionsModules = @(Get-Module -Name PSCompletions)
-Assert-PshVmSessionCondition ($psCompletionsModules.Count -eq 0) 'The profile imported the network-capable PSCompletions original.'
 $jobsBeforeWarm = @(Get-Job)
 Assert-PshVmSessionCondition ($jobsBeforeWarm.Count -eq 0) 'The profile created a background job before the evidence probe.'
 
@@ -480,8 +478,6 @@ Assert-PshVmSessionCondition (Test-PshVmSessionPathEqual -Left ([string]$warmDia
 
 $postWarmPsReadLineModules = @(Get-Module -Name PSReadLine)
 Assert-PshVmSessionCondition ($postWarmPsReadLineModules.Count -eq 1) 'Warm initialization left multiple PSReadLine modules loaded.'
-$postWarmPsCompletionsModules = @(Get-Module -Name PSCompletions)
-Assert-PshVmSessionCondition ($postWarmPsCompletionsModules.Count -eq 0) 'Warm initialization imported the network-capable PSCompletions original.'
 $jobsAfterWarm = @(Get-Job)
 Assert-PshVmSessionCondition ($jobsAfterWarm.Count -eq 0) 'Warm initialization created a background job.'
 $postWarmPromptCommand = Get-Command -Name prompt -CommandType Function -ErrorAction Stop
@@ -541,7 +537,6 @@ $sessionEvidence = [ordered]@{
             source    = [string]$readLineOption.PredictionSource
             viewStyle = [string]$readLineOption.PredictionViewStyle
         }
-        psCompletionsCount   = $psCompletionsModules.Count
         jobCountBeforeWarm   = $jobsBeforeWarm.Count
         jobCountAfterWarm    = $jobsAfterWarm.Count
         appDomainAssemblies  = $loadedPsReadLineAssemblies
