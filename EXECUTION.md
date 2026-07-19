@@ -11,7 +11,7 @@ condition has direct evidence.
 | Goal 0 | COMPLETE | `1f87695` | Safety baseline and repository |
 | Goal 1 | COMPLETE | `83ed21f` | Module and machine-readable specification |
 | Goal 2 | COMPLETE | `20a4e59` | Amendment 1 closeout merged to `main`; final branch and main CI green |
-| Goal 3 | IN_PROGRESS | - | Goal 2 prerequisite met; Batch 1 is complete; Batch 2 is pending |
+| Goal 3 | IN_PROGRESS | - | Goal 2 prerequisite met; Batches 1 and 2 are complete; Batch 3 is pending |
 | Goal 4 | PENDING | - | Blocked on Goal 3 DoneWhen |
 | Goal 5 | PENDING | - | Blocked on Goal 4 DoneWhen |
 | Goal 6 | PENDING | - | Blocked on Goal 5 DoneWhen |
@@ -390,7 +390,7 @@ Started: 2026-07-19 (Asia/Shanghai)
 | Batch | Scope | Status |
 | --- | --- | --- |
 | 1 | File commands | COMPLETE |
-| 2 | Text search | PENDING |
+| 2 | Text search | COMPLETE |
 | 3 | Complex `sed`/`awk`/`jq`/`xargs` | PENDING |
 | 4 | System/network/archive | PENDING |
 
@@ -435,8 +435,41 @@ CI before the next batch begins. Goal 3 is not complete.
   collision and disabled-command restore behavior, symbolic-link metadata and
   target preservation, and empty golden-output handling.
 
+### Batch 2 Evidence
+
+- Implementation and Windows-harness fix chain: `ba5548622e004682377d5c6fe6c14b83c3e7e4ec`
+  (`feat: add Goal 3 Batch 2 text commands`),
+  `41d6b1abc781cdbb2dd493ea306d51f8315c9358` (`test: stabilize Batch 2
+  Windows text checks`), `15ee5db009065048d57c647a96779212a030353c`
+  (`test: clear expected native failure status`), and
+  `e18dba49c3ed76f3ff51700404e57d5203d9e357` (`test: normalize batch 2
+  harness exit status`).
+- Batch 2 CI run: <https://github.com/Emvdy/psh/actions/runs/29699973023>,
+  head `e18dba49c3ed76f3ff51700404e57d5203d9e357`, conclusion `success`.
+  All jobs succeeded:
+  - [GNU Tier 1 goldens](https://github.com/Emvdy/psh/actions/runs/29699973023/job/88227259616)
+    generated and uploaded the deterministic text-command golden artifact.
+  - [Windows PowerShell 5.1](https://github.com/Emvdy/psh/actions/runs/29699973023/job/88227272787)
+    ran the Batch 2 validation and regression suite.
+  - [PowerShell 7](https://github.com/Emvdy/psh/actions/runs/29699973023/job/88227272803)
+    ran the same Batch 2 validation and regression suite.
+- Batch 1 regression CI rerun: <https://github.com/Emvdy/psh/actions/runs/29699973031>,
+  conclusion `success`; GNU `88227259630`, Windows PowerShell 5.1
+  `88227272868`, and PowerShell 7 `88227272891` all succeeded.
+- TextCommands covered 15 commands with 214 assertions without a golden root
+  and 251 assertions with GNU golden comparisons. Coverage includes text and
+  raw-byte paths, Tier 2 search flags, Core/Full delegation, downstream
+  pipeline contracts, Unicode fixtures, and structured object APIs.
+- The implementation gate passed generated-artifact `-Check`, PowerShell AST
+  validation for 21 files, `actionlint`, `shellcheck`, `bash -n`, and
+  `git diff --check`.
+- The known Batch 1 macOS-only golden replay mismatch remains unchanged: the
+  sandbox can spell the same temporary path as `/var` versus `/private/var`.
+  Ubuntu-generated goldens and both Windows CI runtimes remain green; Batch 2
+  did not alter Batch 1 behavior or its normalization contract.
+
 ### Remaining Work
 
-Proceed to Batch 2 (text search) with its own implementation, tests, commit, and
-green CI gate; then complete Batches 3 and 4 in order. Do not mark Goal 3
-complete before all four batch gates pass.
+Proceed to Batch 3 (`sed`/`awk`/`jq`/`xargs`), then Batch 4
+(system/network/archive), each with its own implementation, tests, commit, and
+green CI gate. Keep Goal 3 `IN_PROGRESS` until all four batch gates pass.
