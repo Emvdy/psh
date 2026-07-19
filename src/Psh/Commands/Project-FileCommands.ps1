@@ -31,6 +31,10 @@ if ($null -ne (Get-Variable -Name '__PshProjection_baf0d32a_Context' -ErrorActio
             cp = @('Copy-Item')
             mv = @('Move-Item')
             rm = @('Remove-Item')
+            cat = @('Get-Content')
+            sort = @('Sort-Object')
+            tee = @('Tee-Object')
+            echo = @('Write-Output')
         }
         State = [ordered]@{
             ProjectedAliases = [ordered]@{}
@@ -465,6 +469,10 @@ try {
     if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('cp')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'cp' }
     if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('mv')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'mv' }
     if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('rm')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'rm' }
+    if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('cat')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'cat' }
+    if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('sort')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'sort' }
+    if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('tee')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'tee' }
+    if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('echo')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'echo' }
 }
 catch {
     . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Restore (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value

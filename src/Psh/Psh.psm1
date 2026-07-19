@@ -1214,6 +1214,12 @@ if (-not (Test-Path -LiteralPath $fileCommandsPath -PathType Leaf)) {
 }
 . $fileCommandsPath
 
+$textCommandsPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Commands') -ChildPath 'TextCommands.ps1'
+if (-not (Test-Path -LiteralPath $textCommandsPath -PathType Leaf)) {
+    throw ('Psh text-command source is missing: {0}' -f $textCommandsPath)
+}
+. $textCommandsPath
+
 function Initialize-PshArgumentCompleters {
     $completerPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Generated') -ChildPath 'ArgumentCompleters.ps1'
     if (-not (Test-Path -LiteralPath $completerPath -PathType Leaf)) {
@@ -1260,8 +1266,13 @@ $exportedFunctions = @(
     'Initialize-PshInteractive'
     'Find-PshItem'
     'Set-PshFileTime'
+    'Find-PshText'
+    'Get-PshHead'
+    'Get-PshTail'
+    'Measure-PshText'
 )
 $exportedFunctions += @(Get-PshEnabledFileCommandNames)
+$exportedFunctions += @(Get-PshEnabledTextCommandNames)
 
 Export-ModuleMember -Function $exportedFunctions
 }
