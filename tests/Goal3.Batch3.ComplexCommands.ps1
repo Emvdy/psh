@@ -931,9 +931,10 @@ exit 0
     if ($isWindowsPlatform) {
         $fullJqArgumentValues = @('--stdin', '', 'a"b', 'trail\', 'space value')
         $fullJqUnicodeInput = ([string][char]0x6c49) + ([string][char]0x5b57) + ' caf' + ([string][char]0x00e9)
+        $fullJqExpectedStdinBytes = [byte[]]$utf8NoBom.GetBytes($fullJqUnicodeInput)
         $fullJqNative = Invoke-PshBatch3Command -Name jq -Arguments $fullJqArgumentValues -PipelineInput @($fullJqUnicodeInput) -UsePipeline
         $fullJqNativeCapture = ConvertFrom-PshBatch3NativeCapture -Lines $fullJqNative.Output
-        Assert-PshBatch3 ($fullJqNative.ExitCode -eq 0 -and $fullJqNativeCapture.Unexpected.Count -eq 0 -and (Test-PshBatch3StringArray @($fullJqNativeCapture.Arguments) $fullJqArgumentValues) -and (Test-PshBatch3ByteSequence $fullJqNativeCapture.StdinBytes ([byte[]]$utf8NoBom.GetBytes($fullJqUnicodeInput)))) 'Full jq did not preserve exact native argv or write non-ASCII pipeline input as exact UTF-8 bytes.'
+        Assert-PshBatch3 ($fullJqNative.ExitCode -eq 0 -and $fullJqNativeCapture.Unexpected.Count -eq 0 -and (Test-PshBatch3StringArray @($fullJqNativeCapture.Arguments) $fullJqArgumentValues) -and (Test-PshBatch3ByteSequence $fullJqNativeCapture.StdinBytes $fullJqExpectedStdinBytes)) ('Full jq did not preserve exact native argv or write non-ASCII pipeline input as exact UTF-8 bytes. ExitCode={0}; Output={1}; Unexpected={2}; ActualArguments={3}; ExpectedArguments={4}; Stdin={5}' -f $fullJqNative.ExitCode, (Format-PshBatch3DiagnosticStrings $fullJqNative.Output), (Format-PshBatch3DiagnosticStrings $fullJqNativeCapture.Unexpected), (Format-PshBatch3DiagnosticStrings $fullJqNativeCapture.Arguments), (Format-PshBatch3DiagnosticStrings $fullJqArgumentValues), (Format-PshBatch3ByteDiagnostic -Actual $fullJqNativeCapture.StdinBytes -Expected $fullJqExpectedStdinBytes))
     }
     else {
         $fullJqArguments = Invoke-PshBatch3Command -Name jq -Arguments @('--native-only', '', 'space value', '--')
