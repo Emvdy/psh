@@ -1561,6 +1561,38 @@ function Move-PshLiteralEntry {
     Microsoft.PowerShell.Management\Move-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
 }
 
+function Get-PshFileTransactionPathStateText {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Destination,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Backup
+    )
+
+    $parts = @()
+    foreach ($entry in @(
+        [PSCustomObject]@{ Name = $SourceName; Path = $SourcePath },
+        [PSCustomObject]@{ Name = 'destination'; Path = $Destination },
+        [PSCustomObject]@{ Name = 'backup'; Path = $Backup }
+    )) {
+        $state = 'missing'
+        if ([IO.File]::Exists([string]$entry.Path)) {
+            try { $state = 'file(length={0})' -f ([IO.FileInfo][string]$entry.Path).Length }
+            catch { $state = 'file' }
+        }
+        elseif ([IO.Directory]::Exists([string]$entry.Path)) { $state = 'directory' }
+        $parts += ('{0}={1} [{2}]' -f [string]$entry.Name, [string]$entry.Path, $state)
+    }
+    return ($parts -join '; ')
+}
+
 function Install-PshStagedEntry {
     param(
         [Parameter(Mandatory = $true)]
@@ -1571,14 +1603,56 @@ function Install-PshStagedEntry {
 
         [switch]$RetainBackup,
 
+        [AllowNull()]
+        [string]$BackupPath,
+
         [scriptblock]$BeforeInstall,
 
         [scriptblock]$BeforeRollback
     )
 
-    $backup = New-PshSiblingTemporaryPath -Destination $Destination -Purpose 'replace-backup'
+    $explicitBackup = $PSBoundParameters.ContainsKey('BackupPath')
+    if ($explicitBackup) {
+        if ([string]::IsNullOrWhiteSpace($BackupPath)) { throw 'an explicit staged backup path cannot be empty.' }
+        $backup = Resolve-PshFileSystemPath -Path $BackupPath -AllowMissing
+        $stageFullPath = [IO.Path]::GetFullPath($Stage)
+        $destinationFullPath = [IO.Path]::GetFullPath($Destination)
+        if ([IO.File]::Exists($backup) -or [IO.Directory]::Exists($backup)) {
+            $state = Get-PshFileTransactionPathStateText -SourceName 'stage' -SourcePath $Stage -Destination $Destination -Backup $backup
+            throw ('the explicit staged backup path already exists; {0}' -f $state)
+        }
+        if ((Test-PshPathEqual -Left $backup -Right $stageFullPath) -or
+            (Test-PshPathEqual -Left $backup -Right $destinationFullPath) -or
+            (Test-PshPathEqual -Left $stageFullPath -Right $destinationFullPath)) {
+            $state = Get-PshFileTransactionPathStateText -SourceName 'stage' -SourcePath $Stage -Destination $Destination -Backup $backup
+            throw ('the stage, destination, and explicit backup paths must differ; {0}' -f $state)
+        }
+        $stageParent = [IO.Path]::GetDirectoryName($stageFullPath)
+        $destinationParent = [IO.Path]::GetDirectoryName($destinationFullPath)
+        $backupParent = [IO.Path]::GetDirectoryName($backup)
+        if ([string]::IsNullOrWhiteSpace($stageParent) -or
+            [string]::IsNullOrWhiteSpace($destinationParent) -or
+            [string]::IsNullOrWhiteSpace($backupParent) -or
+            -not (Test-PshPathEqual -Left $stageParent -Right $destinationParent) -or
+            -not (Test-PshPathEqual -Left $backupParent -Right $destinationParent)) {
+            $state = Get-PshFileTransactionPathStateText -SourceName 'stage' -SourcePath $Stage -Destination $Destination -Backup $backup
+            throw ('the stage, destination, and explicit backup paths must be siblings; {0}' -f $state)
+        }
+    }
+    else {
+        $backup = New-PshSiblingTemporaryPath -Destination $Destination -Purpose 'replace-backup'
+    }
+
     $installed = $false
-    Move-PshLiteralEntry -Source $Destination -Destination $backup
+    try {
+        Move-PshLiteralEntry -Source $Destination -Destination $backup
+    }
+    catch {
+        $state = Get-PshFileTransactionPathStateText -SourceName 'stage' -SourcePath $Stage -Destination $Destination -Backup $backup
+        $exception = New-Object IO.IOException(('staged backup move failed ({0}); {1}' -f $_.Exception.Message, $state), $_.Exception)
+        throw $exception
+    }
+
     try {
         try {
             if ($null -ne $BeforeInstall) { & $BeforeInstall }
@@ -1586,15 +1660,20 @@ function Install-PshStagedEntry {
             $installed = $true
         }
         catch {
-            $installError = $_.Exception.Message
+            $installException = $_.Exception
             try {
                 if ($null -ne $BeforeRollback) { & $BeforeRollback }
                 Move-PshLiteralEntry -Source $backup -Destination $Destination
             }
             catch {
-                throw ('staged install failed ({0}); rollback failed ({1}); original retained at: {2}' -f $installError, $_.Exception.Message, $backup)
+                $state = Get-PshFileTransactionPathStateText -SourceName 'stage' -SourcePath $Stage -Destination $Destination -Backup $backup
+                $retainedOriginalSuffix = if ([IO.File]::Exists($backup)) { '; original retained at: {0}' -f $backup } else { '' }
+                $exception = New-Object IO.IOException(('staged install failed ({0}); rollback failed ({1}); {2}{3}' -f $installException.Message, $_.Exception.Message, $state, $retainedOriginalSuffix), $installException)
+                throw $exception
             }
-            throw $installError
+            $state = Get-PshFileTransactionPathStateText -SourceName 'stage' -SourcePath $Stage -Destination $Destination -Backup $backup
+            $exception = New-Object IO.IOException(('staged install failed ({0}); rollback restored the destination; {1}' -f $installException.Message, $state), $installException)
+            throw $exception
         }
     }
     finally {
@@ -1603,7 +1682,9 @@ function Install-PshStagedEntry {
                 Remove-PshLiteralEntry -Path $backup
             }
             catch {
-                throw ('replacement committed, but the original destination backup remains at: {0} ({1})' -f $backup, $_.Exception.Message)
+                $state = Get-PshFileTransactionPathStateText -SourceName 'stage' -SourcePath $Stage -Destination $Destination -Backup $backup
+                $exception = New-Object IO.IOException(('replacement committed, but backup cleanup failed ({0}); {1}' -f $_.Exception.Message, $state), $_.Exception)
+                throw $exception
             }
         }
     }
@@ -1621,9 +1702,13 @@ function Replace-PshFileEntry {
         [Parameter(Mandatory = $true)]
         [string]$Destination,
 
-        [switch]$RetainBackup
+        [switch]$RetainBackup,
+
+        [AllowNull()]
+        [string]$BackupPath
     )
 
+    $explicitBackup = $PSBoundParameters.ContainsKey('BackupPath')
     $destinationItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
     if ($null -eq $destinationItem) {
         throw ('replacement destination does not exist: {0}' -f $Destination)
@@ -1634,10 +1719,37 @@ function Replace-PshFileEntry {
     }
 
     if ($destinationType -eq 'link') {
+        if ($explicitBackup) { throw 'an explicit replacement backup path is unsupported for a link destination.' }
         return Install-PshStagedEntry -Stage $Replacement -Destination $Destination -RetainBackup:$RetainBackup
     }
 
-    $backup = New-PshSiblingTemporaryPath -Destination $Destination -Purpose 'replace-backup'
+    if ($explicitBackup) {
+        if ([string]::IsNullOrWhiteSpace($BackupPath)) { throw 'an explicit replacement backup path cannot be empty.' }
+        $backup = Resolve-PshFileSystemPath -Path $BackupPath -AllowMissing
+        if ([IO.File]::Exists($backup) -or [IO.Directory]::Exists($backup)) {
+            throw ('the explicit replacement backup path already exists: {0}' -f $backup)
+        }
+        if ((Test-PshPathEqual -Left $backup -Right $Destination) -or
+            (Test-PshPathEqual -Left $backup -Right $Replacement) -or
+            (Test-PshPathEqual -Left $Destination -Right $Replacement)) {
+            throw 'the explicit replacement backup path must differ from the replacement and destination paths.'
+        }
+        $destinationFullPath = [IO.Path]::GetFullPath($Destination)
+        $replacementFullPath = [IO.Path]::GetFullPath($Replacement)
+        $backupParent = [IO.Path]::GetDirectoryName($backup)
+        $destinationParent = [IO.Path]::GetDirectoryName($destinationFullPath)
+        $replacementParent = [IO.Path]::GetDirectoryName($replacementFullPath)
+        if ([string]::IsNullOrWhiteSpace($backupParent) -or
+            [string]::IsNullOrWhiteSpace($destinationParent) -or
+            [string]::IsNullOrWhiteSpace($replacementParent) -or
+            -not (Test-PshPathEqual -Left $backupParent -Right $destinationParent) -or
+            -not (Test-PshPathEqual -Left $replacementParent -Right $destinationParent)) {
+            throw 'the replacement, destination, and explicit backup paths must be siblings.'
+        }
+    }
+    else {
+        $backup = New-PshSiblingTemporaryPath -Destination $Destination -Purpose 'replace-backup'
+    }
     $replaced = $false
     try {
         try {
@@ -1645,7 +1757,15 @@ function Replace-PshFileEntry {
             $replaced = $true
         }
         catch [PlatformNotSupportedException] {
+            if ($explicitBackup) {
+                return Install-PshStagedEntry -Stage $Replacement -Destination $Destination -RetainBackup:$RetainBackup -BackupPath $backup
+            }
             return Install-PshStagedEntry -Stage $Replacement -Destination $Destination -RetainBackup:$RetainBackup
+        }
+        catch {
+            $state = Get-PshFileTransactionPathStateText -SourceName 'replacement' -SourcePath $Replacement -Destination $Destination -Backup $backup
+            $exception = New-Object IO.IOException(('atomic replacement failed ({0}); {1}' -f $_.Exception.Message, $state), $_.Exception)
+            throw $exception
         }
     }
     finally {

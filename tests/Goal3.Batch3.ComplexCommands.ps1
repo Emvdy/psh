@@ -330,6 +330,12 @@ try {
     [IO.File]::WriteAllText($sedPath, "alpha one`nbeta two`nbeta beta`nomega", $utf8NoBom)
     $sedSubstitute = Invoke-PshBatch3Command -Name sed -Arguments @('s/beta/B/g', $sedPath) -CountsAsBehavior
     Assert-PshBatch3 ($sedSubstitute.ExitCode -eq 0 -and (Normalize-PshBatch3Text ($sedSubstitute.Output -join "`n")) -eq "alpha one`nB two`nB B`nomega") 'sed substitution/global behavior failed.'
+    $sedPipelinePrint = Invoke-PshBatch3Command -Name sed -Arguments @('-n', 'p') -PipelineInput @('a') -UsePipeline
+    Assert-PshBatch3 ($sedPipelinePrint.ExitCode -eq 0 -and ($sedPipelinePrint.Output -join '') -eq 'a') ('sed -n p did not print pipeline input. ExitCode={0}; Output.Count={1}; Output={2}' -f $sedPipelinePrint.ExitCode, $sedPipelinePrint.Output.Count, (Format-PshBatch3DiagnosticStrings $sedPipelinePrint.Output))
+    $sedSameValueFilePath = Join-Path $fixtureRoot 'sed same-value source.txt'
+    [IO.File]::WriteAllText($sedSameValueFilePath, 'a', $utf8NoBom)
+    $sedSameValueFilePrint = Invoke-PshBatch3Command -Name sed -Arguments @('-n', 's/a/a/p', $sedSameValueFilePath)
+    Assert-PshBatch3 ($sedSameValueFilePrint.ExitCode -eq 0 -and ($sedSameValueFilePrint.Output -join '') -eq 'a') ('sed s///p did not print a same-value substitution from a file. ExitCode={0}; Output.Count={1}; Output={2}' -f $sedSameValueFilePrint.ExitCode, $sedSameValueFilePrint.Output.Count, (Format-PshBatch3DiagnosticStrings $sedSameValueFilePrint.Output))
     $sedSameValuePrint = Invoke-PshBatch3Command -Name sed -Arguments @('-n', 's/a/a/p') -PipelineInput @('a') -UsePipeline
     Assert-PshBatch3 ($sedSameValuePrint.ExitCode -eq 0 -and ($sedSameValuePrint.Output -join '') -eq 'a') ('sed s///p did not print a successful substitution when the replacement produced the same text. ExitCode={0}; Output.Count={1}; Output={2}' -f $sedSameValuePrint.ExitCode, $sedSameValuePrint.Output.Count, (Format-PshBatch3DiagnosticStrings $sedSameValuePrint.Output))
     $sedLineAddress = Invoke-PshBatch3Command -Name sed -Arguments @('-n', '2p', $sedPath)

@@ -3138,6 +3138,311 @@ function ConvertTo-PshEncodedTextBytes {
     return $result
 }
 
+function Test-PshTextByteSequenceEqual {
+    param(
+        [AllowNull()]
+        [byte[]]$Left,
+
+        [AllowNull()]
+        [byte[]]$Right
+    )
+
+    if ($null -eq $Left) { $Left = [byte[]]@() }
+    if ($null -eq $Right) { $Right = [byte[]]@() }
+    if ($Left.Length -ne $Right.Length) { return $false }
+    for ($index = 0; $index -lt $Left.Length; $index++) {
+        if ($Left[$index] -ne $Right[$index]) { return $false }
+    }
+    return $true
+}
+
+function Test-PshTextFileBytesEqual {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]]$ExpectedBytes
+    )
+
+    if (-not [IO.File]::Exists($Path)) { return $false }
+    try {
+        return (Test-PshTextByteSequenceEqual -Left ([IO.File]::ReadAllBytes($Path)) -Right $ExpectedBytes)
+    }
+    catch { return $false }
+}
+
+function Write-PshWindowsSecuredFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]]$Bytes,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Acl
+    )
+
+    $stream = $null
+    try {
+        $sharing = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, $sharing)
+        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $Acl -ErrorAction Stop
+        if ($Bytes.Length -gt 0) { $stream.Write($Bytes, 0, $Bytes.Length) }
+        $stream.Flush()
+    }
+    finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Set-PshWindowsFileSecurityExactly {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Acl,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Sddl
+    )
+
+    Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $Acl -ErrorAction Stop
+    $actualSddl = [string](Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path -ErrorAction Stop).Sddl
+    if (-not [string]::Equals($actualSddl, $Sddl, [StringComparison]::Ordinal)) {
+        throw ('Windows security descriptor verification failed for {0}: expected {1}; actual {2}.' -f $Path, $Sddl, $actualSddl)
+    }
+}
+
+function Assert-PshWindowsTextFileState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]]$ExpectedBytes,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSddl
+    )
+
+    if (-not (Test-PshTextFileBytesEqual -Path $Path -ExpectedBytes $ExpectedBytes)) {
+        throw ('file content verification failed for: {0}' -f $Path)
+    }
+    $actualSddl = [string](Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path -ErrorAction Stop).Sddl
+    if (-not [string]::Equals($actualSddl, $ExpectedSddl, [StringComparison]::Ordinal)) {
+        throw ('Windows security descriptor verification failed for {0}: expected {1}; actual {2}.' -f $Path, $ExpectedSddl, $actualSddl)
+    }
+}
+
+function Remove-PshTextTransactionArtifact {
+    param(
+        [AllowNull()]
+        [string]$Path,
+
+        [switch]$Required
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [IO.File]::Exists($Path)) {
+        if ($Required) { throw ('required transaction artifact is unavailable: {0}' -f $Path) }
+        return
+    }
+    [IO.File]::Delete($Path)
+    if ([IO.File]::Exists($Path)) { throw ('transaction artifact could not be removed: {0}' -f $Path) }
+}
+
+function Get-PshTextOriginalContentPaths {
+    param(
+        [AllowEmptyCollection()]
+        [string[]]$Paths = @(),
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]]$OriginalBytes
+    )
+
+    $seen = @{}
+    $matches = @()
+    foreach ($candidate in @($Paths)) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        $fullPath = [IO.Path]::GetFullPath($candidate)
+        if ($seen.ContainsKey($fullPath)) { continue }
+        $seen[$fullPath] = $true
+        if (Test-PshTextFileBytesEqual -Path $fullPath -ExpectedBytes $OriginalBytes) { $matches += $fullPath }
+    }
+    return $matches
+}
+
+function Restore-PshWindowsTextFileTransaction {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OriginalBackupPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FailedVersionBackupPath,
+
+        [AllowNull()]
+        [string]$StagePath,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]]$OriginalBytes,
+
+        [Parameter(Mandatory = $true)]
+        [object]$SourceAcl,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SourceSddl
+    )
+
+    $rollbackInstallError = $null
+    $originalBackupWasPresent = [IO.File]::Exists($OriginalBackupPath) -or [IO.Directory]::Exists($OriginalBackupPath)
+    if ($originalBackupWasPresent) {
+        if (-not [IO.File]::Exists($OriginalBackupPath)) {
+            $rollbackInstallError = 'the original backup path is not a file.'
+        }
+        else {
+            try {
+                if ([IO.File]::Exists($Path) -or [IO.Directory]::Exists($Path)) {
+                    [void](Install-PshStagedEntry -Stage $OriginalBackupPath -Destination $Path -RetainBackup -BackupPath $FailedVersionBackupPath)
+                }
+                else {
+                    Move-PshLiteralEntry -Source $OriginalBackupPath -Destination $Path
+                }
+            }
+            catch { $rollbackInstallError = $_.Exception.Message }
+        }
+    }
+
+    $verificationError = $null
+    if (Test-PshTextFileBytesEqual -Path $Path -ExpectedBytes $OriginalBytes) {
+        try {
+            Set-PshWindowsFileSecurityExactly -Path $Path -Acl $SourceAcl -Sddl $SourceSddl
+            Assert-PshWindowsTextFileState -Path $Path -ExpectedBytes $OriginalBytes -ExpectedSddl $SourceSddl
+        }
+        catch { $verificationError = $_.Exception.Message }
+    }
+    else {
+        $verificationError = 'the destination does not contain the original bytes.'
+    }
+
+    if ($originalBackupWasPresent -and
+        ([IO.File]::Exists($OriginalBackupPath) -or [IO.Directory]::Exists($OriginalBackupPath))) {
+        $notConsumedError = 'the original backup was not consumed by the rollback.'
+        if ([string]::IsNullOrWhiteSpace($verificationError)) { $verificationError = $notConsumedError }
+        else { $verificationError = '{0} {1}' -f $verificationError, $notConsumedError }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($verificationError)) {
+        try {
+            Remove-PshTextTransactionArtifact -Path $FailedVersionBackupPath
+            Remove-PshTextTransactionArtifact -Path $StagePath
+            return
+        }
+        catch {
+            throw ('the original file is restored and verified at {0}, but rollback artifact cleanup failed: {1}' -f $Path, $_.Exception.Message)
+        }
+    }
+
+    $candidatePaths = @(Get-PshTextOriginalContentPaths -Paths @($Path, $OriginalBackupPath, $FailedVersionBackupPath, $StagePath) -OriginalBytes $OriginalBytes)
+    $recoveryError = $null
+    if ($candidatePaths.Count -eq 0) {
+        $recoveryPath = New-PshSiblingTemporaryPath -Destination $Path -Purpose 'sed-recovery'
+        try {
+            Write-PshWindowsSecuredFile -Path $recoveryPath -Bytes $OriginalBytes -Acl $SourceAcl
+            Assert-PshWindowsTextFileState -Path $recoveryPath -ExpectedBytes $OriginalBytes -ExpectedSddl $SourceSddl
+            $candidatePaths = @($recoveryPath)
+        }
+        catch {
+            $recoveryError = $_.Exception.Message
+            if (Test-PshTextFileBytesEqual -Path $recoveryPath -ExpectedBytes $OriginalBytes) {
+                $candidatePaths = @($recoveryPath)
+            }
+        }
+    }
+
+    $rollbackContext = if ([string]::IsNullOrWhiteSpace($rollbackInstallError)) { '' } else { ' Rollback install error: {0}.' -f $rollbackInstallError }
+    $verificationContext = if ([string]::IsNullOrWhiteSpace($verificationError)) { '' } else { ' Verification error: {0}.' -f $verificationError }
+    if ($candidatePaths.Count -gt 0) {
+        throw ('rollback did not restore and verify the destination.{0}{1} Original content is retained at: {2}' -f $rollbackContext, $verificationContext, ($candidatePaths -join ', '))
+    }
+    throw ('rollback did not restore and verify the destination.{0}{1} No verified original-content path remains, and recovery copy creation failed: {2}' -f $rollbackContext, $verificationContext, $recoveryError)
+}
+
+function Set-PshWindowsTextFileAtomically {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [byte[]]$Bytes
+    )
+
+    $originalBytes = [byte[]][IO.File]::ReadAllBytes($Path)
+    $sourceAcl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $sourceSddl = [string]$sourceAcl.Sddl
+    $stagePath = New-PshSiblingTemporaryPath -Destination $Path -Purpose 'sed'
+    $originalBackupPath = New-PshSiblingTemporaryPath -Destination $Path -Purpose 'sed-original'
+    $failedVersionBackupPath = New-PshSiblingTemporaryPath -Destination $Path -Purpose 'sed-failed'
+    $replaceAttempted = $false
+    $committed = $false
+    $rollbackSucceeded = $false
+    $primaryError = $null
+    $rollbackError = $null
+    $cleanupError = $null
+
+    try {
+        [IO.File]::WriteAllBytes($stagePath, $Bytes)
+        $replaceAttempted = $true
+        [void](Replace-PshFileEntry -Replacement $stagePath -Destination $Path -RetainBackup -BackupPath $originalBackupPath)
+        if (-not [IO.File]::Exists($originalBackupPath)) { throw ('the retained original backup is unavailable: {0}' -f $originalBackupPath) }
+        Set-PshWindowsFileSecurityExactly -Path $Path -Acl $sourceAcl -Sddl $sourceSddl
+        Assert-PshWindowsTextFileState -Path $Path -ExpectedBytes $Bytes -ExpectedSddl $sourceSddl
+        Remove-PshTextTransactionArtifact -Path $originalBackupPath -Required
+        $committed = $true
+    }
+    catch {
+        $primaryError = $_.Exception.Message
+        if ($replaceAttempted) {
+            try {
+                Restore-PshWindowsTextFileTransaction -Path $Path -OriginalBackupPath $originalBackupPath -FailedVersionBackupPath $failedVersionBackupPath -StagePath $stagePath -OriginalBytes $originalBytes -SourceAcl $sourceAcl -SourceSddl $sourceSddl
+                $rollbackSucceeded = $true
+            }
+            catch { $rollbackError = $_.Exception.Message }
+        }
+    }
+    finally {
+        if ((-not $replaceAttempted -or $committed -or $rollbackSucceeded) -and [IO.File]::Exists($stagePath)) {
+            try { Remove-PshTextTransactionArtifact -Path $stagePath }
+            catch { $cleanupError = $_.Exception.Message }
+        }
+    }
+
+    if ($null -ne $rollbackError) {
+        $artifacts = @(@($stagePath, $originalBackupPath, $failedVersionBackupPath) | Where-Object { [IO.File]::Exists($_) })
+        $artifactText = if ($artifacts.Count -eq 0) { '<none>' } else { $artifacts -join ', ' }
+        throw ('Windows sed transaction failed ({0}); rollback failed ({1}); retained transaction paths: {2}' -f $primaryError, $rollbackError, $artifactText)
+    }
+    if ($null -ne $primaryError) {
+        if ($null -ne $cleanupError) {
+            throw ('Windows sed transaction failed ({0}); original content remains or was restored at {1}; cleanup failed ({2})' -f $primaryError, $Path, $cleanupError)
+        }
+        throw $primaryError
+    }
+    if ($null -ne $cleanupError) {
+        throw ('Windows sed replacement committed, but staging cleanup failed: {0}' -f $cleanupError)
+    }
+}
+
 function Set-PshTextFileAtomically {
     param(
         [Parameter(Mandatory = $true)]
@@ -3151,34 +3456,34 @@ function Set-PshTextFileAtomically {
     )
 
     $isWindows = $env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\'
+    $encodedBytes = [byte[]](ConvertTo-PshEncodedTextBytes -Text $Text -EncodingName $EncodingName)
+    if ($isWindows) {
+        Set-PshWindowsTextFileAtomically -Path $Path -Bytes $encodedBytes
+        return
+    }
+
     [Reflection.MethodInfo]$getUnixFileMode = $null
     [Reflection.MethodInfo]$setUnixFileMode = $null
     $sourceUnixFileMode = $null
-    if (-not $isWindows) {
-        $getUnixFileMode = [Reflection.MethodInfo]@([IO.File].GetMethods() | Where-Object {
-            $_.Name -ceq 'GetUnixFileMode' -and $_.IsStatic -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType -eq [string]
-        } | Select-Object -First 1)[0]
-        $setUnixFileMode = [Reflection.MethodInfo]@([IO.File].GetMethods() | Where-Object {
-            $_.Name -ceq 'SetUnixFileMode' -and $_.IsStatic -and $_.GetParameters().Count -eq 2 -and $_.GetParameters()[0].ParameterType -eq [string]
-        } | Select-Object -First 1)[0]
-        if ($null -ne $getUnixFileMode -and $null -ne $setUnixFileMode) {
-            $sourceUnixFileMode = $getUnixFileMode.Invoke($null, [object[]](,[string]$Path))
-        }
-        else {
-            throw 'cannot preserve Unix file permissions because GetUnixFileMode/SetUnixFileMode is unavailable.'
-        }
+    $getUnixFileMode = [Reflection.MethodInfo]@([IO.File].GetMethods() | Where-Object {
+        $_.Name -ceq 'GetUnixFileMode' -and $_.IsStatic -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType -eq [string]
+    } | Select-Object -First 1)[0]
+    $setUnixFileMode = [Reflection.MethodInfo]@([IO.File].GetMethods() | Where-Object {
+        $_.Name -ceq 'SetUnixFileMode' -and $_.IsStatic -and $_.GetParameters().Count -eq 2 -and $_.GetParameters()[0].ParameterType -eq [string]
+    } | Select-Object -First 1)[0]
+    if ($null -ne $getUnixFileMode -and $null -ne $setUnixFileMode) {
+        $sourceUnixFileMode = $getUnixFileMode.Invoke($null, [object[]](,[string]$Path))
+    }
+    else {
+        throw 'cannot preserve Unix file permissions because GetUnixFileMode/SetUnixFileMode is unavailable.'
     }
 
     $temporaryPath = New-PshSiblingTemporaryPath -Destination $Path -Purpose 'sed'
     try {
-        [IO.File]::WriteAllBytes($temporaryPath, [byte[]](ConvertTo-PshEncodedTextBytes -Text $Text -EncodingName $EncodingName))
-        # On Windows, ReplaceFile preserves the destination descriptor; applying it
-        # to the staged file first can turn inherited ACEs into explicit entries.
-        if ($null -ne $sourceUnixFileMode) {
-            $modeType = $setUnixFileMode.GetParameters()[1].ParameterType
-            $typedMode = [Enum]::ToObject($modeType, [int]$sourceUnixFileMode)
-            [void]$setUnixFileMode.Invoke($null, [object[]]@([string]$temporaryPath, $typedMode))
-        }
+        [IO.File]::WriteAllBytes($temporaryPath, $encodedBytes)
+        $modeType = $setUnixFileMode.GetParameters()[1].ParameterType
+        $typedMode = [Enum]::ToObject($modeType, [int]$sourceUnixFileMode)
+        [void]$setUnixFileMode.Invoke($null, [object[]]@([string]$temporaryPath, $typedMode))
         Replace-PshFileEntry -Replacement $temporaryPath -Destination $Path
     }
     finally {
@@ -3321,10 +3626,10 @@ function Read-PshSedProgram {
         $replacement = Read-PshSedDelimitedText -Script $Script -Index $Index -Delimiter $delimiter -Context 'substitution replacement'
         if ([string]::IsNullOrEmpty($pattern)) { Throw-PshTextUsageError 'empty sed substitution patterns are unsupported.' }
         try {
-            $program.Regex = New-PshSearchRegex -Pattern $pattern -Basic:(-not $Extended)
+            $program['Regex'] = New-PshSearchRegex -Pattern $pattern -Basic:(-not $Extended)
         }
         catch { Throw-PshTextUsageError $_.Exception.Message }
-        $groupNumbers = [int[]]$program.Regex.GetGroupNumbers()
+        $groupNumbers = [int[]]$program['Regex'].GetGroupNumbers()
         for ($replacementIndex = 0; $replacementIndex -lt $replacement.Length; $replacementIndex++) {
             if ($replacement[$replacementIndex] -ne '\' -or ($replacementIndex + 1) -ge $replacement.Length) { continue }
             $replacementIndex++
@@ -3336,12 +3641,12 @@ function Read-PshSedProgram {
                 }
             }
         }
-        $program.Replacement = $replacement
+        $program['Replacement'] = $replacement
         while ($Index.Value -lt $Script.Length -and $Script[$Index.Value] -ne ';' -and -not [char]::IsWhiteSpace($Script[$Index.Value])) {
             $flag = [string]$Script[$Index.Value]
             $Index.Value++
-            if ($flag -ceq 'g' -and -not $program.Global) { $program.Global = $true }
-            elseif ($flag -ceq 'p' -and -not $program.PrintOnSubstitution) { $program.PrintOnSubstitution = $true }
+            if ($flag -ceq 'g' -and -not [bool]$program['Global']) { $program['Global'] = $true }
+            elseif ($flag -ceq 'p' -and -not [bool]$program['PrintOnSubstitution']) { $program['PrintOnSubstitution'] = $true }
             else { Throw-PshTextUsageError ('unsupported sed substitution flag "{0}".' -f $flag) }
         }
     }
