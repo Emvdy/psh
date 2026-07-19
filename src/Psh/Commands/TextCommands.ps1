@@ -3822,7 +3822,13 @@ function Invoke-PshSedPrograms {
     )
 
     foreach ($program in $Programs) { $program.RangeActive = $false }
-    $lines = if ($PSBoundParameters.ContainsKey('Records')) { @($Records) } else { @(Split-PshTextLines -Text $Text) }
+    [object[]]$lines = @()
+    if ($PSBoundParameters.ContainsKey('Records')) {
+        $lines = [object[]]@($Records)
+    }
+    else {
+        $lines = [object[]]@(Split-PshTextLines -Text $Text)
+    }
     $builder = New-Object Text.StringBuilder
     $quit = $false
     for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
@@ -3937,7 +3943,7 @@ function sed {
                     [void]$records.Add([PSCustomObject]@{ Text = [string]$sourceRecords[$recordIndex].Text; Terminator = $terminator })
                 }
             }
-            $result = Invoke-PshSedPrograms -Programs $programs -Records @($records) -NoAutoPrint:$noAutoPrint
+            $result = Invoke-PshSedPrograms -Programs $programs -Records ([object[]]$records.ToArray()) -NoAutoPrint:$noAutoPrint
             Write-PshTextValue -Text ([string]$result.Text)
         }
         Set-PshLastExitCode -Code 0

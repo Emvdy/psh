@@ -111,6 +111,44 @@ function Test-PshBatch3ByteSequence {
     return $true
 }
 
+function Format-PshBatch3ByteDiagnostic {
+    param(
+        [AllowNull()][byte[]]$Actual,
+        [AllowNull()][byte[]]$Expected
+    )
+
+    [byte[]]$actualValues = @()
+    [byte[]]$expectedValues = @()
+    if ($null -ne $Actual) { $actualValues = [byte[]]$Actual }
+    if ($null -ne $Expected) { $expectedValues = [byte[]]$Expected }
+
+    $firstMismatch = -1
+    $sharedLength = [Math]::Min($actualValues.Length, $expectedValues.Length)
+    for ($index = 0; $index -lt $sharedLength; $index++) {
+        if ($actualValues[$index] -ne $expectedValues[$index]) {
+            $firstMismatch = $index
+            break
+        }
+    }
+    if ($firstMismatch -lt 0 -and $actualValues.Length -ne $expectedValues.Length) {
+        $firstMismatch = $sharedLength
+    }
+
+    $actualHex = if ($actualValues.Length -eq 0) { '<empty>' } else { [BitConverter]::ToString($actualValues) }
+    $expectedHex = if ($expectedValues.Length -eq 0) { '<empty>' } else { [BitConverter]::ToString($expectedValues) }
+    $actualBase64 = if ($actualValues.Length -eq 0) { '<empty>' } else { [Convert]::ToBase64String($actualValues) }
+    $expectedBase64 = if ($expectedValues.Length -eq 0) { '<empty>' } else { [Convert]::ToBase64String($expectedValues) }
+    $mismatchText = '<none>'
+    if ($firstMismatch -ge 0) {
+        $actualValue = if ($firstMismatch -lt $actualValues.Length) { '0x{0:X2}' -f $actualValues[$firstMismatch] } else { '<missing>' }
+        $expectedValue = if ($firstMismatch -lt $expectedValues.Length) { '0x{0:X2}' -f $expectedValues[$firstMismatch] } else { '<missing>' }
+        $mismatchText = '{0} (actual={1}; expected={2})' -f $firstMismatch, $actualValue, $expectedValue
+    }
+
+    return ('actual length={0}, hex={1}, base64={2}; expected length={3}, hex={4}, base64={5}; first mismatch={6}' -f
+        $actualValues.Length, $actualHex, $actualBase64, $expectedValues.Length, $expectedHex, $expectedBase64, $mismatchText)
+}
+
 function ConvertTo-PshBatch3EncodedBytes {
     param(
         [Parameter(Mandatory = $true)][string]$Text,
@@ -401,8 +439,10 @@ try {
     $sedMetadataWriteTimeBefore = [IO.File]::GetLastWriteTimeUtc($sedMetadataPath)
     $isWindowsPlatform = $env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\'
     $sedMetadataBefore = $null
+    $sedUtf8BomSddlBefore = '<not-windows>'
     if ($isWindowsPlatform) {
         $sedMetadataBefore = [string](Get-Acl -LiteralPath $sedMetadataPath -ErrorAction Stop).Sddl
+        $sedUtf8BomSddlBefore = [string](Get-Acl -LiteralPath $sedUtf8BomPath -ErrorAction Stop).Sddl
     }
     else {
         & '/bin/chmod' '640' $sedMetadataPath
@@ -415,9 +455,16 @@ try {
     $sedUtf16Edit = Invoke-PshBatch3Command -Name sed -Arguments @('-i', 's/blue/BLUE/', $sedUtf16Path)
     $sedUtf8NoBomEdit = Invoke-PshBatch3Command -Name sed -Arguments @('-i', 's/right/RIGHT/', $sedUtf8NoBomPath)
     $sedMetadataEdit = Invoke-PshBatch3Command -Name sed -Arguments @('-i', 's/metadata/METADATA/', $sedMetadataPath)
-    Assert-PshBatch3 ($sedUtf8BomEdit.ExitCode -eq 0 -and $sedUtf8BomEdit.Output.Count -eq 0 -and (Test-PshBatch3ByteSequence ([IO.File]::ReadAllBytes($sedUtf8BomPath)) $sedUtf8BomAfter)) 'sed -i did not preserve UTF-8 BOM, CRLF, or no-final-newline bytes.'
-    Assert-PshBatch3 ($sedUtf16Edit.ExitCode -eq 0 -and $sedUtf16Edit.Output.Count -eq 0 -and (Test-PshBatch3ByteSequence ([IO.File]::ReadAllBytes($sedUtf16Path)) $sedUtf16After)) 'sed -i did not preserve UTF-16LE encoding and line endings.'
-    Assert-PshBatch3 ($sedUtf8NoBomEdit.ExitCode -eq 0 -and $sedUtf8NoBomEdit.Output.Count -eq 0 -and (Test-PshBatch3ByteSequence ([IO.File]::ReadAllBytes($sedUtf8NoBomPath)) $sedUtf8NoBomAfter)) 'sed -i did not preserve UTF-8 no-BOM and CRLF bytes.'
+    [byte[]]$sedUtf8BomActual = @()
+    [byte[]]$sedUtf16Actual = @()
+    [byte[]]$sedUtf8NoBomActual = @()
+    if ([IO.File]::Exists($sedUtf8BomPath)) { $sedUtf8BomActual = [byte[]][IO.File]::ReadAllBytes($sedUtf8BomPath) }
+    if ([IO.File]::Exists($sedUtf16Path)) { $sedUtf16Actual = [byte[]][IO.File]::ReadAllBytes($sedUtf16Path) }
+    if ([IO.File]::Exists($sedUtf8NoBomPath)) { $sedUtf8NoBomActual = [byte[]][IO.File]::ReadAllBytes($sedUtf8NoBomPath) }
+    $sedUtf8BomSddlAfter = if ($isWindowsPlatform -and [IO.File]::Exists($sedUtf8BomPath)) { [string](Get-Acl -LiteralPath $sedUtf8BomPath -ErrorAction Stop).Sddl } else { '<unavailable>' }
+    Assert-PshBatch3 ($sedUtf8BomEdit.ExitCode -eq 0 -and $sedUtf8BomEdit.Output.Count -eq 0 -and (Test-PshBatch3ByteSequence $sedUtf8BomActual $sedUtf8BomAfter)) ('sed -i did not preserve UTF-8 BOM, CRLF, or no-final-newline bytes. ExitCode={0}; Output={1}; Bytes={2}; SddlBefore={3}; SddlAfter={4}' -f $sedUtf8BomEdit.ExitCode, (Format-PshBatch3DiagnosticStrings $sedUtf8BomEdit.Output), (Format-PshBatch3ByteDiagnostic -Actual $sedUtf8BomActual -Expected $sedUtf8BomAfter), $sedUtf8BomSddlBefore, $sedUtf8BomSddlAfter)
+    Assert-PshBatch3 ($sedUtf16Edit.ExitCode -eq 0 -and $sedUtf16Edit.Output.Count -eq 0 -and (Test-PshBatch3ByteSequence $sedUtf16Actual $sedUtf16After)) ('sed -i did not preserve UTF-16LE encoding and line endings. ExitCode={0}; Output={1}; Bytes={2}' -f $sedUtf16Edit.ExitCode, (Format-PshBatch3DiagnosticStrings $sedUtf16Edit.Output), (Format-PshBatch3ByteDiagnostic -Actual $sedUtf16Actual -Expected $sedUtf16After))
+    Assert-PshBatch3 ($sedUtf8NoBomEdit.ExitCode -eq 0 -and $sedUtf8NoBomEdit.Output.Count -eq 0 -and (Test-PshBatch3ByteSequence $sedUtf8NoBomActual $sedUtf8NoBomAfter)) ('sed -i did not preserve UTF-8 no-BOM and CRLF bytes. ExitCode={0}; Output={1}; Bytes={2}' -f $sedUtf8NoBomEdit.ExitCode, (Format-PshBatch3DiagnosticStrings $sedUtf8NoBomEdit.Output), (Format-PshBatch3ByteDiagnostic -Actual $sedUtf8NoBomActual -Expected $sedUtf8NoBomAfter))
     Assert-PshBatch3 ($sedMetadataEdit.ExitCode -eq 0 -and [IO.File]::ReadAllText($sedMetadataPath, $utf8NoBom) -ceq 'METADATA value') 'sed -i metadata fixture edit failed.'
     Assert-PshBatch3 ([IO.File]::GetLastWriteTimeUtc($sedMetadataPath) -gt $sedMetadataWriteTimeBefore) 'sed -i restored the stale source mtime instead of recording the edit.'
     if ($isWindowsPlatform) {
