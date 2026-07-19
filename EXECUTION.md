@@ -11,7 +11,7 @@ condition has direct evidence.
 | Goal 0 | COMPLETE | `1f87695` | Safety baseline and repository |
 | Goal 1 | COMPLETE | `83ed21f` | Module and machine-readable specification |
 | Goal 2 | COMPLETE | `20a4e59` | Amendment 1 closeout merged to `main`; final branch and main CI green |
-| Goal 3 | IN_PROGRESS | - | Goal 2 prerequisite met; Batch 1 is in progress |
+| Goal 3 | IN_PROGRESS | - | Goal 2 prerequisite met; Batch 1 is complete; Batch 2 is pending |
 | Goal 4 | PENDING | - | Blocked on Goal 3 DoneWhen |
 | Goal 5 | PENDING | - | Blocked on Goal 4 DoneWhen |
 | Goal 6 | PENDING | - | Blocked on Goal 5 DoneWhen |
@@ -389,7 +389,7 @@ Started: 2026-07-19 (Asia/Shanghai)
 
 | Batch | Scope | Status |
 | --- | --- | --- |
-| 1 | File commands | IN_PROGRESS |
+| 1 | File commands | COMPLETE |
 | 2 | Text search | PENDING |
 | 3 | Complex `sed`/`awk`/`jq`/`xargs` | PENDING |
 | 4 | System/network/archive | PENDING |
@@ -406,8 +406,37 @@ CI before the next batch begins. Goal 3 is not complete.
   at least one behavior test appropriate to its tier; Tier 1 text commands pass
   golden comparison; Core/Full differences are documented.
 
+### Batch 1 Evidence
+
+- Implementation head: `0281ff712dcc761804a7709ea1904e1745ab2883` (`fix:
+  handle Windows link metadata and empty output`). The batch changes preserve
+  strict configuration snapshots, project built-in aliases across caller
+  scopes, and use reparse-safe Windows link and move transactions.
+- CI run: <https://github.com/Emvdy/psh/actions/runs/29696568353>, head
+  `0281ff712dcc761804a7709ea1904e1745ab2883`, conclusion `success`.
+- CI jobs, all conclusion `success`:
+  - [GNU Tier 1 goldens](https://github.com/Emvdy/psh/actions/runs/29696568353/job/88218227648)
+    generated and uploaded the deterministic golden artifact.
+  - [Windows PowerShell 5.1](https://github.com/Emvdy/psh/actions/runs/29696568353/job/88218243914)
+    ran the Batch 1 validation and regression suite.
+  - [PowerShell 7](https://github.com/Emvdy/psh/actions/runs/29696568353/job/88218243919)
+    ran the same Batch 1 validation and regression suite.
+- Implemented file commands (21): `pwd`, `cd`, `ls`, `mkdir`, `rmdir`, `cp`,
+  `mv`, `rm`, `touch`, `ln`, `realpath`, `basename`, `dirname`, `stat`, `file`,
+  `tree`, `find`, `fd`, `du`, `df`, and `mktemp`.
+- Validation summary: FileCommands covered all 21 commands with 374
+  assertions; the GNU golden contract was rerun locally with 418 assertions;
+  AliasScope passed 16 assertions; Config passed 80 assertions. The same
+  branch CI also passed Goal 1 and Goal 2 regressions, the dependency verifier,
+  generated-artifact `-Check`, PowerShell AST validation for 29 files,
+  `actionlint`, and `git diff --check`.
+- Batch 1 safety coverage includes binary and line-ending preservation,
+  Unicode and space-containing paths, destructive-directory containment,
+  collision and disabled-command restore behavior, symbolic-link metadata and
+  target preservation, and empty golden-output handling.
+
 ### Remaining Work
 
-Complete Batch 1 implementation, tests, commit, and CI; then proceed to Batches
-2 through 4 in order. Do not mark Goal 3 complete before all four batch gates
-pass.
+Proceed to Batch 2 (text search) with its own implementation, tests, commit, and
+green CI gate; then complete Batches 3 and 4 in order. Do not mark Goal 3
+complete before all four batch gates pass.
