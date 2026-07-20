@@ -141,6 +141,34 @@ function Get-PshSystemEnvironmentLines {
     return $lines
 }
 
+function Get-PshSystemAssignedEnvironmentLines {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$Names
+    )
+
+    $comparison = if (Test-PshSystemWindowsPlatform) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    $orderedNames = @()
+    foreach ($name in $Names) {
+        $alreadyOrdered = $false
+        foreach ($orderedName in $orderedNames) {
+            if ([string]::Equals([string]$orderedName, [string]$name, $comparison)) {
+                $alreadyOrdered = $true
+                break
+            }
+        }
+        if (-not $alreadyOrdered) { $orderedNames += [string]$name }
+    }
+
+    $lines = @()
+    foreach ($name in $orderedNames) {
+        $state = Get-PshSystemEnvironmentEntry -Name ([string]$name)
+        if ($state.Exists) { $lines += ('{0}={1}' -f [string]$name, [string]$state.Value) }
+    }
+    return $lines
+}
+
 function Write-PshSystemNullTerminatedValues {
     param(
         [Parameter(Mandatory = $true)]
@@ -413,7 +441,10 @@ function env {
         }
 
         if ($null -eq $commandName) {
-            $lines = @(Get-PshSystemEnvironmentLines)
+            $lines = if ($ignoreEnvironment) {
+                @(Get-PshSystemAssignedEnvironmentLines -Names ([string[]]$assignmentNames))
+            }
+            else { @(Get-PshSystemEnvironmentLines) }
             if ($nullOutput) { Write-PshSystemNullTerminatedValues -Values $lines }
             else { foreach ($line in $lines) { Microsoft.PowerShell.Utility\Write-Output ([string]$line) } }
             Set-PshLastExitCode -Code 0

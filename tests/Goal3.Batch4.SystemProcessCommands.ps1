@@ -361,10 +361,18 @@ try {
     foreach ($name in @($envAlpha, $envZeta, $envRestore)) { [void]$environmentNames.Add($name) }
     [Environment]::SetEnvironmentVariable($envRestore, 'original value', 'Process')
 
+    $envInherited = Invoke-PshBatch4Command -Name env
+    $envInheritedSorted = @($envInherited.Output)
+    [Array]::Sort($envInheritedSorted, [StringComparer]::Ordinal)
+    Assert-PshBatch4 ($envInherited.ExitCode -eq 0 -and (Test-PshBatch4StringArray $envInherited.Output $envInheritedSorted) -and $envInherited.Output -contains ($envRestore + '=original value')) 'env inherited output lost ordinal determinism or the current process environment.'
     $envClean = Invoke-PshBatch4Command -Name env -Arguments @('-i', ($envZeta + '=two'), ($envAlpha + '=one')) -CountsAsBehavior
-    Assert-PshBatch4 ($envClean.ExitCode -eq 0 -and (Test-PshBatch4StringArray $envClean.Output @(('{0}=one' -f $envAlpha), ('{0}=two' -f $envZeta)))) 'env -i assignments were not isolated and ordinally sorted.'
+    Assert-PshBatch4 ($envClean.ExitCode -eq 0 -and (Test-PshBatch4StringArray $envClean.Output @(('{0}=two' -f $envZeta), ('{0}=one' -f $envAlpha)))) 'env -i did not preserve explicit assignment order.'
+    $envCleanReverse = Invoke-PshBatch4Command -Name env -Arguments @('-i', ($envAlpha + '=one'), ($envZeta + '=two'))
+    Assert-PshBatch4 ($envCleanReverse.ExitCode -eq 0 -and (Test-PshBatch4StringArray $envCleanReverse.Output @(('{0}=one' -f $envAlpha), ('{0}=two' -f $envZeta)))) 'env -i did not preserve reversed explicit assignment order.'
+    $envCleanDuplicate = Invoke-PshBatch4Command -Name env -Arguments @('-i', ($envZeta + '=first'), ($envAlpha + '=middle'), ($envZeta + '=last'))
+    Assert-PshBatch4 ($envCleanDuplicate.ExitCode -eq 0 -and (Test-PshBatch4StringArray $envCleanDuplicate.Output @(('{0}=last' -f $envZeta), ('{0}=middle' -f $envAlpha)))) 'env -i duplicate assignment did not keep its first position with the final value.'
     $envNull = Invoke-PshBatch4Command -Name env -Arguments @('-0', '-i', ($envZeta + '=two'), ($envAlpha + '=one'))
-    $expectedEnvNull = [byte[]]$utf8NoBom.GetBytes(('{0}=one{1}{2}=two{1}' -f $envAlpha, [char]0, $envZeta))
+    $expectedEnvNull = [byte[]]$utf8NoBom.GetBytes(('{0}=two{1}{2}=one{1}' -f $envZeta, [char]0, $envAlpha))
     Assert-PshBatch4 ($envNull.ExitCode -eq 0 -and $envNull.Output.Count -eq 0 -and (Test-PshBatch4ByteSequence $envNull.RawBytes $expectedEnvNull)) 'env -0 did not emit exact UTF-8 NUL-delimited bytes.'
     $envSuccess = Invoke-PshBatch4Command -Name env -Arguments @(($envRestore + '=temporary value'), 'Psh\printenv', $envRestore)
     Assert-PshBatch4 ($envSuccess.ExitCode -eq 0 -and $envSuccess.Output.Count -eq 1 -and $envSuccess.Output[0] -ceq 'temporary value') 'env did not run a command with its temporary assignment.'
