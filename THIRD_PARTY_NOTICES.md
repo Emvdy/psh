@@ -5,7 +5,7 @@
 
 This file is generated from `tools/native-tools.lock.json` and the pinned PSReadLine lock.
 Lock manifest created: `2026-07-20T00:00:00Z`.
-Lock namespace seed: `goal4-full-tools-supply-chain-v1`; deterministic summary SHA256: `363982c776d410f141551808f8f9e9f42532ba909e187ff46216bc078786e0f0`.
+Lock namespace seed: `goal4-full-tools-supply-chain-v1`; deterministic summary SHA256: `1cd062f042777a4cdc570ddd1d85b2562532473d7f95de21e8603f7544bcda64`.
 Source repository, release tag, and resolved commit are provenance records. The GitHub release objects were observed with `immutable=false`; numeric asset IDs and SHA256 values pin the selected bytes as far as the upstream metadata permits. No reproducible-build claim is made.
 
 ## PSReadLine
@@ -130,7 +130,7 @@ Source repository, release tag, and resolved commit are provenance records. The 
 | `licenses/ripgrep-15.2.0/LICENSE-MIT` | <https://raw.githubusercontent.com/BurntSushi/ripgrep/e89fff89ac9af12e8d4ce9d5fd07beb408ca730f/LICENSE-MIT> | `0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f` |
 | `licenses/ripgrep-15.2.0/UNLICENSE` | <https://raw.githubusercontent.com/BurntSushi/ripgrep/e89fff89ac9af12e8d4ce9d5fd07beb408ca730f/UNLICENSE> | `7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c` |
 
-- Runtime version probe: `--version`; expected pattern `^ripgrep 15\.2\.0$`
+- Runtime version probe: `--version`; expected pattern `^ripgrep 15\.2\.0 \(rev e89fff89ac\)$`
 - GitHub release metadata observed `immutable=false`; version-pinned URLs and SHA256 values are recorded, but this is not a claim of immutable release storage or reproducible builds.
 
 #### win-x64

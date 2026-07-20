@@ -231,7 +231,7 @@
       },
       "versionProbe": {
         "arguments": ["--version"],
-        "pattern": "^ripgrep 15\\.2\\.0$"
+        "pattern": "^ripgrep 15\\.2\\.0 \\(rev e89fff89ac\\)$"
       },
       "artifacts": {
         "win-x64": {

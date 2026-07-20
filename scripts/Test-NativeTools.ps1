@@ -195,7 +195,7 @@ foreach ($tool in @($lock.tools)) {
     Assert-PshNativeTest ((@($tool.versionProbe.arguments | ForEach-Object { [string]$_ }) -join '|') -ceq '--version') "$name version probe arguments changed."
     $expectedPattern = '^' + [regex]::Escape($name) + ' ' + [regex]::Escape($pin.Version) + '$'
     if ($name -ceq 'bat') { $expectedPattern = '^bat ' + [regex]::Escape($pin.Version) + ' \(' + [regex]::Escape($pin.Commit.Substring(0, 7)) + '\)$' }
-    if ($name -ceq 'rg') { $expectedPattern = '^ripgrep ' + [regex]::Escape($pin.Version) + '$' }
+    if ($name -ceq 'rg') { $expectedPattern = '^ripgrep ' + [regex]::Escape($pin.Version) + ' \(rev ' + [regex]::Escape($pin.Commit.Substring(0, 10)) + '\)$' }
     if ($name -ceq 'jq') { $expectedPattern = '^jq-' + [regex]::Escape($pin.Version) + '$' }
     Assert-PshNativeTest ([string]$tool.versionProbe.pattern -ceq $expectedPattern) "$name version probe pattern changed."
 
