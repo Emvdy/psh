@@ -5,7 +5,7 @@
 
 This file is generated from `tools/native-tools.lock.json` and the pinned PSReadLine lock.
 Lock manifest created: `2026-07-20T00:00:00Z`.
-Lock namespace seed: `goal4-full-tools-supply-chain-v1`; deterministic summary SHA256: `2902232a28a27efed41ecd5c69e2b14ddaf9c6b2e673f6bd0fba9e278f0e26e5`.
+Lock namespace seed: `goal4-full-tools-supply-chain-v1`; deterministic summary SHA256: `363982c776d410f141551808f8f9e9f42532ba909e187ff46216bc078786e0f0`.
 Source repository, release tag, and resolved commit are provenance records. The GitHub release objects were observed with `immutable=false`; numeric asset IDs and SHA256 values pin the selected bytes as far as the upstream metadata permits. No reproducible-build claim is made.
 
 ## PSReadLine
@@ -29,7 +29,7 @@ Source repository, release tag, and resolved commit are provenance records. The 
 | `licenses/bat-0.26.1/LICENSE-MIT` | <https://raw.githubusercontent.com/sharkdp/bat/979ba22628bc9d8171f2cffca2bd5c90c9fc0a9e/LICENSE-MIT> | `dccda9eb9533f5c65624a1106536c6cfde46008d58e60b3faf154e8b9fd5b46e` |
 | `licenses/bat-0.26.1/NOTICE` | <https://raw.githubusercontent.com/sharkdp/bat/979ba22628bc9d8171f2cffca2bd5c90c9fc0a9e/NOTICE> | `dd46bdeebfdf5e0e55dd0b4636eff2bfbb8f8efeaea018ed86814710a23c1bda` |
 
-- Runtime version probe: `--version`; expected pattern `^bat 0\.26\.1$`
+- Runtime version probe: `--version`; expected pattern `^bat 0\.26\.1 \(979ba22\)$`
 - GitHub release metadata observed `immutable=false`; version-pinned URLs and SHA256 values are recorded, but this is not a claim of immutable release storage or reproducible builds.
 
 #### win-x64

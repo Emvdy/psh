@@ -119,7 +119,7 @@ jobs:
                   $probeOutput = $probeLines -join "`n"
                   $probeFirstLine = if ($probeLines.Count -eq 0) { '' } else { ([string]$probeLines[0]).Trim() }
                   if ($probeExitCode -ne 0 -or $probeLines.Count -eq 0 -or $probeFirstLine -notmatch [string]$entry.versionProbe.pattern) {
-                      throw ('Pinned {0} version probe failed: {1}' -f $entry.name, $probeOutput)
+                      throw ('Pinned {0} version probe failed (exit {1}, expected {2}, first line {3}): {4}' -f $entry.name, $probeExitCode, [string]$entry.versionProbe.pattern, $probeFirstLine, $probeOutput)
                   }
                   $wrapperCommand = Get-Command -Name ([string]$entry.name) -CommandType Function -ErrorAction Stop
                   if ([string]$wrapperCommand.ModuleName -cne 'Psh') { throw ('Public Psh wrapper is not active for {0}.' -f $entry.name) }
@@ -128,7 +128,7 @@ jobs:
                   $wrapperOutput = $wrapperLines -join "`n"
                   $wrapperFirstLine = if ($wrapperLines.Count -eq 0) { '' } else { ([string]$wrapperLines[0]).Trim() }
                   if ($wrapperExitCode -ne 0 -or $wrapperLines.Count -eq 0 -or $wrapperFirstLine -notmatch [string]$entry.versionProbe.pattern) {
-                      throw ('Public Psh {0} wrapper version probe failed: {1}' -f $entry.name, $wrapperOutput)
+                      throw ('Public Psh {0} wrapper version probe failed (exit {1}, expected {2}, first line {3}): {4}' -f $entry.name, $wrapperExitCode, [string]$entry.versionProbe.pattern, $wrapperFirstLine, $wrapperOutput)
                   }
                   $report.tools += [ordered]@{ name = [string]$entry.name; capability = $capability; path = $toolPath; probeOutput = $probeOutput; wrapperProbeOutput = $wrapperOutput }
               }
@@ -257,7 +257,7 @@ jobs:
                   $probeOutput = $probeLines -join "`n"
                   $probeFirstLine = if ($probeLines.Count -eq 0) { '' } else { ([string]$probeLines[0]).Trim() }
                   if ($probeExitCode -ne 0 -or $probeLines.Count -eq 0 -or $probeFirstLine -notmatch [string]$entry.versionProbe.pattern) {
-                      throw ('Pinned {0} version probe failed: {1}' -f $entry.name, $probeOutput)
+                      throw ('Pinned {0} version probe failed (exit {1}, expected {2}, first line {3}): {4}' -f $entry.name, $probeExitCode, [string]$entry.versionProbe.pattern, $probeFirstLine, $probeOutput)
                   }
                   $wrapperCommand = Get-Command -Name ([string]$entry.name) -CommandType Function -ErrorAction Stop
                   if ([string]$wrapperCommand.ModuleName -cne 'Psh') { throw ('Public Psh wrapper is not active for {0}.' -f $entry.name) }
@@ -266,7 +266,7 @@ jobs:
                   $wrapperOutput = $wrapperLines -join "`n"
                   $wrapperFirstLine = if ($wrapperLines.Count -eq 0) { '' } else { ([string]$wrapperLines[0]).Trim() }
                   if ($wrapperExitCode -ne 0 -or $wrapperLines.Count -eq 0 -or $wrapperFirstLine -notmatch [string]$entry.versionProbe.pattern) {
-                      throw ('Public Psh {0} wrapper version probe failed: {1}' -f $entry.name, $wrapperOutput)
+                      throw ('Public Psh {0} wrapper version probe failed (exit {1}, expected {2}, first line {3}): {4}' -f $entry.name, $wrapperExitCode, [string]$entry.versionProbe.pattern, $wrapperFirstLine, $wrapperOutput)
                   }
                   $report.tools += [ordered]@{ name = [string]$entry.name; capability = $capability; path = $toolPath; probeOutput = $probeOutput; wrapperProbeOutput = $wrapperOutput }
               }

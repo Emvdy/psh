@@ -40,7 +40,7 @@
       },
       "versionProbe": {
         "arguments": ["--version"],
-        "pattern": "^bat 0\\.26\\.1$"
+        "pattern": "^bat 0\\.26\\.1 \\(979ba22\\)$"
       },
       "artifacts": {
         "win-x64": {

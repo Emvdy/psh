@@ -34,8 +34,8 @@ function Get-PshGoal4Property {
 function Get-PshGoal4Array {
     param([AllowNull()][object]$InputObject, [Parameter(Mandatory = $true)][string]$Name)
     $value = Get-PshGoal4Property -InputObject $InputObject -Name $Name
-    if ($null -eq $value) { return @() }
-    return @($value)
+    if ($null -eq $value) { return (, @()) }
+    return (, @($value))
 }
 
 function ConvertTo-PshGoal4UtcTimestamp {
@@ -326,7 +326,8 @@ foreach ($tool in $tools) {
 
 $interactiveText = Get-PshGoal4StrictText -Path $interactiveLockPath
 $interactiveLock = $interactiveText | ConvertFrom-Json
-$psReadLine = @((Get-PshGoal4Array -InputObject $interactiveLock -Name 'components') | Where-Object { [string](Get-PshGoal4Property $_ 'name') -ceq 'PSReadLine' })[0]
+$interactiveComponents = Get-PshGoal4Array -InputObject $interactiveLock -Name 'components'
+$psReadLine = @($interactiveComponents | Where-Object { [string](Get-PshGoal4Property $_ 'name') -ceq 'PSReadLine' })[0]
 Assert-PshGoal4 ($null -ne $psReadLine) 'PSReadLine is missing from interactive lock.'
 $psLicense = Get-PshGoal4Property $psReadLine 'license'
 $psLicensePath = Resolve-PshGoal4RelativePath -Root $repositoryRootPath -RelativePath ([string](Get-PshGoal4Property $psLicense 'vendoredPath')) -Description 'PSReadLine license path'
@@ -390,7 +391,8 @@ foreach ($tool in $tools) {
 $jqTool = @($tools | Where-Object { [string](Get-PshGoal4Property $_ 'name') -ceq 'jq' })[0]
 Assert-PshGoal4 ($null -ne $jqTool) 'jq is missing from the lock.'
 $jqLicense = Get-PshGoal4Property $jqTool 'license'
-$jqCopying = @((Get-PshGoal4Array -InputObject $jqLicense -Name 'files') | Where-Object { [IO.Path]::GetFileName([string](Get-PshGoal4Property $_ 'path')) -ceq 'COPYING' })[0]
+$jqLicenseFiles = Get-PshGoal4Array -InputObject $jqLicense -Name 'files'
+$jqCopying = @($jqLicenseFiles | Where-Object { [IO.Path]::GetFileName([string](Get-PshGoal4Property $_ 'path')) -ceq 'COPYING' })[0]
 Assert-PshGoal4 ($null -ne $jqCopying) 'jq COPYING is missing from the lock.'
 $jqCopyingPath = Resolve-PshGoal4RelativePath -Root $repositoryRootPath -RelativePath ([string](Get-PshGoal4Property $jqCopying 'path')) -Description 'jq COPYING path'
 $jqCopyingText = Get-PshGoal4StrictText -Path $jqCopyingPath
@@ -466,12 +468,15 @@ foreach ($tool in $tools) {
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         $artifact = Get-PshGoal4Artifact -Tool $tool -Name 'win-x64'
         $path = Resolve-PshGoal4RelativePath -Root (Join-Path $repositoryRootPath 'tools') -RelativePath ([string](Get-PshGoal4Property $artifact 'installedPath')) -Description "$name version probe path"
-        $probeLines = @(& $path @((Get-PshGoal4Array -InputObject $probe -Name 'arguments')) 2>&1 | ForEach-Object { [string]$_ })
+        $probeArguments = Get-PshGoal4Array -InputObject $probe -Name 'arguments'
+        $probeLines = @(& $path @probeArguments 2>&1 | ForEach-Object { [string]$_ })
         $probeExitCode = [int]$LASTEXITCODE
-        Assert-PshGoal4 ($probeExitCode -eq 0) "$name --version failed."
+        $probeOutput = $probeLines -join "`n"
+        Assert-PshGoal4 ($probeExitCode -eq 0) "$name --version failed with exit $probeExitCode. Output: $probeOutput"
         Assert-PshGoal4 ($probeLines.Count -gt 0) "$name --version returned no output."
         $probeFirstLine = ([string]$probeLines[0]).Trim()
-        Assert-PshGoal4 ($probeFirstLine -match [string](Get-PshGoal4Property $probe 'pattern')) "$name --version first line did not match the pinned pattern."
+        $probePattern = [string](Get-PshGoal4Property $probe 'pattern')
+        Assert-PshGoal4 ($probeFirstLine -match $probePattern) "$name --version first line '$probeFirstLine' did not match '$probePattern'. Full output: $probeOutput"
     }
 }
 

@@ -256,8 +256,8 @@ function Get-PshArrayProperty {
     )
 
     $value = Get-PshProperty -InputObject $InputObject -Name $Name
-    if ($null -eq $value) { return @() }
-    return @($value)
+    if ($null -eq $value) { return (, @()) }
+    return (, @($value))
 }
 
 function Get-PshArtifact {
@@ -440,7 +440,8 @@ function New-PshNativeNoticeLines {
         [void]$Lines.Add(('| `{0}` | <{1}> | `{2}` |' -f (ConvertTo-PshMarkdownCell ([string](Get-PshProperty $licenseFile 'path'))), [string](Get-PshProperty $licenseFile 'sourceUrl'), [string](Get-PshProperty $licenseFile 'sha256')))
     }
     [void]$Lines.Add('')
-    $probeArgs = @((Get-PshArrayProperty -InputObject $probe -Name 'arguments') | ForEach-Object { '`' + (ConvertTo-PshMarkdownCell ([string]$_)) + '`' }) -join ' '
+    $probeArguments = Get-PshArrayProperty -InputObject $probe -Name 'arguments'
+    $probeArgs = @(foreach ($argument in $probeArguments) { '`' + (ConvertTo-PshMarkdownCell ([string]$argument)) + '`' }) -join ' '
     [void]$Lines.Add(('- Runtime version probe: {0}; expected pattern `{1}`' -f $probeArgs, (ConvertTo-PshMarkdownCell ([string](Get-PshProperty $probe 'pattern')))))
     [void]$Lines.Add('- GitHub release metadata observed `immutable=false`; version-pinned URLs and SHA256 values are recorded, but this is not a claim of immutable release storage or reproducible builds.')
     [void]$Lines.Add('')
@@ -479,7 +480,8 @@ function New-PshThirdPartyNotices {
     [void]$lines.Add('')
     [void]$lines.Add('## PSReadLine')
     [void]$lines.Add('')
-    $component = @((Get-PshArrayProperty -InputObject $InteractiveLock -Name 'components') | Where-Object { [string](Get-PshProperty $_ 'name') -ceq 'PSReadLine' })[0]
+    $components = Get-PshArrayProperty -InputObject $InteractiveLock -Name 'components'
+    $component = @($components | Where-Object { [string](Get-PshProperty $_ 'name') -ceq 'PSReadLine' })[0]
     Assert-PshCondition ($null -ne $component) 'PSReadLine is missing from interactive.lock.json.'
     $repository = Get-PshProperty $component 'repository'
     $package = Get-PshProperty $component 'package'
@@ -564,7 +566,8 @@ function New-PshSpdxDocument {
     $relationships = New-Object 'System.Collections.Generic.List[object]'
     $extracted = New-Object 'System.Collections.Generic.List[object]'
 
-    $psComponent = @((Get-PshArrayProperty -InputObject $InteractiveLock -Name 'components') | Where-Object { [string](Get-PshProperty $_ 'name') -ceq 'PSReadLine' })[0]
+    $interactiveComponents = Get-PshArrayProperty -InputObject $InteractiveLock -Name 'components'
+    $psComponent = @($interactiveComponents | Where-Object { [string](Get-PshProperty $_ 'name') -ceq 'PSReadLine' })[0]
     Assert-PshCondition ($null -ne $psComponent) 'PSReadLine is missing from interactive.lock.json.'
     $psLicense = Get-PshProperty $psComponent 'license'
     $psPackage = Get-PshProperty $psComponent 'package'
@@ -639,10 +642,12 @@ function New-PshSpdxDocument {
         }
     }
 
-    $jqTool = @((Get-PshArrayProperty -InputObject $Lock -Name 'tools') | Where-Object { [string](Get-PshProperty $_ 'name') -ceq 'jq' })[0]
+    $lockTools = Get-PshArrayProperty -InputObject $Lock -Name 'tools'
+    $jqTool = @($lockTools | Where-Object { [string](Get-PshProperty $_ 'name') -ceq 'jq' })[0]
     $jqLicense = if ($null -eq $jqTool) { '' } else { [string](Get-PshProperty (Get-PshProperty $jqTool 'license') 'declaredSpdx') }
     if ($jqLicense -match 'LicenseRef-jq-embedded-notices') {
-        $jqCopying = @((Get-PshArrayProperty -InputObject (Get-PshProperty $jqTool 'license') -Name 'files') | Where-Object { [IO.Path]::GetFileName([string](Get-PshProperty $_ 'path')) -ceq 'COPYING' })[0]
+        $jqLicenseFiles = Get-PshArrayProperty -InputObject (Get-PshProperty $jqTool 'license') -Name 'files'
+        $jqCopying = @($jqLicenseFiles | Where-Object { [IO.Path]::GetFileName([string](Get-PshProperty $_ 'path')) -ceq 'COPYING' })[0]
         Assert-PshCondition ($null -ne $jqCopying) 'jq LicenseRef requires a retained COPYING file.'
         $jqCopyingRelativePath = [string](Get-PshProperty $jqCopying 'path')
         $jqCopyingPath = Resolve-PshRepositoryPath -RepositoryRootPath $RepositoryRootPath -RelativePath $jqCopyingRelativePath -Description 'jq COPYING path'
@@ -696,7 +701,8 @@ $validated = Assert-PshLock -Lock $lock -RepositoryRootPath $repositoryRootPath
 $interactiveText = Get-PshStrictUtf8Text -Path ([IO.Path]::GetFullPath($InteractiveLockPath))
 try { $interactiveLock = $interactiveText | ConvertFrom-Json -ErrorAction Stop }
 catch { Throw-PshSupplyChainError ('Interactive lock JSON is invalid: {0}' -f $_.Exception.Message) }
-$psReadLineComponent = @((Get-PshArrayProperty -InputObject $interactiveLock -Name 'components') | Where-Object { [string](Get-PshProperty $_ 'name') -ceq 'PSReadLine' })[0]
+$interactiveComponents = Get-PshArrayProperty -InputObject $interactiveLock -Name 'components'
+$psReadLineComponent = @($interactiveComponents | Where-Object { [string](Get-PshProperty $_ 'name') -ceq 'PSReadLine' })[0]
 Assert-PshCondition ($null -ne $psReadLineComponent) 'PSReadLine is missing from interactive.lock.json.'
 $psReadLineLicense = Get-PshProperty $psReadLineComponent 'license'
 $psReadLineLicensePath = Resolve-PshRepositoryPath -RepositoryRootPath $repositoryRootPath -RelativePath ([string](Get-PshProperty $psReadLineLicense 'vendoredPath')) -Description 'PSReadLine vendored license path'
