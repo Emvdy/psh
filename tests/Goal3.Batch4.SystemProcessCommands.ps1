@@ -14,6 +14,7 @@ $testRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('psh-goal3-ba
 $configRoot = Join-Path $testRoot 'local app data'
 $fixtureRoot = Join-Path $testRoot 'fixtures with spaces'
 $processRoot = Join-Path $testRoot 'process fixtures'
+$timeoutNativeHelperAssemblyPath = Join-Path $processRoot 'PshBatch4.TimeoutNativeHelper.dll'
 $originalLocalAppData = $env:LOCALAPPDATA
 $originalEdition = $env:PSH_EDITION
 $originalLocation = (Get-Location).ProviderPath
@@ -313,10 +314,243 @@ function Assert-PshBatch4ExactProcessIds {
     Assert-PshBatch4 $equal ('{0} selected unexpected PIDs. Expected <{1}>, actual <{2}>.' -f $Context, ($wanted -join ','), ($actual -join ','))
 }
 
+function New-PshBatch4TimeoutNativeHelperAssembly {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # Explicitly carry timeout's output pipes into the Windows grandchild;
+    # standard-handle inheritance differs between the supported runtimes.
+    $source = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class PshBatch4TimeoutNativeChildProcess
+{
+    private const int STD_OUTPUT_HANDLE = -11;
+    private const int STD_ERROR_HANDLE = -12;
+    private const uint DUPLICATE_SAME_ACCESS = 0x00000002;
+    private const uint FILE_TYPE_PIPE = 0x00000003;
+    private const uint GENERIC_READ = 0x80000000;
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint FILE_SHARE_WRITE = 0x00000002;
+    private const uint OPEN_EXISTING = 3;
+    private const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
+    private const uint STARTF_USESTDHANDLES = 0x00000100;
+    private const uint CREATE_NO_WINDOW = 0x08000000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SECURITY_ATTRIBUTES
+    {
+        public int nLength;
+        public IntPtr lpSecurityDescriptor;
+        public int bInheritHandle;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct STARTUPINFO
+    {
+        public int cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public uint dwX;
+        public uint dwY;
+        public uint dwXSize;
+        public uint dwYSize;
+        public uint dwXCountChars;
+        public uint dwYCountChars;
+        public uint dwFillAttribute;
+        public uint dwFlags;
+        public short wShowWindow;
+        public short cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public uint dwProcessId;
+        public uint dwThreadId;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int standardHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetFileType(IntPtr handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DuplicateHandle(
+        IntPtr sourceProcessHandle,
+        IntPtr sourceHandle,
+        IntPtr targetProcessHandle,
+        out IntPtr targetHandle,
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        uint options);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern IntPtr CreateFileW(
+        string fileName,
+        uint desiredAccess,
+        uint shareMode,
+        ref SECURITY_ATTRIBUTES securityAttributes,
+        uint creationDisposition,
+        uint flagsAndAttributes,
+        IntPtr templateFile);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateProcessW(
+        string applicationName,
+        StringBuilder commandLine,
+        IntPtr processAttributes,
+        IntPtr threadAttributes,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
+        uint creationFlags,
+        IntPtr environment,
+        string currentDirectory,
+        ref STARTUPINFO startupInfo,
+        out PROCESS_INFORMATION processInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    private static bool IsInvalidHandle(IntPtr handle)
+    {
+        return handle == IntPtr.Zero || handle == new IntPtr(-1);
+    }
+
+    private static void AssertPipeHandle(IntPtr handle, string name)
+    {
+        if (IsInvalidHandle(handle))
+        {
+            throw new InvalidOperationException(name + " is not available.");
+        }
+        if (GetFileType(handle) != FILE_TYPE_PIPE)
+        {
+            throw new InvalidOperationException(name + " is not a pipe.");
+        }
+    }
+
+    private static void CloseOwnedHandle(IntPtr handle)
+    {
+        if (!IsInvalidHandle(handle))
+        {
+            CloseHandle(handle);
+        }
+    }
+
+    public static int Start(string executablePath, string encodedCommand)
+    {
+        if (String.IsNullOrEmpty(executablePath) || executablePath.IndexOf('"') >= 0)
+        {
+            throw new ArgumentException("The executable path is invalid.", "executablePath");
+        }
+        if (String.IsNullOrEmpty(encodedCommand))
+        {
+            throw new ArgumentException("The encoded command is required.", "encodedCommand");
+        }
+
+        IntPtr borrowedStdout = GetStdHandle(STD_OUTPUT_HANDLE);
+        IntPtr borrowedStderr = GetStdHandle(STD_ERROR_HANDLE);
+        AssertPipeHandle(borrowedStdout, "stdout");
+        AssertPipeHandle(borrowedStderr, "stderr");
+
+        IntPtr inheritedStdout = IntPtr.Zero;
+        IntPtr inheritedStderr = IntPtr.Zero;
+        IntPtr inheritedStdin = new IntPtr(-1);
+        PROCESS_INFORMATION processInformation = new PROCESS_INFORMATION();
+        try
+        {
+            IntPtr currentProcess = GetCurrentProcess();
+            if (!DuplicateHandle(currentProcess, borrowedStdout, currentProcess, out inheritedStdout, 0, true, DUPLICATE_SAME_ACCESS))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to duplicate stdout for inheritance.");
+            }
+            if (!DuplicateHandle(currentProcess, borrowedStderr, currentProcess, out inheritedStderr, 0, true, DUPLICATE_SAME_ACCESS))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to duplicate stderr for inheritance.");
+            }
+
+            SECURITY_ATTRIBUTES securityAttributes = new SECURITY_ATTRIBUTES();
+            securityAttributes.nLength = Marshal.SizeOf(typeof(SECURITY_ATTRIBUTES));
+            securityAttributes.bInheritHandle = 1;
+            inheritedStdin = CreateFileW(
+                "NUL",
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                ref securityAttributes,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                IntPtr.Zero);
+            if (IsInvalidHandle(inheritedStdin))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to open inherited NUL stdin.");
+            }
+
+            STARTUPINFO startupInfo = new STARTUPINFO();
+            startupInfo.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+            startupInfo.dwFlags = STARTF_USESTDHANDLES;
+            startupInfo.hStdInput = inheritedStdin;
+            startupInfo.hStdOutput = inheritedStdout;
+            startupInfo.hStdError = inheritedStderr;
+
+            StringBuilder commandLine = new StringBuilder(executablePath.Length + encodedCommand.Length + 80);
+            commandLine.Append('"');
+            commandLine.Append(executablePath);
+            commandLine.Append("\" -NoLogo -NoProfile -NonInteractive -EncodedCommand ");
+            commandLine.Append(encodedCommand);
+
+            if (!CreateProcessW(
+                executablePath,
+                commandLine,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                true,
+                CREATE_NO_WINDOW,
+                IntPtr.Zero,
+                null,
+                ref startupInfo,
+                out processInformation))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Unable to start the inheriting timeout grandchild.");
+            }
+            return checked((int)processInformation.dwProcessId);
+        }
+        finally
+        {
+            CloseOwnedHandle(processInformation.hThread);
+            CloseOwnedHandle(processInformation.hProcess);
+            CloseOwnedHandle(inheritedStdin);
+            CloseOwnedHandle(inheritedStderr);
+            CloseOwnedHandle(inheritedStdout);
+        }
+    }
+}
+'@
+
+    [void](Add-Type -TypeDefinition $source -OutputAssembly $Path -OutputType Library -ErrorAction Stop)
+}
+
 try {
     [void][IO.Directory]::CreateDirectory($fixtureRoot)
     [void][IO.Directory]::CreateDirectory($configRoot)
     [void][IO.Directory]::CreateDirectory($processRoot)
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        New-PshBatch4TimeoutNativeHelperAssembly -Path $timeoutNativeHelperAssemblyPath
+    }
     if (-not [string]::IsNullOrWhiteSpace($GoldenRoot)) {
         Assert-PshBatch4 ([IO.Directory]::Exists($GoldenRoot)) ('GNU golden root does not exist: {0}' -f $GoldenRoot)
     }
@@ -678,19 +912,29 @@ if ($Mode -ceq 'sleep') {
     exit 0
 }
 if ($Mode -ceq 'inherit-output') {
-    if ($args.Count -ne 4) { exit 2 }
+    if ($args.Count -ne 5) { exit 2 }
     $readyPathBase64 = [Convert]::ToBase64String($encoding.GetBytes([string]$args[1]))
     $grandchildCommand = '$stdoutBytes=[Text.Encoding]::UTF8.GetBytes("GRANDCHILD-PIPE-READY`n");$stdout=[Console]::OpenStandardOutput();$stdout.Write($stdoutBytes,0,$stdoutBytes.Length);$stdout.Flush();$stderrBytes=[Text.Encoding]::UTF8.GetBytes("GRANDCHILD-PIPE-ERR-READY`n");$stderr=[Console]::OpenStandardError();$stderr.Write($stderrBytes,0,$stderrBytes.Length);$stderr.Flush();$readyPath=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{0}"));[IO.File]::WriteAllText($readyPath,"ready");Start-Sleep -Seconds {1}' -f $readyPathBase64, ([int]$args[3])
     $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($grandchildCommand))
-    $startInfo = New-Object Diagnostics.ProcessStartInfo
-    $startInfo.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-    $startInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encodedCommand
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $grandchild = New-Object Diagnostics.Process
-    $grandchild.StartInfo = $startInfo
-    if (-not $grandchild.Start()) { exit 3 }
-    [IO.File]::WriteAllText([string]$args[0], [string]$grandchild.Id, $encoding)
+    $grandchild = $null
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [void][Reflection.Assembly]::LoadFrom([string]$args[4])
+        $executablePath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $grandchildPid = [PshBatch4TimeoutNativeChildProcess]::Start($executablePath, $encodedCommand)
+        $grandchild = [Diagnostics.Process]::GetProcessById($grandchildPid)
+    }
+    else {
+        $startInfo = New-Object Diagnostics.ProcessStartInfo
+        $startInfo.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $startInfo.Arguments = '-NoLogo -NoProfile -NonInteractive -EncodedCommand ' + $encodedCommand
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $grandchild = New-Object Diagnostics.Process
+        $grandchild.StartInfo = $startInfo
+        if (-not $grandchild.Start()) { exit 3 }
+        $grandchildPid = $grandchild.Id
+    }
+    [IO.File]::WriteAllText([string]$args[0], [string]$grandchildPid, $encoding)
     $readyWatch = [Diagnostics.Stopwatch]::StartNew()
     while (-not [IO.File]::Exists([string]$args[1]) -and $readyWatch.ElapsedMilliseconds -lt 10000) {
         if ($grandchild.HasExited) { exit 4 }
@@ -751,7 +995,7 @@ exit 2
     $timeoutDescendantPidPath = Join-Path $processRoot 'timeout-descendant.pid'
     $timeoutDescendantReadyPath = Join-Path $processRoot 'timeout-descendant.ready'
     $timeoutDescendantWatch = [Diagnostics.Stopwatch]::StartNew()
-    $timeoutDescendantResult = Invoke-PshBatch4Command -Name timeout -Arguments @('-k', '100ms', '2s', $timeoutChildScript, 'inherit-output', $timeoutDescendantPidPath, $timeoutDescendantReadyPath, '15', '15')
+    $timeoutDescendantResult = Invoke-PshBatch4Command -Name timeout -Arguments @('-k', '100ms', '3s', $timeoutChildScript, 'inherit-output', $timeoutDescendantPidPath, $timeoutDescendantReadyPath, '15', '15', $timeoutNativeHelperAssemblyPath)
     $timeoutDescendantWatch.Stop()
     $timeoutDescendantText = Get-PshBatch4RawText -Result $timeoutDescendantResult
     $timeoutDescendantCapturedText = $timeoutDescendantText.Replace("`n", '\n')
@@ -776,7 +1020,7 @@ exit 2
     $timeoutInfiniteDescendantPidPath = Join-Path $processRoot 'timeout-infinite-descendant.pid'
     $timeoutInfiniteDescendantReadyPath = Join-Path $processRoot 'timeout-infinite-descendant.ready'
     $timeoutInfiniteDescendantWatch = [Diagnostics.Stopwatch]::StartNew()
-    $timeoutInfiniteDescendantResult = Invoke-PshBatch4Command -Name timeout -Arguments @('inf', $timeoutChildScript, 'inherit-output', $timeoutInfiniteDescendantPidPath, $timeoutInfiniteDescendantReadyPath, '1', '15')
+    $timeoutInfiniteDescendantResult = Invoke-PshBatch4Command -Name timeout -Arguments @('inf', $timeoutChildScript, 'inherit-output', $timeoutInfiniteDescendantPidPath, $timeoutInfiniteDescendantReadyPath, '1', '15', $timeoutNativeHelperAssemblyPath)
     $timeoutInfiniteDescendantWatch.Stop()
     $timeoutInfiniteDescendantText = Get-PshBatch4RawText -Result $timeoutInfiniteDescendantResult
     $timeoutInfiniteDescendantCapturedText = $timeoutInfiniteDescendantText.Replace("`n", '\n')
