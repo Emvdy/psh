@@ -1222,6 +1222,203 @@ function Assert-PshTimeoutOutputTasksSucceeded {
     }
 }
 
+function Initialize-PshTimeoutPipeNativeMethods {
+    if ($null -ne ('PshTimeoutPipeNativeMethods' -as [type])) { return }
+
+    $source = @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class PshTimeoutPipeNativeMethods
+{
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool PeekNamedPipe(
+        SafeFileHandle handle,
+        IntPtr buffer,
+        uint bufferSize,
+        IntPtr bytesRead,
+        out uint totalBytesAvailable,
+        IntPtr bytesLeftThisMessage);
+}
+'@
+    try { [void](Add-Type -TypeDefinition $source -ErrorAction Stop) }
+    catch {
+        if ($null -eq ('PshTimeoutPipeNativeMethods' -as [type])) { throw }
+    }
+}
+
+function Get-PshTimeoutAvailablePipeByteCount {
+    param(
+        [Parameter(Mandatory = $true)][IO.Stream]$Source
+    )
+
+    $safeHandleProperty = $Source.PSObject.Properties['SafeFileHandle']
+    if ($null -eq $safeHandleProperty -or $safeHandleProperty.Value -isnot [Microsoft.Win32.SafeHandles.SafeFileHandle]) {
+        throw 'redirected process output does not expose a Windows pipe handle.'
+    }
+
+    [uint32]$available = 0
+    $peeked = [PshTimeoutPipeNativeMethods]::PeekNamedPipe(
+        [Microsoft.Win32.SafeHandles.SafeFileHandle]$safeHandleProperty.Value,
+        [IntPtr]::Zero,
+        [uint32]0,
+        [IntPtr]::Zero,
+        [ref]$available,
+        [IntPtr]::Zero
+    )
+    if (-not $peeked) {
+        $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        if ($errorCode -in @(109, 232, 233)) { return 0 }
+        throw (New-Object ComponentModel.Win32Exception($errorCode, 'failed to inspect redirected process output.'))
+    }
+    return [long]$available
+}
+
+function Read-PshTimeoutAvailablePipeBytes {
+    param(
+        [Parameter(Mandatory = $true)][IO.Stream]$Source,
+        [Parameter(Mandatory = $true)][IO.Stream]$Destination,
+        [Parameter(Mandatory = $true)][byte[]]$Buffer,
+        [long]$MaximumBytes = [long]::MaxValue
+    )
+
+    $available = Get-PshTimeoutAvailablePipeByteCount -Source $Source
+    if ($available -le 0 -or $MaximumBytes -le 0) { return 0 }
+    $count = [int][Math]::Min([long]$Buffer.Length, [Math]::Min($available, $MaximumBytes))
+    try { $read = $Source.Read($Buffer, 0, $count) }
+    catch [IO.IOException] {
+        $errorCode = $_.Exception.HResult -band 0xffff
+        if ($errorCode -in @(109, 232, 233)) { return 0 }
+        throw
+    }
+    if ($read -le 0) { return 0 }
+    $Destination.Write($Buffer, 0, $read)
+    return $read
+}
+
+function New-PshTimeoutPipeCapture {
+    param(
+        [Parameter(Mandatory = $true)][Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][IO.Stream]$StandardOutputDestination,
+        [Parameter(Mandatory = $true)][IO.Stream]$StandardErrorDestination
+    )
+
+    return [PSCustomObject]@{
+        StandardOutput = $Process.StandardOutput.BaseStream
+        StandardError = $Process.StandardError.BaseStream
+        StandardOutputDestination = $StandardOutputDestination
+        StandardErrorDestination = $StandardErrorDestination
+        StandardOutputBuffer = New-Object byte[] 65536
+        StandardErrorBuffer = New-Object byte[] 65536
+    }
+}
+
+function Read-PshTimeoutAvailableOutput {
+    param(
+        [Parameter(Mandatory = $true)][object]$Capture
+    )
+
+    $stdoutRead = Read-PshTimeoutAvailablePipeBytes `
+        -Source ([IO.Stream]$Capture.StandardOutput) `
+        -Destination ([IO.Stream]$Capture.StandardOutputDestination) `
+        -Buffer ([byte[]]$Capture.StandardOutputBuffer)
+    $stderrRead = Read-PshTimeoutAvailablePipeBytes `
+        -Source ([IO.Stream]$Capture.StandardError) `
+        -Destination ([IO.Stream]$Capture.StandardErrorDestination) `
+        -Buffer ([byte[]]$Capture.StandardErrorBuffer)
+    return $stdoutRead + $stderrRead
+}
+
+function Read-PshTimeoutPipeSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][object]$Capture
+    )
+
+    $stdoutRemaining = Get-PshTimeoutAvailablePipeByteCount -Source ([IO.Stream]$Capture.StandardOutput)
+    $stderrRemaining = Get-PshTimeoutAvailablePipeByteCount -Source ([IO.Stream]$Capture.StandardError)
+    $totalRead = 0L
+    while ($stdoutRemaining -gt 0 -or $stderrRemaining -gt 0) {
+        if ($stdoutRemaining -gt 0) {
+            $read = Read-PshTimeoutAvailablePipeBytes `
+                -Source ([IO.Stream]$Capture.StandardOutput) `
+                -Destination ([IO.Stream]$Capture.StandardOutputDestination) `
+                -Buffer ([byte[]]$Capture.StandardOutputBuffer) `
+                -MaximumBytes $stdoutRemaining
+            if ($read -le 0) { $stdoutRemaining = 0 }
+            else { $stdoutRemaining -= $read; $totalRead += $read }
+        }
+        if ($stderrRemaining -gt 0) {
+            $read = Read-PshTimeoutAvailablePipeBytes `
+                -Source ([IO.Stream]$Capture.StandardError) `
+                -Destination ([IO.Stream]$Capture.StandardErrorDestination) `
+                -Buffer ([byte[]]$Capture.StandardErrorBuffer) `
+                -MaximumBytes $stderrRemaining
+            if ($read -le 0) { $stderrRemaining = 0 }
+            else { $stderrRemaining -= $read; $totalRead += $read }
+        }
+    }
+    return $totalRead
+}
+
+function Wait-PshTimeoutProcessWithPipePolling {
+    param(
+        [Parameter(Mandatory = $true)][Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][object]$Capture,
+        [Parameter(Mandatory = $true)][int]$TimeoutMilliseconds
+    )
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        while ($true) {
+            $bytesRead = Read-PshTimeoutAvailableOutput -Capture $Capture
+            if ($Process.HasExited) { return $true }
+            if ($TimeoutMilliseconds -ge 0 -and $stopwatch.ElapsedMilliseconds -ge $TimeoutMilliseconds) { return $false }
+            if ($bytesRead -gt 0) { continue }
+
+            if ($TimeoutMilliseconds -lt 0) {
+                if ($Process.WaitForExit(10)) { return $true }
+                continue
+            }
+            $remaining = [long]$TimeoutMilliseconds - [long]$stopwatch.ElapsedMilliseconds
+            if ($remaining -le 0) { return $false }
+            $slice = [int][Math]::Min(10L, $remaining)
+            if ($Process.WaitForExit($slice)) { return $true }
+        }
+    }
+    finally { $stopwatch.Stop() }
+}
+
+function Complete-PshTimeoutPipeDrain {
+    param(
+        [Parameter(Mandatory = $true)][object]$Capture,
+        [int]$QuietMilliseconds = 25,
+        [int]$MaximumMilliseconds = 250
+    )
+
+    $total = [Diagnostics.Stopwatch]::StartNew()
+    $quiet = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        while ($true) {
+            $bytesRead = Read-PshTimeoutAvailableOutput -Capture $Capture
+            if ($bytesRead -gt 0) {
+                $quiet.Restart()
+            }
+            if ($total.ElapsedMilliseconds -ge $MaximumMilliseconds) {
+                [void](Read-PshTimeoutPipeSnapshot -Capture $Capture)
+                return
+            }
+            if ($bytesRead -gt 0) { continue }
+            if ($quiet.ElapsedMilliseconds -ge $QuietMilliseconds) { return }
+            [Threading.Thread]::Sleep(5)
+        }
+    }
+    finally {
+        $quiet.Stop()
+        $total.Stop()
+    }
+}
+
 function Close-PshTimeoutOutputPipes {
     param(
         [Parameter(Mandatory = $true)][Diagnostics.Process]$Process
@@ -1265,6 +1462,19 @@ function Resolve-PshTimeoutCommand {
     return [PSCustomObject]@{ Path = [string]$launchPath; Arguments = [string[]]$launchArguments }
 }
 
+function Test-PshTimeoutMissingCommandException {
+    param(
+        [Parameter(Mandatory = $true)][Exception]$Exception
+    )
+
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [ComponentModel.Win32Exception] -and $current.NativeErrorCode -in @(2, 3)) { return $true }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
 function Invoke-PshTimeoutChild {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -1282,20 +1492,7 @@ function Invoke-PshTimeoutChild {
         throw 'timeout requires a FileSystem working directory.'
     }
 
-    # An infinite duration can use the project's tested capture helper directly;
-    # finite durations use the same ProcessStartInfo argument construction with
-    # an explicit watchdog.
-    if ($TimeoutMilliseconds -lt 0) {
-        $capturer = Get-Command -Name Invoke-PshCapturedProcess -CommandType Function -ErrorAction SilentlyContinue
-        if ($null -eq $capturer) { throw 'the captured-process helper is unavailable.' }
-        $result = Invoke-PshCapturedProcess -FilePath $FilePath -Arguments $Arguments -StandardInputBytes ([byte[]]@()) -RedirectStandardInput:$false -WorkingDirectory $workingDirectory
-        return [PSCustomObject]@{
-            ExitCode = [int]$result.ExitCode
-            TimedOut = $false
-            StdOutBytes = [byte[]]$result.StdOutBytes
-            StdErrBytes = [byte[]]$result.StdErrBytes
-        }
-    }
+    $useWindowsPipePolling = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $FilePath
@@ -1316,14 +1513,34 @@ function Invoke-PshTimeoutChild {
     $process.StartInfo = $startInfo
     $stdoutBuffer = New-Object IO.MemoryStream
     $stderrBuffer = New-Object IO.MemoryStream
+    $stdoutStream = $null
+    $stderrStream = $null
+    $pipeCapture = $null
     $stdoutTask = $null
     $stderrTask = $null
     $timedOut = $false
     try {
+        if ($useWindowsPipePolling) {
+            Initialize-PshTimeoutPipeNativeMethods
+        }
         if (-not $process.Start()) { throw ('failed to start process: {0}' -f $FilePath) }
-        $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdoutBuffer)
-        $stderrTask = $process.StandardError.BaseStream.CopyToAsync($stderrBuffer)
-        $completed = $process.WaitForExit($TimeoutMilliseconds)
+        if ($useWindowsPipePolling) {
+            $pipeCapture = New-PshTimeoutPipeCapture `
+                -Process $process `
+                -StandardOutputDestination $stdoutBuffer `
+                -StandardErrorDestination $stderrBuffer
+            $completed = Wait-PshTimeoutProcessWithPipePolling `
+                -Process $process `
+                -Capture $pipeCapture `
+                -TimeoutMilliseconds $TimeoutMilliseconds
+        }
+        else {
+            $stdoutStream = $process.StandardOutput.BaseStream
+            $stderrStream = $process.StandardError.BaseStream
+            $stdoutTask = $stdoutStream.CopyToAsync($stdoutBuffer)
+            $stderrTask = $stderrStream.CopyToAsync($stderrBuffer)
+            $completed = $process.WaitForExit($TimeoutMilliseconds)
+        }
         if (-not $completed) {
             $timedOut = $true
             if ($Signal -in @(1, 2, 15)) {
@@ -1335,31 +1552,52 @@ function Invoke-PshTimeoutChild {
             $waitMilliseconds = $KillAfterMilliseconds
             if ($waitMilliseconds -lt 0) { $waitMilliseconds = 250 }
             $exitedAfterSignal = $false
-            try { $exitedAfterSignal = $process.WaitForExit($waitMilliseconds) } catch { $exitedAfterSignal = $false }
+            if ($useWindowsPipePolling) {
+                $exitedAfterSignal = Wait-PshTimeoutProcessWithPipePolling `
+                    -Process $process `
+                    -Capture $pipeCapture `
+                    -TimeoutMilliseconds $waitMilliseconds
+            }
+            else {
+                try { $exitedAfterSignal = $process.WaitForExit($waitMilliseconds) } catch { $exitedAfterSignal = $false }
+            }
             if (-not $exitedAfterSignal) {
                 try { if (-not $process.HasExited) { [void]$process.Kill() } } catch { }
-                try { $process.WaitForExit(2000) } catch { }
+                if ($useWindowsPipePolling) {
+                    [void](Wait-PshTimeoutProcessWithPipePolling `
+                        -Process $process `
+                        -Capture $pipeCapture `
+                        -TimeoutMilliseconds 2000)
+                }
+                else {
+                    try { $process.WaitForExit(2000) } catch { }
+                }
             }
         }
         else {
             try { $process.WaitForExit() } catch { }
         }
         $exitCode = if ($process.HasExited) { [int]$process.ExitCode } else { 3 }
-        $outputTasks = @($stdoutTask, $stderrTask)
-        $outputTasksCompleted = Wait-PshTimeoutOutputTasks -Tasks $outputTasks -TimeoutMilliseconds 500
-        $forcedPipeClose = -not $outputTasksCompleted
-        if ($forcedPipeClose) {
-            # A descendant can inherit these handles after the direct child
-            # exits. Close the read side so output capture cannot outlive the
-            # timeout contract, then give the pending reads a bounded cleanup.
+        if ($useWindowsPipePolling) {
+            # Read only bytes already available from the direct child or an
+            # inheriting descendant; never wait for a descendant-held EOF.
+            Complete-PshTimeoutPipeDrain -Capture $pipeCapture
             Close-PshTimeoutOutputPipes -Process $process
-            $outputTasksCompleted = Wait-PshTimeoutOutputTasks -Tasks $outputTasks -TimeoutMilliseconds 1000
-            if (-not $outputTasksCompleted) {
-                throw (New-Object IO.IOException('timed out while closing redirected process output.'))
-            }
         }
         else {
-            Assert-PshTimeoutOutputTasksSucceeded -Tasks $outputTasks
+            $outputTasks = @($stdoutTask, $stderrTask)
+            $outputTasksCompleted = Wait-PshTimeoutOutputTasks -Tasks $outputTasks -TimeoutMilliseconds 500
+            $forcedPipeClose = -not $outputTasksCompleted
+            if ($forcedPipeClose) {
+                Close-PshTimeoutOutputPipes -Process $process
+                $outputTasksCompleted = Wait-PshTimeoutOutputTasks -Tasks $outputTasks -TimeoutMilliseconds 1000
+                if (-not $outputTasksCompleted) {
+                    throw (New-Object IO.IOException('timed out while closing redirected process output.'))
+                }
+            }
+            else {
+                Assert-PshTimeoutOutputTasksSucceeded -Tasks $outputTasks
+            }
         }
         return [PSCustomObject]@{
             ExitCode = $exitCode
@@ -1504,6 +1742,7 @@ function timeout {
         }
     }
     catch {
-        Write-PshProcessFailure -Command 'timeout' -Code 4 -Message $_.Exception.Message
+        $code = if (Test-PshTimeoutMissingCommandException -Exception $_.Exception) { 4 } else { 3 }
+        Write-PshProcessFailure -Command 'timeout' -Code $code -Message $_.Exception.Message
     }
 }
