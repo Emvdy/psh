@@ -1337,6 +1337,7 @@ $initialization = Initialize-PshInteractive
 
     $promptInitialization = Initialize-PshInteractive -EnablePrompt
     Assert-PshGoal2Condition ([bool]$promptInitialization.success -and [bool]$promptInitialization.prompt.enabled) ("Prompt initialization failed: $($promptInitialization.prompt.error)")
+    $Error.Clear()
     $errorCountBeforeFailurePrompt = $Error.Count
     $failurePromptText = & {
         $global:LASTEXITCODE = 37
