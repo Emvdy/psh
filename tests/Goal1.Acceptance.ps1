@@ -268,8 +268,7 @@ $unsafePatterns = @(
     'Start-BitsTransfer',
     'Download(File|String|Data)',
     '#requires\s+-RunAsAdministrator',
-    'Start-Process[^\r\n]+-Verb\s+RunAs',
-    'Set-ExecutionPolicy'
+    'Start-Process[^\r\n]+-Verb\s+RunAs'
 )
 foreach ($pattern in $unsafePatterns) {
     $matches = @(
@@ -279,6 +278,42 @@ foreach ($pattern in $unsafePatterns) {
     )
     Assert-PshCondition ($matches.Count -eq 0) "Goal 1 source contains a forbidden startup, elevation, or policy pattern: $pattern"
 }
+
+# Goal 5 must be able to print a read-only execution-policy remediation hint.
+# Permit exactly that diagnostic constant while keeping the policy mutation
+# spelling forbidden everywhere else.  The PowerShell AST check below catches
+# an actual command invocation independently of comments and string literals.
+$policyDiagnosticPath = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'src/bootstrapper/Program.cs'))
+$policyDiagnosticLine = 'private const string PolicyRemediation = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned";'
+$policyLiteralMatches = @(
+    $sourceFiles | ForEach-Object {
+        Select-String -LiteralPath $_.FullName -SimpleMatch 'Set-ExecutionPolicy'
+    }
+)
+$unexpectedPolicyLiteralMatches = @(
+    $policyLiteralMatches | Where-Object {
+        $matchPath = [IO.Path]::GetFullPath([string]$_.Path)
+        -not ([string]::Equals($matchPath, $policyDiagnosticPath, [StringComparison]::OrdinalIgnoreCase) -and
+            [string]::Equals(([string]$_.Line).Trim(), $policyDiagnosticLine, [StringComparison]::Ordinal))
+    }
+)
+Assert-PshCondition ($policyLiteralMatches.Count -eq 1 -and $unexpectedPolicyLiteralMatches.Count -eq 0) 'Goal 1 source contains an execution-policy mutation or an unapproved policy diagnostic.'
+
+$policyCommandFindings = New-Object System.Collections.Generic.List[string]
+foreach ($powerShellSource in @($sourceFiles | Where-Object { $_.Extension -in @('.ps1', '.psm1') })) {
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($powerShellSource.FullName, [ref]$tokens, [ref]$parseErrors)
+    Assert-PshCondition (@($parseErrors).Count -eq 0) "PowerShell source could not be parsed for policy-command validation: $($powerShellSource.FullName)"
+    foreach ($command in @($ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst] -and
+                    [string]$node.GetCommandName() -ieq 'Set-ExecutionPolicy'
+            }, $true))) {
+        $policyCommandFindings.Add(('{0}:{1}' -f $powerShellSource.FullName, $command.Extent.StartLineNumber))
+    }
+}
+Assert-PshCondition ($policyCommandFindings.Count -eq 0) ('Goal 1 source executes Set-ExecutionPolicy: {0}' -f ([string]::Join(', ', $policyCommandFindings.ToArray())))
 
 $originalEdition = $env:PSH_EDITION
 try {

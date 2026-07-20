@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright (C) 2026 Emvdy; SPDX-License-Identifier: GPL-3.0-or-later -->
+<Project ToolsVersion="15.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{8B2C727F-5AF5-4C56-987C-BE4B165F1A6B}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Psh.Bootstrapper</RootNamespace>
+    <AssemblyName>psh-installer</AssemblyName>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+    <DebugSymbols>false</DebugSymbols>
+    <DebugType>none</DebugType>
+    <Optimize>true</Optimize>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <LangVersion>5</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningLevel>4</WarningLevel>
+    <ErrorReport>none</ErrorReport>
+    <PshEmbeddedHashesSource Condition=" '$(PshEmbeddedHashesSource)' == '' ">$(MSBuildProjectDirectory)\EmbeddedScriptHashes.g.cs</PshEmbeddedHashesSource>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <OutputPath>bin\Release\</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Runtime.Serialization" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="AssemblyInfo.cs" />
+    <Compile Include="ArgumentParser.cs" />
+    <Compile Include="CommandLineEscaping.cs" />
+    <Compile Include="ErrorEnvelope.cs" />
+    <Compile Include="ExecutionPolicyPreflight.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="ScriptIntegrityVerifier.cs" />
+    <Compile Include="WindowsPowerShellLocator.cs" />
+    <Compile Include="$(PshEmbeddedHashesSource)" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
