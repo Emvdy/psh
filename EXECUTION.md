@@ -12,8 +12,8 @@ condition has direct evidence.
 | Goal 1 | COMPLETE | `83ed21f` | Module and machine-readable specification |
 | Goal 2 | COMPLETE | `20a4e59` | Amendment 1 closeout merged to `main`; final branch and main CI green |
 | Goal 3 | COMPLETE | `9254f3b` | Merged to `main` at `71fbda8`; final branch and `main` CI green |
-| Goal 4 | IN_PROGRESS | `5d0477c` | Branch DoneWhen green; evidence commit and `main` merge pending |
-| Goal 5 | PENDING | - | Blocked on Goal 4 DoneWhen |
+| Goal 4 | COMPLETE | `3289786` | Merged to `main`; Goal 4 `main` CI run `29758890021` and both x64 jobs green |
+| Goal 5 | IN_PROGRESS | - | Goal 4 prerequisite met; installer lifecycle started |
 | Goal 6 | PENDING | - | Blocked on Goal 5 DoneWhen |
 | Goal 7 | PENDING | - | Blocked on Goal 6 DoneWhen |
 | Goal 8 | PENDING | - | Blocked on Goal 7 DoneWhen |
@@ -696,6 +696,56 @@ No Goal 4 StopIf condition was hit.
 
 ### Remaining Work
 
-Commit and push this execution evidence, fast-forward Goal 4 to `main`, and
-confirm the resulting `main` CI run before marking Goal 4 complete and starting
-Goal 5.
+None. Goal 4 was fast-forward merged to `main` at
+`32897861c99c89598780b8fcea7cb7a6008ae261`. The resulting
+[Goal 4 `main` CI run](https://github.com/Emvdy/psh/actions/runs/29758890021)
+concluded `success` at that head:
+
+- [Windows PowerShell 5.1 x64](https://github.com/Emvdy/psh/actions/runs/29758890021/job/88408230634)
+  concluded `success`.
+- [PowerShell 7 x64](https://github.com/Emvdy/psh/actions/runs/29758890021/job/88408230553)
+  concluded `success`.
+
+Goal 4 is complete.
+
+## Goal 5: Install, Upgrade, And Uninstall
+
+Started: 2026-07-20 (Asia/Shanghai)
+
+### Prerequisite
+
+- [x] Goal 4 is fast-forward merged to `main` at
+  `32897861c99c89598780b8fcea7cb7a6008ae261`, and the Goal 4 `main` CI run
+  `29758890021` plus its Windows PowerShell 5.1 x64 job `88408230634` and
+  PowerShell 7 x64 job `88408230553` all concluded `success`.
+
+### Initial Status
+
+The Goal 1 versioned current-user layout, stable bootstrap, shared
+configuration, and atomic `current.json` switching primitive exist. No online
+or offline installer, package lifecycle, upgrade or rollback orchestration,
+uninstaller, or AnyCPU bootstrapper has yet been implemented for Goal 5.
+
+### StopIf / DoneWhen
+
+- **StopIf:** Profiles cannot be updated losslessly, the installer changes GPO, execution policy, or system `PATH`, or uninstall would remove pre-existing user content.
+- **DoneWhen:** Core and Full pass online/offline install, upgrade, rollback, repeat-install, and uninstall tests on x64 CI, with the original profile restored after uninstall.
+
+### Next Work
+
+- [ ] Online installation downloads versioned scripts, manifests, and packages,
+  verifies SHA256, then executes. Do not recommend `irm | iex`.
+- [ ] Offline ZIP files include modules, dependencies, licenses, manifests,
+  installers, uninstallers, and the same EXE. Offline mode must not make
+  network requests.
+- [ ] Install through staging, integrity verification, and atomic version
+  switching. Reinstallation is idempotent. Upgrade and rollback are exercised
+  against a synthetic `0.0.1-test` package because `v0.1.0` is the first real
+  release.
+- [ ] When execution policy forbids running the installer, the installer does
+  not bypass anything: it emits a structured diagnostic pointing the user at
+  `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` and exits with code `4`.
+  This behavior is tested.
+- [ ] Build a small GPL C# AnyCPU bootstrapper in Actions instead of using
+  license-incompatible PS2EXE. The EXE must respect, not bypass, PowerShell
+  execution policy.
