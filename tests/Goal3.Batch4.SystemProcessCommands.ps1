@@ -155,6 +155,33 @@ function Test-PshBatch4StringArray {
     return $true
 }
 
+function Get-PshBatch4EnvironmentLineNames {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$Lines
+    )
+
+    $names = @()
+    foreach ($line in $Lines) {
+        $text = [string]$line
+        $separator = $text.IndexOf('=')
+        if ($separator -eq 0) { $separator = $text.IndexOf('=', 1) }
+        if ($separator -le 0) { throw ('invalid environment line: {0}' -f $text) }
+        $names += $text.Substring(0, $separator)
+    }
+    return $names
+}
+
+function Get-PshBatch4ProcessEnvironmentSnapshot {
+    $environment = [Environment]::GetEnvironmentVariables('Process')
+    [string[]]$names = @($environment.Keys | ForEach-Object { [string]$_ })
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    $lines = @()
+    foreach ($name in $names) { $lines += ('{0}={1}' -f $name, [string]$environment[$name]) }
+    return $lines
+}
+
 function Compare-PshBatch4GoldenIfPresent {
     param(
         [Parameter(Mandatory = $true)][string]$Id,
@@ -361,10 +388,31 @@ try {
     foreach ($name in @($envAlpha, $envZeta, $envRestore)) { [void]$environmentNames.Add($name) }
     [Environment]::SetEnvironmentVariable($envRestore, 'original value', 'Process')
 
+    $parenthesizedPrefixLines = @('ProgramFiles=C:\Program Files', 'ProgramFiles(x86)=C:\Program Files (x86)')
+    $parenthesizedPrefixWholeLineSort = @($parenthesizedPrefixLines)
+    [Array]::Sort($parenthesizedPrefixWholeLineSort, [StringComparer]::Ordinal)
+    $parenthesizedPrefixNames = @(Get-PshBatch4EnvironmentLineNames -Lines $parenthesizedPrefixLines)
+    $parenthesizedPrefixNameSort = @($parenthesizedPrefixNames)
+    [Array]::Sort($parenthesizedPrefixNameSort, [StringComparer]::Ordinal)
+    Assert-PshBatch4 ((Test-PshBatch4StringArray $parenthesizedPrefixNames $parenthesizedPrefixNameSort) -and $parenthesizedPrefixWholeLineSort[0] -ceq $parenthesizedPrefixLines[1]) 'environment ordering regression did not distinguish name sorting from whole-line sorting.'
+
+    $hiddenDriveNames = @(Get-PshBatch4EnvironmentLineNames -Lines @('=C:=C:\psh-batch4', 'Path=C:\Windows'))
+    Assert-PshBatch4 (Test-PshBatch4StringArray $hiddenDriveNames @('=C:', 'Path')) 'environment line parsing did not preserve a Windows hidden drive variable name.'
+    $invalidEnvironmentLineRejected = $false
+    try { [void](Get-PshBatch4EnvironmentLineNames -Lines @('PSH_BATCH4_INVALID_ENVIRONMENT_LINE')) }
+    catch { $invalidEnvironmentLineRejected = $true }
+    Assert-PshBatch4 $invalidEnvironmentLineRejected 'environment line parsing accepted a line without a name/value separator.'
+
+    $environmentBeforeInheritedListing = @(Get-PshBatch4ProcessEnvironmentSnapshot)
     $envInherited = Invoke-PshBatch4Command -Name env
-    $envInheritedSorted = @($envInherited.Output)
-    [Array]::Sort($envInheritedSorted, [StringComparer]::Ordinal)
-    Assert-PshBatch4 ($envInherited.ExitCode -eq 0 -and (Test-PshBatch4StringArray $envInherited.Output $envInheritedSorted) -and $envInherited.Output -contains ($envRestore + '=original value')) 'env inherited output lost ordinal determinism or the current process environment.'
+    $environmentAfterInheritedListing = @(Get-PshBatch4ProcessEnvironmentSnapshot)
+    $envInheritedNames = @(Get-PshBatch4EnvironmentLineNames -Lines ([string[]]$envInherited.Output))
+    $envInheritedSortedNames = @($envInheritedNames)
+    [Array]::Sort($envInheritedSortedNames, [StringComparer]::Ordinal)
+    Assert-PshBatch4 ($envInherited.ExitCode -eq 0 -and (Test-PshBatch4StringArray $envInherited.Output $environmentBeforeInheritedListing)) 'env inherited output did not exactly match the current process environment in ordinal name order.'
+    Assert-PshBatch4 (Test-PshBatch4StringArray $envInheritedNames $envInheritedSortedNames) 'env inherited output was not ordinally sorted by variable name.'
+    Assert-PshBatch4 ($envInherited.Output -contains ($envRestore + '=original value')) 'env inherited output omitted the current process environment marker.'
+    Assert-PshBatch4 (Test-PshBatch4StringArray $environmentAfterInheritedListing $environmentBeforeInheritedListing) 'env inherited listing changed the current process environment.'
     $envClean = Invoke-PshBatch4Command -Name env -Arguments @('-i', ($envZeta + '=two'), ($envAlpha + '=one')) -CountsAsBehavior
     Assert-PshBatch4 ($envClean.ExitCode -eq 0 -and (Test-PshBatch4StringArray $envClean.Output @(('{0}=two' -f $envZeta), ('{0}=one' -f $envAlpha)))) 'env -i did not preserve explicit assignment order.'
     $envCleanReverse = Invoke-PshBatch4Command -Name env -Arguments @('-i', ($envAlpha + '=one'), ($envZeta + '=two'))
