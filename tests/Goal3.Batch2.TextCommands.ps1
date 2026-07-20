@@ -23,6 +23,8 @@ $covered = @{}
 $textCommandNames = @('cat', 'bat', 'head', 'tail', 'grep', 'rg', 'cut', 'tr', 'sort', 'uniq', 'wc', 'tee', 'printf', 'echo', 'base64')
 $aliasNames = @('cat', 'sort', 'tee', 'echo')
 $aliasBaseline = [ordered]@{}
+$linkedRgRoot = $null
+$testFailure = $null
 
 function Assert-PshBatch2 {
     param(
@@ -726,11 +728,15 @@ exit 0
     else {
         $null = Microsoft.PowerShell.Management\New-Item -ItemType SymbolicLink -Path $linkedRgRoot -Target $outsideNativeRoot -Force
     }
+    $linkedRgItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $linkedRgRoot -Force -ErrorAction Stop
+    Assert-PshBatch2 (([IO.FileAttributes]$linkedRgItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) 'The reparse-escape fixture was not created as a reparse point.'
     $rgEntry.artifacts.'win-x64'.installedPath = $linkedRgRelativeRoot + '/' + [IO.Path]::GetFileName($outsideRgPath)
     [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
     $fullReparseEscape = Invoke-PshBatch2Command -Name rg -Arguments @('--version')
     Assert-PshBatch2 ($fullReparseEscape.ExitCode -eq 5) 'Full rg accepted an executable path that traversed a reparse point.'
-    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $linkedRgRoot -Force
+    [IO.Directory]::Delete($linkedRgRoot, $false)
+    Assert-PshBatch2 ($null -eq (Microsoft.PowerShell.Management\Get-Item -LiteralPath $linkedRgRoot -Force -ErrorAction SilentlyContinue)) 'The reparse-escape fixture link was not removed.'
+    Assert-PshBatch2 ([IO.Directory]::Exists($outsideNativeRoot) -and [IO.File]::Exists($outsideRgPath)) 'Removing the reparse-escape fixture changed its external target.'
     $rgEntry.artifacts.'win-x64'.installedPath = $originalRgPath
     [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
 
@@ -762,24 +768,37 @@ exit 0
 
     Write-Output ('Goal 3 Batch 2 text-command acceptance passed: 15 commands, {0} assertions, text/raw-byte paths, Tier 2 search flags, Core/Full delegation, and object APIs{1}.' -f $assertionCount, $(if ([string]::IsNullOrWhiteSpace($GoldenRoot)) { '' } else { ', with GNU golden comparisons' }))
 }
+catch {
+    $testFailure = $_
+    throw
+}
 finally {
-    Remove-Module -Name Psh -Force -ErrorAction SilentlyContinue
-    Remove-Variable -Name PshBatch2PrintfValue -Scope Global -Force -ErrorAction SilentlyContinue
-    $env:LOCALAPPDATA = $originalLocalAppData
-    $env:PSH_EDITION = $originalEdition
-    foreach ($name in $aliasNames) {
-        $snapshot = $aliasBaseline[$name]
-        $current = Get-Alias -Name $name -ErrorAction SilentlyContinue
-        if (-not $snapshot.Exists) {
-            if ($null -ne $current) { Remove-Item -LiteralPath ('Alias:{0}' -f $name) -Force -ErrorAction SilentlyContinue }
+    try {
+        Remove-Module -Name Psh -Force -ErrorAction SilentlyContinue
+        Remove-Variable -Name PshBatch2PrintfValue -Scope Global -Force -ErrorAction SilentlyContinue
+        $env:LOCALAPPDATA = $originalLocalAppData
+        $env:PSH_EDITION = $originalEdition
+        foreach ($name in $aliasNames) {
+            $snapshot = $aliasBaseline[$name]
+            $current = Get-Alias -Name $name -ErrorAction SilentlyContinue
+            if (-not $snapshot.Exists) {
+                if ($null -ne $current) { Remove-Item -LiteralPath ('Alias:{0}' -f $name) -Force -ErrorAction SilentlyContinue }
+            }
+            elseif (-not (Test-PshBatch2AliasSnapshot -Alias $current -Snapshot $snapshot)) {
+                Remove-Item -LiteralPath ('Alias:{0}' -f $name) -Force -ErrorAction SilentlyContinue
+                Set-Alias -Name $name -Value ([string]$snapshot.Definition) -Description ([string]$snapshot.Description) -Option $snapshot.Options -Scope Global -Force
+                (Get-Alias -Name $name -Scope Global -ErrorAction Stop).Visibility = $snapshot.Visibility
+            }
         }
-        elseif (-not (Test-PshBatch2AliasSnapshot -Alias $current -Snapshot $snapshot)) {
-            Remove-Item -LiteralPath ('Alias:{0}' -f $name) -Force -ErrorAction SilentlyContinue
-            Set-Alias -Name $name -Value ([string]$snapshot.Definition) -Description ([string]$snapshot.Description) -Option $snapshot.Options -Scope Global -Force
-            (Get-Alias -Name $name -Scope Global -ErrorAction Stop).Visibility = $snapshot.Visibility
+        if (-not [string]::IsNullOrWhiteSpace([string]$linkedRgRoot) -and [IO.Directory]::Exists($linkedRgRoot)) {
+            [IO.Directory]::Delete($linkedRgRoot, $false)
         }
+        if ([IO.Directory]::Exists($testRoot)) { [IO.Directory]::Delete($testRoot, $true) }
     }
-    if ([IO.Directory]::Exists($testRoot)) { [IO.Directory]::Delete($testRoot, $true) }
+    catch {
+        if ($null -eq $testFailure) { throw }
+        Write-Warning -Message ('Batch 2 cleanup also failed after the test error: {0}' -f $_.Exception.Message) -WarningAction Continue
+    }
 }
 
 # GitHub's PowerShell shell propagates a leftover native status after a successful script.
