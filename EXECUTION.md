@@ -12,7 +12,7 @@ condition has direct evidence.
 | Goal 1 | COMPLETE | `83ed21f` | Module and machine-readable specification |
 | Goal 2 | COMPLETE | `20a4e59` | Amendment 1 closeout merged to `main`; final branch and main CI green |
 | Goal 3 | COMPLETE | `9254f3b` | Merged to `main` at `71fbda8`; final branch and `main` CI green |
-| Goal 4 | IN_PROGRESS | - | Goal 3 prerequisite met; Full tools supply chain started |
+| Goal 4 | IN_PROGRESS | `5d0477c` | Branch DoneWhen green; evidence commit and `main` merge pending |
 | Goal 5 | PENDING | - | Blocked on Goal 4 DoneWhen |
 | Goal 6 | PENDING | - | Blocked on Goal 5 DoneWhen |
 | Goal 7 | PENDING | - | Blocked on Goal 6 DoneWhen |
@@ -612,21 +612,90 @@ Started: 2026-07-20 (Asia/Shanghai)
 - **StopIf:** A checksum mismatches, a license cannot be aggregated with GPL, or source and tag differ.
 - **DoneWhen:** Core remains functional after deleting `tools`, and Full reports every pinned (or documented-degraded) tool version on x64 CI.
 
-### Initial Status
+### Locked Supply Chain
 
-No `rg`, `fd`, `jq`, or `bat` version has been locked, and no native tool has
-been downloaded. Goal 4 implementation is not complete.
+- The lock records stable `bat` `0.26.1`, `fd` `10.4.2`, `jq` `1.8.2`, and
+  `rg` `15.2.0` for both `win-x64` and `win-arm64`; all eight executables are
+  official architecture-matched release assets, so no ARM64 degradation was
+  required.
+- Tags resolve to fixed source commits: bat
+  `979ba22628bc9d8171f2cffca2bd5c90c9fc0a9e`, fd
+  `7027d45303b412be6fa9c09d689cc6276748fb38`, jq
+  `34f7186b86743a083a589741b6cea95293524108`, and ripgrep
+  `e89fff89ac9af12e8d4ce9d5fd07beb408ca730f`. Download URLs are versioned,
+  numeric release-asset locators are retained, and no `latest` reference is
+  used.
+- `THIRD_PARTY_NOTICES.md`, retained upstream license files, provenance records,
+  and `sbom.spdx.json` are generated from the lock. The deterministic lock
+  summary SHA256 is
+  `1cd062f042777a4cdc570ddd1d85b2562532473d7f95de21e8603f7544bcda64`.
 
-### Next Work
+### Evidence Collected
 
-- [ ] Record the exact version, tag, source commit, download URLs, SHA256 values,
-  architectures, and license for `rg`, `fd`, `jq`, and `bat`; never resolve a
-  floating `latest` reference.
-- [ ] Select the highest stable release and apply the ARM64 ladder: official
-  ARM64 asset, reproducible CI build of the pinned tag, then documented Core
-  degradation only with explicit user approval. Never relabel an x64 executable
-  as ARM64.
-- [ ] Retain all upstream licenses, produce `THIRD_PARTY_NOTICES.md`, and produce
-  an SPDX SBOM for PSReadLine and the native tools.
-- [ ] Verify on x64 CI that Core remains functional after deleting `tools` and
-  that Full reports every pinned or documented-degraded tool version.
+- Implementation commits:
+  `02ef8609b637e6a0533cd5c452f93d6083326325` (`feat: add Full native tools
+  supply chain`), `498793c96291c2475b62a09c826fa8294038f018` (`fix: stabilize
+  native tool CI probes`), and
+  `382cd4b97af60b51596624774f5b878703c75dc6` (`fix: pin ripgrep revision
+  probe`). The ripgrep probe is fixed to the release binary's exact
+  `ripgrep 15.2.0 (rev e89fff89ac)` identity derived from the locked source
+  commit.
+- Regression-isolation commits:
+  `2bad6a158f3025481cf8cc5fae7a9da1105a4389` (`test: isolate prompt error
+  history assertion`) and `5d0477cbcfbf35f6c98524fe3a88202765379fff`
+  (`test: clean junction fixtures safely`). These preserve the original Goal 2
+  prompt assertion and make the Batch 2 reparse fixture cleanup safe on Windows
+  PowerShell 5.1 without changing product behavior.
+- Local PowerShell 7.6.3 validation at `5d0477c` passed: Goal 4 acceptance with
+  693 assertions; native verification for four tools and eight
+  architecture-specific executables; Goal 1 acceptance; Batch 2 with 238
+  assertions; Batch 3 with 327 assertions; both artifact generators in `-Check`
+  mode; official SPDX 2.3 schema validation; `actionlint`; and
+  `git diff --check`.
+- Final branch CI run:
+  <https://github.com/Emvdy/psh/actions/runs/29757503335>, head
+  `5d0477cbcfbf35f6c98524fe3a88202765379fff`, conclusion `success`.
+  Both jobs and every test, smoke, report, and upload step succeeded:
+  - [Windows PowerShell 5.1 x64](https://github.com/Emvdy/psh/actions/runs/29757503335/job/88403550592)
+    ran PowerShell `5.1.26100.32995`, passed Goal 4 with 730 assertions and the
+    complete Goal 1-3 regression suite, then passed the Core-without-tools smoke
+    and Full x64 version report. Report artifact ID: `8467391121`.
+  - [PowerShell 7 x64](https://github.com/Emvdy/psh/actions/runs/29757503335/job/88403550618)
+    ran PowerShell `7.6.3`, passed the same Goal 4 and regression matrix, then
+    passed the same Core and Full checks. Report artifact ID: `8467397009`.
+- In both final jobs, supply-chain artifacts were current, the independent
+  verifier accepted four fixed tools and eight executables, Core exposed all 64
+  commands after the optional tools boundary and native lock were removed, and
+  Full reported pinned x64 metadata plus exact executable and public-wrapper
+  version probes for `bat`, `fd`, `jq`, and `rg`.
+
+### DoneWhen Audit
+
+- [x] Exact versions, tags, source commits, versioned download URLs, archive and
+  installed SHA256 values, architectures, release-asset identities, and licenses
+  are locked for all four tools.
+- [x] Official x64 and ARM64 assets are retained for every tool; no executable
+  was relabeled and no documented degradation was required.
+- [x] Upstream licenses, provenance, notices, and the SPDX 2.3 SBOM are retained
+  and deterministically generated.
+- [x] Core remained functional with all 64 commands after deleting the optional
+  tools boundary in both x64 CI runtimes.
+- [x] Full reported every pinned x64 tool as `native:<name>` / `pinned`, with
+  the locked version, SHA256, architecture, executable probe, and wrapper probe.
+
+### StopIf Audit
+
+- Independent verification accepted every archive, installed executable, and
+  retained license hash; negative fixtures reject checksum and path tampering.
+- The declared BSD-2-Clause, MIT/Apache-2.0, MIT with embedded notices, and
+  Unlicense/MIT terms were retained with no GPL aggregation conflict.
+- Every tag-to-source relationship and exact version probe is fixed and checked;
+  source/tag or revision drift is rejected.
+
+No Goal 4 StopIf condition was hit.
+
+### Remaining Work
+
+Commit and push this execution evidence, fast-forward Goal 4 to `main`, and
+confirm the resulting `main` CI run before marking Goal 4 complete and starting
+Goal 5.
