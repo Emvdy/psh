@@ -11,8 +11,8 @@ condition has direct evidence.
 | Goal 0 | COMPLETE | `1f87695` | Safety baseline and repository |
 | Goal 1 | COMPLETE | `83ed21f` | Module and machine-readable specification |
 | Goal 2 | COMPLETE | `20a4e59` | Amendment 1 closeout merged to `main`; final branch and main CI green |
-| Goal 3 | IN_PROGRESS | - | Goal 2 prerequisite met; Batches 1-3 are complete; Batch 4 is pending |
-| Goal 4 | PENDING | - | Blocked on Goal 3 DoneWhen |
+| Goal 3 | COMPLETE | `9254f3b` | All four batches and final branch CI are green |
+| Goal 4 | PENDING | - | Awaiting Goal 3 merge and `main` CI |
 | Goal 5 | PENDING | - | Blocked on Goal 4 DoneWhen |
 | Goal 6 | PENDING | - | Blocked on Goal 5 DoneWhen |
 | Goal 7 | PENDING | - | Blocked on Goal 6 DoneWhen |
@@ -392,10 +392,10 @@ Started: 2026-07-19 (Asia/Shanghai)
 | 1 | File commands | COMPLETE |
 | 2 | Text search | COMPLETE |
 | 3 | Complex `sed`/`awk`/`jq`/`xargs` | COMPLETE |
-| 4 | System/network/archive | PENDING |
+| 4 | System/network/archive | COMPLETE |
 
-Each batch must end with its own implementation, batch tests, commit, and green
-CI before the next batch begins. Goal 3 is not complete.
+All four batches ended with their own implementation, tests, commit chain, and
+green final branch CI. Goal 3 DoneWhen is complete on this branch.
 
 ### StopIf / DoneWhen
 
@@ -503,9 +503,91 @@ CI before the next batch begins. Goal 3 is not complete.
 - Windows `sed -i` coverage verifies encoding, BOM, line-ending, and final
   newline preservation; atomic failure recovery; transaction cleanup; mtime
   updates; and exact original DACL restoration.
+- The final Batch 3 validation covered all four commands with 336 assertions in
+  both Windows runtimes.
+
+### Batch 4 Evidence
+
+- Implementation and stabilization chain:
+  `42ef4afebff6ad5740c5f7f9e7523b725c5066b7` (`feat: add Goal 3 Batch 4
+  compatibility commands`),
+  `48027b48d5c8b41411e43d45394d63905441e948` (`fix: preserve env assignment
+  order`), `468b447836795a7c7830116529295765eb29f6be` (`test: compare env output by
+  variable name`), `919ffe04833ae74d583047c8b1e45c18a03e5e57` (`test: allow timeout
+  fixture trailing argv`), `df30303ce6c0b020eb92c4645379fc2b93b16e28` (`fix: bound timeout
+  pipe capture`), `03afecf5bf82afcb2a4a93d8efdef085ddd8fe83` (`test: synchronize
+  timeout pipe fixture`), `f13e5d4c138a6b5a6467c671a960d3f5403bab15` (`test: inherit timeout
+  pipe handles explicitly`), `283d8b74ad3dd9b884acdd772b7c1b00dd3f69e5` (`test: preserve
+  all-scope network aliases`), and
+  `9254f3bb93b11a470b82b7d06ade55d017203239` (`test: expect GNU checksum
+  escaping`).
+- Final Batch 4 CI run:
+  <https://github.com/Emvdy/psh/actions/runs/29731161836>, head
+  `9254f3bb93b11a470b82b7d06ade55d017203239`, conclusion `success`.
+  All jobs succeeded:
+  - [GNU system/process and checksum goldens](https://github.com/Emvdy/psh/actions/runs/29731161836/job/88315734806)
+    generated and verified the deterministic golden artifact.
+  - [PowerShell 7](https://github.com/Emvdy/psh/actions/runs/29731161836/job/88315766852)
+    ran the Batch 4 validation and full regression suite.
+  - [Windows PowerShell 5.1](https://github.com/Emvdy/psh/actions/runs/29731161836/job/88315766907)
+    ran the same Batch 4 validation and full regression suite.
+- Retained Batch 4 artifacts:
+  - `goal3-batch4-gnu-goldens`, artifact ID `8456322963`, contains
+    `manifest.json`, `SHA256SUMS`, and `toolchain-report.txt`.
+  - `goal3-batch4-report-pwsh7`, artifact ID `8456391105`, contains
+    `validation-transcript.txt` for PowerShell 7.
+  - `goal3-batch4-report-winps51`, artifact ID `8456388958`, contains
+    `validation-transcript.txt` for Windows PowerShell 5.1.
+- Final regression runs at the same head all concluded `success`: [Batch
+  1](https://github.com/Emvdy/psh/actions/runs/29731161851), [Batch
+  2](https://github.com/Emvdy/psh/actions/runs/29731161803), [Batch
+  3](https://github.com/Emvdy/psh/actions/runs/29731161826), and [Batch
+  4](https://github.com/Emvdy/psh/actions/runs/29731161836).
+- Batch 4 covers 24 commands: 15 system/process commands (`which`, `env`,
+  `printenv`, `export`, `test`, `sleep`, `date`, `whoami`, `hostname`, `clear`,
+  `ps`, `kill`, `pgrep`, `pkill`, and `timeout`), two network commands (`curl`
+  and `wget`), and seven archive commands (`tar`, `zip`, `unzip`, `gzip`,
+  `gunzip`, `sha256sum`, and `md5sum`).
+- Both Windows runtimes passed 766 system/process assertions plus four GNU
+  comparisons, 124 network assertions, and 283 archive assertions with GNU
+  checksum goldens.
+- The local Unix archive replay passed 285 assertions. Its only two additional
+  assertions are the explicitly non-Windows native `tar` and `gzip` format
+  oracles; both Windows runs still executed the six-assertion filesystem
+  symlink/reparse input and extraction-safety block.
+
+### DoneWhen Audit
+
+- [x] `scripts/Generate-CommandArtifacts.ps1 -Check` passed in both final
+  Windows jobs.
+- [x] Behavior tests cover all 64 commands: Batch 1 has 21, Batch 2 has 15,
+  Batch 3 has four, and Batch 4 has 24.
+- [x] Tier 1 GNU golden comparison passed for Batches 1 and 2; Batch 4 adds six
+  comparisons, comprising four system/process comparisons and two checksum
+  comparisons.
+- [x] Core/Full differences are generated from
+  `src/Psh/Specification/commands.psd1` into `docs/compatibility.md`. Full uses
+  native backends only for `rg`, `fd`, `jq`, and `bat`; every Batch 4 command is
+  PowerShell-backed in both editions, and the broader PowerShell
+  `curl --connect-timeout` budget is documented.
+
+### StopIf Audit
+
+- Unsupported or invalid syntax is rejected with exit code `2`; it is not
+  silently accepted.
+- Text output remains strings, while binary command paths use the tested raw-byte
+  sink rather than formatted PowerShell objects.
+- Destructive fixtures remain inside unique temporary roots. Traversal,
+  absolute/drive/UNC paths, archive link metadata, filesystem symlinks/reparse
+  points, outside sentinels, and transaction cleanup are covered.
+- Core/Full parity checks passed. Core does not use Full tools, and the only Full
+  native backends are the four documented commands above.
+
+No Goal 3 StopIf condition was hit.
 
 ### Remaining Work
 
-Proceed to Batch 4 (system/network/archive) with its own implementation, tests,
-commit, and green CI gate. Keep Goal 3 `IN_PROGRESS` until all four batch gates
-pass.
+None. Goal 3 is complete at
+`9254f3bb93b11a470b82b7d06ade55d017203239` and is ready to merge into `main`.
+This record does not claim that the merge or post-merge `main` CI has occurred;
+Goal 4 remains pending until both are complete.
