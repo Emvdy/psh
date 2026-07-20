@@ -657,7 +657,7 @@ exit 2
     Assert-PshBatch4 (Test-PshBatch4ProcessAlive -Process $unrelatedChild) 'pkill terminated an unrelated tracked child.'
 
     $timeoutChildText = @'
-param([Parameter(Mandatory = $true)][string]$Mode)
+param([string]$Mode)
 
 $encoding = New-Object Text.UTF8Encoding($false)
 if ($Mode -ceq 'capture') {
