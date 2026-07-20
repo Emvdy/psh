@@ -141,6 +141,18 @@ function Get-PshBatch4HashHex {
     }
 }
 
+function ConvertTo-PshBatch4GnuChecksumName {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $escaped = $Name.Replace('\', '\\').Replace("`r", '\r').Replace("`n", '\n')
+    return [PSCustomObject]@{
+        Prefix = if ([string]::Equals($escaped, $Name, [StringComparison]::Ordinal)) { '' } else { '\' }
+        Text = $escaped
+    }
+}
+
 function Get-PshBatch4TransactionArtifacts {
     param([Parameter(Mandatory = $true)][string]$Root)
 
@@ -768,9 +780,10 @@ try {
     $shaText = Invoke-PshBatch4ArchiveCommand -Name sha256sum -Arguments @($checksumPath)
     $md5Binary = Invoke-PshBatch4ArchiveCommand -Name md5sum -Arguments @('-b', $checksumPath)
     $md5Text = Invoke-PshBatch4ArchiveCommand -Name md5sum -Arguments @('-t', $checksumPath)
-    Assert-PshBatch4Archive (Test-PshBatch4StringArray $shaText.Output @(('{0}  {1}' -f $shaHex, $checksumPath))) 'sha256sum file output was not GNU-compatible text.'
-    Assert-PshBatch4Archive (Test-PshBatch4StringArray $md5Binary.Output @(('{0} *{1}' -f $md5Hex, $checksumPath))) 'md5sum -b did not use the binary marker.'
-    Assert-PshBatch4Archive (Test-PshBatch4StringArray $md5Text.Output @(('{0}  {1}' -f $md5Hex, $checksumPath))) 'md5sum -t did not use the text marker.'
+    $checksumRecordName = ConvertTo-PshBatch4GnuChecksumName -Name $checksumPath
+    Assert-PshBatch4Archive (Test-PshBatch4StringArray $shaText.Output @(('{0}{1}  {2}' -f $checksumRecordName.Prefix, $shaHex, $checksumRecordName.Text))) 'sha256sum file output was not GNU-compatible text.'
+    Assert-PshBatch4Archive (Test-PshBatch4StringArray $md5Binary.Output @(('{0}{1} *{2}' -f $checksumRecordName.Prefix, $md5Hex, $checksumRecordName.Text))) 'md5sum -b did not use the binary marker.'
+    Assert-PshBatch4Archive (Test-PshBatch4StringArray $md5Text.Output @(('{0}{1}  {2}' -f $checksumRecordName.Prefix, $md5Hex, $checksumRecordName.Text))) 'md5sum -t did not use the text marker.'
     $shaNull = Invoke-PshBatch4ArchiveCommand -Name sha256sum -Arguments @('-z', $checksumPath)
     $expectedShaNull = $utf8NoBom.GetBytes(('{0}  {1}{2}' -f $shaHex, $checksumPath, [char]0))
     Assert-PshBatch4Archive ($shaNull.ExitCode -eq 0 -and $shaNull.Output.Count -eq 0 -and (Test-PshBatch4ByteSequence $shaNull.RawBytes $expectedShaNull)) 'sha256sum -z did not emit one exact NUL-delimited raw record.'
