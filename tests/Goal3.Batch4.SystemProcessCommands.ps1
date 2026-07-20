@@ -678,8 +678,9 @@ if ($Mode -ceq 'sleep') {
     exit 0
 }
 if ($Mode -ceq 'inherit-output') {
-    if ($args.Count -ne 3) { exit 2 }
-    $grandchildCommand = '$stdoutBytes=[Text.Encoding]::UTF8.GetBytes("GRANDCHILD-PIPE-READY`n");$stdout=[Console]::OpenStandardOutput();$stdout.Write($stdoutBytes,0,$stdoutBytes.Length);$stdout.Flush();$stderrBytes=[Text.Encoding]::UTF8.GetBytes("GRANDCHILD-PIPE-ERR-READY`n");$stderr=[Console]::OpenStandardError();$stderr.Write($stderrBytes,0,$stderrBytes.Length);$stderr.Flush();Start-Sleep -Seconds {0}' -f [int]$args[2]
+    if ($args.Count -ne 4) { exit 2 }
+    $readyPathBase64 = [Convert]::ToBase64String($encoding.GetBytes([string]$args[1]))
+    $grandchildCommand = '$stdoutBytes=[Text.Encoding]::UTF8.GetBytes("GRANDCHILD-PIPE-READY`n");$stdout=[Console]::OpenStandardOutput();$stdout.Write($stdoutBytes,0,$stdoutBytes.Length);$stdout.Flush();$stderrBytes=[Text.Encoding]::UTF8.GetBytes("GRANDCHILD-PIPE-ERR-READY`n");$stderr=[Console]::OpenStandardError();$stderr.Write($stderrBytes,0,$stderrBytes.Length);$stderr.Flush();$readyPath=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{0}"));[IO.File]::WriteAllText($readyPath,"ready");Start-Sleep -Seconds {1}' -f $readyPathBase64, ([int]$args[3])
     $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($grandchildCommand))
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -690,6 +691,13 @@ if ($Mode -ceq 'inherit-output') {
     $grandchild.StartInfo = $startInfo
     if (-not $grandchild.Start()) { exit 3 }
     [IO.File]::WriteAllText([string]$args[0], [string]$grandchild.Id, $encoding)
+    $readyWatch = [Diagnostics.Stopwatch]::StartNew()
+    while (-not [IO.File]::Exists([string]$args[1]) -and $readyWatch.ElapsedMilliseconds -lt 10000) {
+        if ($grandchild.HasExited) { exit 4 }
+        Start-Sleep -Milliseconds 10
+    }
+    $readyWatch.Stop()
+    if (-not [IO.File]::Exists([string]$args[1])) { exit 5 }
     $prefix = $encoding.GetBytes("PARENT-PIPE-READY`n")
     $stdout = [Console]::OpenStandardOutput()
     $stdout.Write($prefix, 0, $prefix.Length)
@@ -698,7 +706,7 @@ if ($Mode -ceq 'inherit-output') {
     $stderr = [Console]::OpenStandardError()
     $stderr.Write($errorPrefix, 0, $errorPrefix.Length)
     $stderr.Flush()
-    Start-Sleep -Seconds ([int]$args[1])
+    Start-Sleep -Seconds ([int]$args[2])
     exit 0
 }
 exit 2
@@ -739,13 +747,18 @@ exit 2
     }
     Assert-PshBatch4 (-not $timeoutProcessStillAlive) 'timeout returned while its expired child was still running.'
 
+    $timeoutPipeMarkers = @('PARENT-PIPE-READY', 'GRANDCHILD-PIPE-READY', 'PARENT-PIPE-ERR-READY', 'GRANDCHILD-PIPE-ERR-READY')
     $timeoutDescendantPidPath = Join-Path $processRoot 'timeout-descendant.pid'
+    $timeoutDescendantReadyPath = Join-Path $processRoot 'timeout-descendant.ready'
     $timeoutDescendantWatch = [Diagnostics.Stopwatch]::StartNew()
-    $timeoutDescendantResult = Invoke-PshBatch4Command -Name timeout -Arguments @('-k', '100ms', '1s', $timeoutChildScript, 'inherit-output', $timeoutDescendantPidPath, '15', '15')
+    $timeoutDescendantResult = Invoke-PshBatch4Command -Name timeout -Arguments @('-k', '100ms', '2s', $timeoutChildScript, 'inherit-output', $timeoutDescendantPidPath, $timeoutDescendantReadyPath, '15', '15')
     $timeoutDescendantWatch.Stop()
     $timeoutDescendantText = Get-PshBatch4RawText -Result $timeoutDescendantResult
+    $timeoutDescendantCapturedText = $timeoutDescendantText.Replace("`n", '\n')
+    $timeoutDescendantMissingMarkers = @($timeoutPipeMarkers | Where-Object { -not $timeoutDescendantText.Contains([string]$_) })
     Assert-PshBatch4 ($timeoutDescendantResult.ExitCode -eq 3 -and $timeoutDescendantWatch.ElapsedMilliseconds -lt 5000) ('timeout waited for a descendant-held output pipe: exit {0}, {1} ms.' -f $timeoutDescendantResult.ExitCode, $timeoutDescendantWatch.ElapsedMilliseconds)
-    Assert-PshBatch4 ($timeoutDescendantText.Contains('PARENT-PIPE-READY') -and $timeoutDescendantText.Contains('GRANDCHILD-PIPE-READY') -and $timeoutDescendantText.Contains('PARENT-PIPE-ERR-READY') -and $timeoutDescendantText.Contains('GRANDCHILD-PIPE-ERR-READY')) 'timeout lost stdout or stderr produced before closing descendant-held pipes.'
+    Assert-PshBatch4 ([IO.File]::Exists($timeoutDescendantReadyPath)) ('the descendant-pipe fixture did not confirm that grandchild output was flushed. Captured text: <{0}>.' -f $timeoutDescendantCapturedText)
+    Assert-PshBatch4 ($timeoutDescendantMissingMarkers.Count -eq 0) ('timeout lost stdout or stderr produced before closing descendant-held pipes. Missing markers: <{0}>. Captured text: <{1}>.' -f ($timeoutDescendantMissingMarkers -join ', '), $timeoutDescendantCapturedText)
     Assert-PshBatch4 ([IO.File]::Exists($timeoutDescendantPidPath)) 'the descendant-pipe fixture did not publish its grandchild PID.'
     $timeoutDescendantPid = 0
     Assert-PshBatch4 ([int]::TryParse([IO.File]::ReadAllText($timeoutDescendantPidPath, $utf8NoBom).Trim(), [ref]$timeoutDescendantPid) -and $timeoutDescendantPid -gt 0) 'the descendant-pipe fixture published an invalid grandchild PID.'
@@ -761,12 +774,16 @@ exit 2
     }
 
     $timeoutInfiniteDescendantPidPath = Join-Path $processRoot 'timeout-infinite-descendant.pid'
+    $timeoutInfiniteDescendantReadyPath = Join-Path $processRoot 'timeout-infinite-descendant.ready'
     $timeoutInfiniteDescendantWatch = [Diagnostics.Stopwatch]::StartNew()
-    $timeoutInfiniteDescendantResult = Invoke-PshBatch4Command -Name timeout -Arguments @('inf', $timeoutChildScript, 'inherit-output', $timeoutInfiniteDescendantPidPath, '1', '15')
+    $timeoutInfiniteDescendantResult = Invoke-PshBatch4Command -Name timeout -Arguments @('inf', $timeoutChildScript, 'inherit-output', $timeoutInfiniteDescendantPidPath, $timeoutInfiniteDescendantReadyPath, '1', '15')
     $timeoutInfiniteDescendantWatch.Stop()
     $timeoutInfiniteDescendantText = Get-PshBatch4RawText -Result $timeoutInfiniteDescendantResult
+    $timeoutInfiniteDescendantCapturedText = $timeoutInfiniteDescendantText.Replace("`n", '\n')
+    $timeoutInfiniteDescendantMissingMarkers = @($timeoutPipeMarkers | Where-Object { -not $timeoutInfiniteDescendantText.Contains([string]$_) })
     Assert-PshBatch4 ($timeoutInfiniteDescendantResult.ExitCode -eq 0 -and $timeoutInfiniteDescendantWatch.ElapsedMilliseconds -lt 5000) ('timeout inf waited for a descendant-held output pipe: exit {0}, {1} ms.' -f $timeoutInfiniteDescendantResult.ExitCode, $timeoutInfiniteDescendantWatch.ElapsedMilliseconds)
-    Assert-PshBatch4 ($timeoutInfiniteDescendantText.Contains('PARENT-PIPE-READY') -and $timeoutInfiniteDescendantText.Contains('GRANDCHILD-PIPE-READY') -and $timeoutInfiniteDescendantText.Contains('PARENT-PIPE-ERR-READY') -and $timeoutInfiniteDescendantText.Contains('GRANDCHILD-PIPE-ERR-READY')) 'timeout inf lost stdout or stderr produced before closing descendant-held pipes.'
+    Assert-PshBatch4 ([IO.File]::Exists($timeoutInfiniteDescendantReadyPath)) ('the timeout inf descendant-pipe fixture did not confirm that grandchild output was flushed. Captured text: <{0}>.' -f $timeoutInfiniteDescendantCapturedText)
+    Assert-PshBatch4 ($timeoutInfiniteDescendantMissingMarkers.Count -eq 0) ('timeout inf lost stdout or stderr produced before closing descendant-held pipes. Missing markers: <{0}>. Captured text: <{1}>.' -f ($timeoutInfiniteDescendantMissingMarkers -join ', '), $timeoutInfiniteDescendantCapturedText)
     Assert-PshBatch4 ([IO.File]::Exists($timeoutInfiniteDescendantPidPath)) 'the timeout inf descendant-pipe fixture did not publish its grandchild PID.'
     $timeoutInfiniteDescendantPid = 0
     Assert-PshBatch4 ([int]::TryParse([IO.File]::ReadAllText($timeoutInfiniteDescendantPidPath, $utf8NoBom).Trim(), [ref]$timeoutInfiniteDescendantPid) -and $timeoutInfiniteDescendantPid -gt 0) 'the timeout inf descendant-pipe fixture published an invalid grandchild PID.'
