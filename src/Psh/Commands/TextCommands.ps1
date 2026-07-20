@@ -381,52 +381,6 @@ function Format-PshCatSources {
     return $builder.ToString()
 }
 
-function Resolve-PshPinnedTextTool {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Name
-    )
-
-    $moduleRoot = $null
-    if ($null -ne $ExecutionContext.SessionState.Module) {
-        $moduleRoot = [string]$ExecutionContext.SessionState.Module.ModuleBase
-    }
-    if ([string]::IsNullOrWhiteSpace($moduleRoot)) {
-        $moduleRoot = Split-Path -Path $PSScriptRoot -Parent
-    }
-    $lockCandidates = @(
-        (Join-Path -Path (Join-Path -Path $moduleRoot -ChildPath 'Dependencies') -ChildPath 'native-tools.lock.json'),
-        (Join-Path -Path (Join-Path -Path $moduleRoot -ChildPath 'Tools') -ChildPath 'native-tools.lock.json')
-    )
-    foreach ($lockPath in $lockCandidates) {
-        if (-not [IO.File]::Exists($lockPath)) { continue }
-        try {
-            $lock = [IO.File]::ReadAllText($lockPath, (New-Object Text.UTF8Encoding($false, $true))) | ConvertFrom-Json -ErrorAction Stop
-            $entry = Get-PshNativeToolEntry -Lock $lock -Name $Name
-            if ($null -eq $entry) { continue }
-            $relativePath = Get-PshPropertyValue -InputObject $entry -Name 'Path'
-            if ($null -eq $relativePath) { $relativePath = Get-PshPropertyValue -InputObject $entry -Name 'File' }
-            $sha256 = Get-PshPropertyValue -InputObject $entry -Name 'Sha256'
-            if ([string]::IsNullOrWhiteSpace([string]$relativePath) -or [string]::IsNullOrWhiteSpace([string]$sha256)) {
-                return [PSCustomObject]@{ Code = 5; Message = ('the pinned {0} entry lacks Path or Sha256.' -f $Name); Path = $null }
-            }
-            $toolPath = [IO.Path]::GetFullPath((Join-Path -Path ([IO.Path]::GetDirectoryName($lockPath)) -ChildPath ([string]$relativePath)))
-            if (-not [IO.File]::Exists($toolPath)) {
-                return [PSCustomObject]@{ Code = 4; Message = ('the pinned {0} executable is missing.' -f $Name); Path = $null }
-            }
-            $actual = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $toolPath -Algorithm SHA256 -ErrorAction Stop).Hash
-            if (-not [string]::Equals([string]$actual, ([string]$sha256).Trim(), [StringComparison]::OrdinalIgnoreCase)) {
-                return [PSCustomObject]@{ Code = 5; Message = ('the pinned {0} executable failed SHA256 verification.' -f $Name); Path = $null }
-            }
-            return [PSCustomObject]@{ Code = 0; Message = ''; Path = $toolPath }
-        }
-        catch {
-            return [PSCustomObject]@{ Code = 5; Message = ('cannot verify the pinned {0} tool: {1}' -f $Name, $_.Exception.Message); Path = $null }
-        }
-    }
-    return [PSCustomObject]@{ Code = 4; Message = ('the pinned {0} dependency is unavailable.' -f $Name); Path = $null }
-}
-
 function ConvertTo-PshWindowsCommandLineArgument {
     param(
         [AllowNull()]
@@ -611,7 +565,7 @@ function Invoke-PshPinnedTextTool {
         [bool]$PipelineExpected = $false
     )
 
-    $native = Resolve-PshPinnedTextTool -Name $Name
+    $native = Resolve-PshPinnedNativeTool -Name $Name
     if ([int]$native.Code -ne 0) {
         Write-PshCommandFailure -Command $Name -Code ([int]$native.Code) -Message ([string]$native.Message)
         return

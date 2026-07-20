@@ -1,0 +1,270 @@
+{
+  "schemaVersion": 1,
+  "manifest": {
+    "created": "2026-07-20T00:00:00Z",
+    "namespaceSeed": "goal4-full-tools-supply-chain-v1"
+  },
+  "toolRoot": "tools",
+  "tools": [
+    {
+      "name": "bat",
+      "upstreamName": "bat",
+      "version": "0.26.1",
+      "source": {
+        "repository": "https://github.com/sharkdp/bat",
+        "tag": "v0.26.1",
+        "commit": "979ba22628bc9d8171f2cffca2bd5c90c9fc0a9e"
+      },
+      "license": {
+        "declaredSpdx": "MIT OR Apache-2.0",
+        "files": [
+          {
+            "path": "licenses/bat-0.26.1/LICENSE-APACHE",
+            "sourceUrl": "https://raw.githubusercontent.com/sharkdp/bat/979ba22628bc9d8171f2cffca2bd5c90c9fc0a9e/LICENSE-APACHE",
+            "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+            "size": 11357
+          },
+          {
+            "path": "licenses/bat-0.26.1/LICENSE-MIT",
+            "sourceUrl": "https://raw.githubusercontent.com/sharkdp/bat/979ba22628bc9d8171f2cffca2bd5c90c9fc0a9e/LICENSE-MIT",
+            "sha256": "dccda9eb9533f5c65624a1106536c6cfde46008d58e60b3faf154e8b9fd5b46e",
+            "size": 1097
+          },
+          {
+            "path": "licenses/bat-0.26.1/NOTICE",
+            "sourceUrl": "https://raw.githubusercontent.com/sharkdp/bat/979ba22628bc9d8171f2cffca2bd5c90c9fc0a9e/NOTICE",
+            "sha256": "dd46bdeebfdf5e0e55dd0b4636eff2bfbb8f8efeaea018ed86814710a23c1bda",
+            "size": 248
+          }
+        ]
+      },
+      "versionProbe": {
+        "arguments": ["--version"],
+        "pattern": "^bat 0\\.26\\.1$"
+      },
+      "artifacts": {
+        "win-x64": {
+          "state": "pinned",
+          "architecture": "x86_64",
+          "targetTriple": "x86_64-pc-windows-msvc",
+          "assetId": 323549116,
+          "apiUrl": "https://api.github.com/repos/sharkdp/bat/releases/assets/323549116",
+          "browserUrl": "https://github.com/sharkdp/bat/releases/download/v0.26.1/bat-v0.26.1-x86_64-pc-windows-msvc.zip",
+          "assetName": "bat-v0.26.1-x86_64-pc-windows-msvc.zip",
+          "archiveType": "zip",
+          "archiveSha256": "0f729b4b6f5f28d395c641eacc2e9ff68d0096b85aa0eec344aa62425144b69b",
+          "executableArchivePath": "bat-v0.26.1-x86_64-pc-windows-msvc/bat.exe",
+          "installedPath": "win-x64/bat/bat.exe",
+          "installedSha256": "9ea9f7ab1c27aa5c9390e91543f9f47c6bd17bc53f3e30ac9db762f28f55c4fd",
+          "peMachine": "0x8664"
+        },
+        "win-arm64": {
+          "state": "pinned",
+          "architecture": "aarch64",
+          "targetTriple": "aarch64-pc-windows-msvc",
+          "assetId": 323548313,
+          "apiUrl": "https://api.github.com/repos/sharkdp/bat/releases/assets/323548313",
+          "browserUrl": "https://github.com/sharkdp/bat/releases/download/v0.26.1/bat-v0.26.1-aarch64-pc-windows-msvc.zip",
+          "assetName": "bat-v0.26.1-aarch64-pc-windows-msvc.zip",
+          "archiveType": "zip",
+          "archiveSha256": "af07dd1939e99f7f5892d197fc5653cb8cb6c5999552731135ad156eca7e38a5",
+          "executableArchivePath": "bat-v0.26.1-aarch64-pc-windows-msvc/bat.exe",
+          "installedPath": "win-arm64/bat/bat.exe",
+          "installedSha256": "e0b72283ac0ba6b7ba2c5b91233910ef40246f6f00a46cbda729dfcb3bde808c",
+          "peMachine": "0xAA64"
+        }
+      }
+    },
+    {
+      "name": "fd",
+      "upstreamName": "fd",
+      "version": "10.4.2",
+      "source": {
+        "repository": "https://github.com/sharkdp/fd",
+        "tag": "v10.4.2",
+        "commit": "7027d45303b412be6fa9c09d689cc6276748fb38"
+      },
+      "license": {
+        "declaredSpdx": "MIT OR Apache-2.0",
+        "files": [
+          {
+            "path": "licenses/fd-10.4.2/LICENSE-APACHE",
+            "sourceUrl": "https://raw.githubusercontent.com/sharkdp/fd/7027d45303b412be6fa9c09d689cc6276748fb38/LICENSE-APACHE",
+            "sha256": "73c83c60d817e7df1943cb3f0af81e4939a8352c9a96c2fd00451b1116fa635c",
+            "size": 10838
+          },
+          {
+            "path": "licenses/fd-10.4.2/LICENSE-MIT",
+            "sourceUrl": "https://raw.githubusercontent.com/sharkdp/fd/7027d45303b412be6fa9c09d689cc6276748fb38/LICENSE-MIT",
+            "sha256": "322cfc7aa0c774d0eca3b2610f1d414de3ddbd7d8dd4b9dea941a13a6eb07455",
+            "size": 1082
+          }
+        ]
+      },
+      "versionProbe": {
+        "arguments": ["--version"],
+        "pattern": "^fd 10\\.4\\.2$"
+      },
+      "artifacts": {
+        "win-x64": {
+          "state": "pinned",
+          "architecture": "x86_64",
+          "targetTriple": "x86_64-pc-windows-msvc",
+          "assetId": 370661516,
+          "apiUrl": "https://api.github.com/repos/sharkdp/fd/releases/assets/370661516",
+          "browserUrl": "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-x86_64-pc-windows-msvc.zip",
+          "assetName": "fd-v10.4.2-x86_64-pc-windows-msvc.zip",
+          "archiveType": "zip",
+          "archiveSha256": "b2816e506390a89941c63c9187d58a3cc10e9a55f2ef0685f9ea0eccaf7c98c8",
+          "executableArchivePath": "fd-v10.4.2-x86_64-pc-windows-msvc/fd.exe",
+          "installedPath": "win-x64/fd/fd.exe",
+          "installedSha256": "4c9d082ee20f0d9e44881ac4e92adf765efc314d82103c53d7f576bd78dc5761",
+          "peMachine": "0x8664"
+        },
+        "win-arm64": {
+          "state": "pinned",
+          "architecture": "aarch64",
+          "targetTriple": "aarch64-pc-windows-msvc",
+          "assetId": 370662661,
+          "apiUrl": "https://api.github.com/repos/sharkdp/fd/releases/assets/370662661",
+          "browserUrl": "https://github.com/sharkdp/fd/releases/download/v10.4.2/fd-v10.4.2-aarch64-pc-windows-msvc.zip",
+          "assetName": "fd-v10.4.2-aarch64-pc-windows-msvc.zip",
+          "archiveType": "zip",
+          "archiveSha256": "4f9110c2d5b33a7f760bfa5510f4c113d828109f7277d421b1053a9943c0fc92",
+          "executableArchivePath": "fd-v10.4.2-aarch64-pc-windows-msvc/fd.exe",
+          "installedPath": "win-arm64/fd/fd.exe",
+          "installedSha256": "e5f456004d0f550b5a67a0e33415e6d40520c57d1d3860dafca9bd0e24a8f977",
+          "peMachine": "0xAA64"
+        }
+      }
+    },
+    {
+      "name": "jq",
+      "upstreamName": "jq",
+      "version": "1.8.2",
+      "source": {
+        "repository": "https://github.com/jqlang/jq",
+        "tag": "jq-1.8.2",
+        "commit": "34f7186b86743a083a589741b6cea95293524108"
+      },
+      "license": {
+        "declaredSpdx": "MIT AND LicenseRef-jq-embedded-notices",
+        "files": [
+          {
+            "path": "licenses/jq-1.8.2/COPYING",
+            "sourceUrl": "https://raw.githubusercontent.com/jqlang/jq/34f7186b86743a083a589741b6cea95293524108/COPYING",
+            "sha256": "ad2b4a266b2268939c1446979759706077421cf906a203aa188c6f396e8cfd74",
+            "size": 7887
+          }
+        ]
+      },
+      "licenseNotes": "COPYING includes the MIT text and embedded dtoa, ICU, Heimdal, and NetBSD notices; retain the complete file.",
+      "versionProbe": {
+        "arguments": ["--version"],
+        "pattern": "^jq-1\\.8\\.2$"
+      },
+      "artifacts": {
+        "win-x64": {
+          "state": "pinned",
+          "architecture": "x86_64",
+          "targetTriple": "windows-amd64",
+          "assetId": 453012788,
+          "apiUrl": "https://api.github.com/repos/jqlang/jq/releases/assets/453012788",
+          "browserUrl": "https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-windows-amd64.exe",
+          "assetName": "jq-windows-amd64.exe",
+          "archiveType": "exe",
+          "archiveSha256": "a6fc67fedaf9128a3309a1e2ebb8b986aeccf70122ee46d2cb4849e423f0c627",
+          "executableArchivePath": "jq-windows-amd64.exe",
+          "installedPath": "win-x64/jq/jq.exe",
+          "installedSha256": "a6fc67fedaf9128a3309a1e2ebb8b986aeccf70122ee46d2cb4849e423f0c627",
+          "peMachine": "0x8664"
+        },
+        "win-arm64": {
+          "state": "pinned",
+          "architecture": "aarch64",
+          "targetTriple": "windows-arm64",
+          "assetId": 453012789,
+          "apiUrl": "https://api.github.com/repos/jqlang/jq/releases/assets/453012789",
+          "browserUrl": "https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-windows-arm64.exe",
+          "assetName": "jq-windows-arm64.exe",
+          "archiveType": "exe",
+          "archiveSha256": "083b5377392bc57cf27052b6d20a2d927770683bca844632901ff38b4b7b0ac7",
+          "executableArchivePath": "jq-windows-arm64.exe",
+          "installedPath": "win-arm64/jq/jq.exe",
+          "installedSha256": "083b5377392bc57cf27052b6d20a2d927770683bca844632901ff38b4b7b0ac7",
+          "peMachine": "0xAA64"
+        }
+      }
+    },
+    {
+      "name": "rg",
+      "upstreamName": "ripgrep",
+      "version": "15.2.0",
+      "source": {
+        "repository": "https://github.com/BurntSushi/ripgrep",
+        "tag": "15.2.0",
+        "tagObject": "6ec72defacfb042f203ca0b4bf2513a0a5505a7e",
+        "commit": "e89fff89ac9af12e8d4ce9d5fd07beb408ca730f"
+      },
+      "license": {
+        "declaredSpdx": "Unlicense OR MIT",
+        "files": [
+          {
+            "path": "licenses/ripgrep-15.2.0/COPYING",
+            "sourceUrl": "https://raw.githubusercontent.com/BurntSushi/ripgrep/e89fff89ac9af12e8d4ce9d5fd07beb408ca730f/COPYING",
+            "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f",
+            "size": 126
+          },
+          {
+            "path": "licenses/ripgrep-15.2.0/LICENSE-MIT",
+            "sourceUrl": "https://raw.githubusercontent.com/BurntSushi/ripgrep/e89fff89ac9af12e8d4ce9d5fd07beb408ca730f/LICENSE-MIT",
+            "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f",
+            "size": 1081
+          },
+          {
+            "path": "licenses/ripgrep-15.2.0/UNLICENSE",
+            "sourceUrl": "https://raw.githubusercontent.com/BurntSushi/ripgrep/e89fff89ac9af12e8d4ce9d5fd07beb408ca730f/UNLICENSE",
+            "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c",
+            "size": 1211
+          }
+        ]
+      },
+      "versionProbe": {
+        "arguments": ["--version"],
+        "pattern": "^ripgrep 15\\.2\\.0$"
+      },
+      "artifacts": {
+        "win-x64": {
+          "state": "pinned",
+          "architecture": "x86_64",
+          "targetTriple": "x86_64-pc-windows-msvc",
+          "assetId": 478119643,
+          "apiUrl": "https://api.github.com/repos/BurntSushi/ripgrep/releases/assets/478119643",
+          "browserUrl": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip",
+          "assetName": "ripgrep-15.2.0-x86_64-pc-windows-msvc.zip",
+          "archiveType": "zip",
+          "archiveSha256": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5",
+          "executableArchivePath": "ripgrep-15.2.0-x86_64-pc-windows-msvc/rg.exe",
+          "installedPath": "win-x64/rg/rg.exe",
+          "installedSha256": "14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680",
+          "peMachine": "0x8664"
+        },
+        "win-arm64": {
+          "state": "pinned",
+          "architecture": "aarch64",
+          "targetTriple": "aarch64-pc-windows-msvc",
+          "assetId": 478119680,
+          "apiUrl": "https://api.github.com/repos/BurntSushi/ripgrep/releases/assets/478119680",
+          "browserUrl": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-pc-windows-msvc.zip",
+          "assetName": "ripgrep-15.2.0-aarch64-pc-windows-msvc.zip",
+          "archiveType": "zip",
+          "archiveSha256": "e4abca10c3a64ebea742667dd7009449d49403db5460dd6873e389fa2945360f",
+          "executableArchivePath": "ripgrep-15.2.0-aarch64-pc-windows-msvc/rg.exe",
+          "installedPath": "win-arm64/rg/rg.exe",
+          "installedSha256": "d33a29a9ef03c9f4c03be9e8d88498e6e2d2e566d64cdbdef97f9afc8f13120c",
+          "peMachine": "0xAA64"
+        }
+      }
+    }
+  ]
+}

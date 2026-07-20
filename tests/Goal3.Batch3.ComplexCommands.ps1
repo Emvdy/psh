@@ -38,6 +38,39 @@ function Assert-PshBatch3 {
     $script:assertionCount++
 }
 
+function New-PshBatch3NativeTool {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$InstalledPath,
+        [Parameter(Mandatory = $true)][string]$InstalledSha256,
+        [Parameter(Mandatory = $true)][string]$ArmInstalledPath,
+        [Parameter(Mandatory = $true)][string]$ArmInstalledSha256,
+        [Parameter(Mandatory = $true)][int]$AssetId
+    )
+
+    $artifactX64 = [ordered]@{
+        state = 'pinned'; architecture = 'x86_64'; targetTriple = 'x86_64-pc-windows-msvc'
+        assetId = $AssetId; apiUrl = ('https://fixture.invalid/assets/{0}' -f $AssetId)
+        browserUrl = ('https://fixture.invalid/download/{0}' -f $AssetId); assetName = ('{0}-fixture.exe' -f $Name)
+        archiveType = 'exe'; archiveSha256 = $InstalledSha256; executableArchivePath = $InstalledPath
+        installedPath = $InstalledPath; installedSha256 = $InstalledSha256; peMachine = '0x8664'
+    }
+    $artifactArm64 = [ordered]@{
+        state = 'pinned'; architecture = 'aarch64'; targetTriple = 'aarch64-pc-windows-msvc'
+        assetId = $AssetId + 1; apiUrl = ('https://fixture.invalid/assets/{0}' -f ($AssetId + 1))
+        browserUrl = ('https://fixture.invalid/download/{0}' -f ($AssetId + 1)); assetName = ('{0}-fixture-arm64.exe' -f $Name)
+        archiveType = 'exe'; archiveSha256 = $ArmInstalledSha256; executableArchivePath = $ArmInstalledPath
+        installedPath = $ArmInstalledPath; installedSha256 = $ArmInstalledSha256; peMachine = '0xAA64'
+    }
+    return [ordered]@{
+        name = $Name; upstreamName = $Name; version = 'fixture-1.0.0'
+        source = [ordered]@{ repository = 'https://fixture.invalid/native'; tag = 'fixture-1.0.0'; commit = ('fixture-{0}' -f $AssetId) }
+        license = [ordered]@{ declaredSpdx = 'MIT'; files = @([ordered]@{ path = 'LICENSE'; sourceUrl = 'https://fixture.invalid/LICENSE'; sha256 = $InstalledSha256 }) }
+        versionProbe = [ordered]@{ arguments = @('--version'); pattern = 'fixture-1\.0\.0' }
+        artifacts = [ordered]@{ 'win-x64' = $artifactX64; 'win-arm64' = $artifactArm64 }
+    }
+}
+
 function Invoke-PshBatch3Command {
     param(
         [Parameter(Mandatory = $true)]
@@ -307,7 +340,7 @@ public static class PshBatch3NativeCapture
     )
     $cscPath = @($cscCandidates | Where-Object { [IO.File]::Exists($_) } | Select-Object -First 1)[0]
     if ([string]::IsNullOrWhiteSpace([string]$cscPath)) { throw 'The Windows C# compiler for the native capture fixture is unavailable.' }
-    $compilerOutput = @(& $cscPath '/nologo' '/target:exe' ('/out:{0}' -f $outputPath) $sourcePath 2>&1)
+    $compilerOutput = @(& $cscPath '/nologo' '/target:exe' '/platform:x64' ('/out:{0}' -f $outputPath) $sourcePath 2>&1)
     if ($LASTEXITCODE -ne 0 -or -not [IO.File]::Exists($outputPath)) {
         throw ('The native capture fixture failed to compile: {0}' -f ($compilerOutput -join ' | '))
     }
@@ -336,6 +369,7 @@ try {
 
     $commandSourceRoot = Join-Path $RepositoryRoot 'src/Psh/Commands'
     $commandSourcePaths = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $commandSourceRoot -Filter '*.ps1' -File -ErrorAction Stop)
+    $commandSourcePaths += Microsoft.PowerShell.Management\Get-Item -LiteralPath (Join-Path $RepositoryRoot 'src/Psh/NativeTools.ps1') -ErrorAction Stop
     $commandSourcePaths += Microsoft.PowerShell.Management\Get-Item -LiteralPath (Join-Path $RepositoryRoot 'src/Psh/Psh.psm1') -ErrorAction Stop
     Assert-PshBatch3 ($commandSourcePaths.Count -ge 1) 'No command implementation source was found.'
     foreach ($sourcePath in $commandSourcePaths) {
@@ -698,6 +732,12 @@ exit 2
     $powershellPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
     $helperArguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $helperPath, 'capture', $helperRoot)
     $nativeCapturePath = if ($isWindowsPlatform) { New-PshBatch3WindowsNativeCapture -Root $helperRoot } else { $null }
+    if ($isWindowsPlatform) {
+        $nativeCaptureBytes = [IO.File]::ReadAllBytes($nativeCapturePath)
+        $nativeCapturePeOffset = [BitConverter]::ToInt32($nativeCaptureBytes, 0x3c)
+        $nativeCaptureMachine = ('0x{0:X4}' -f [BitConverter]::ToUInt16($nativeCaptureBytes, $nativeCapturePeOffset + 4))
+        Assert-PshBatch3 ([string]$nativeCaptureMachine -ceq '0x8664') 'Batch3 Windows native fixture was not compiled as an x64 PE.'
+    }
 
     $xargsWildcardSentinel = Join-Path $sentinelRoot 'xargs-wildcard-command.txt'
     $xargsWildcard = Invoke-PshBatch3Command -Name xargs -Arguments @('pw*', '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $helperPath, 'sentinel', $xargsWildcardSentinel) -PipelineInput @('ignored') -UsePipeline
@@ -898,25 +938,36 @@ exit 0
     $env:PSH_EDITION = 'Full'
     $fullMissingPinned = Invoke-PshBatch3Command -Name jq -Arguments @('--version')
     Assert-PshBatch3 ($fullMissingPinned.ExitCode -eq 4 -and -not [IO.File]::Exists($pathFallbackSentinel)) 'Full jq fell back to PATH instead of requiring the pinned dependency.'
+    $missingJqCapability = @((Get-PshCapabilities).commands | Where-Object { [string]$_.name -ceq 'jq' })[0]
+    Assert-PshBatch3 ([string]$missingJqCapability.activeBackend -ceq 'unavailable' -and
+        [string]$missingJqCapability.nativeState -ceq 'unavailable') 'Full reported a healthy or PowerShell jq backend while the pinned dependency was missing.'
     Remove-Module -Name Psh -Force -ErrorAction Stop
 
     $fullModuleRoot = Join-Path $testRoot 'full-module/Psh'
     [void][IO.Directory]::CreateDirectory((Split-Path $fullModuleRoot -Parent))
     Microsoft.PowerShell.Management\Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'src/Psh') -Destination $fullModuleRoot -Recurse -Force
-    $dependencyRoot = Join-Path $fullModuleRoot 'Dependencies'
-    $nativeRoot = Join-Path $dependencyRoot 'native'
-    [void][IO.Directory]::CreateDirectory($nativeRoot)
+    $toolsRoot = Join-Path $fullModuleRoot 'Tools'
+    $x64Root = Join-Path $toolsRoot 'win-x64/jq'
+    $arm64Root = Join-Path $toolsRoot 'win-arm64/jq'
+    [void][IO.Directory]::CreateDirectory($x64Root)
+    [void][IO.Directory]::CreateDirectory($arm64Root)
     if ($isWindowsPlatform) {
-        $jqToolRelativePath = 'native/jq-native.exe'
-        $jqToolPath = Join-Path $nativeRoot 'jq-native.exe'
+        $jqToolRelativePath = 'win-x64/jq/jq-native.exe'
+        $jqArmToolRelativePath = 'win-arm64/jq/jq-native.exe'
+        $jqToolPath = Join-Path $toolsRoot $jqToolRelativePath
+        $jqArmToolPath = Join-Path $toolsRoot $jqArmToolRelativePath
         Microsoft.PowerShell.Management\Copy-Item -LiteralPath $nativeCapturePath -Destination $jqToolPath -Force
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath $nativeCapturePath -Destination $jqArmToolPath -Force
     }
     else {
-        $jqToolRelativePath = 'native/jq-native'
-        $jqToolPath = Join-Path $nativeRoot 'jq-native'
+        $jqToolRelativePath = 'win-x64/jq/jq-native'
+        $jqArmToolRelativePath = 'win-arm64/jq/jq-native'
+        $jqToolPath = Join-Path $toolsRoot $jqToolRelativePath
+        $jqArmToolPath = Join-Path $toolsRoot $jqArmToolRelativePath
         $jqToolText = @'
 #!/bin/sh
 case "$1" in
+    --version) printf 'fixture-1.0.0\n'; exit 0 ;;
     --no-read) printf 'NO_READ\n'; exit 0 ;;
     --exit-one) exit 1 ;;
     --exit-two) exit 2 ;;
@@ -936,23 +987,36 @@ printf '\n'
 exit 0
 '@
         [IO.File]::WriteAllText($jqToolPath, $jqToolText, $utf8NoBom)
+        [IO.File]::WriteAllText($jqArmToolPath, $jqToolText, $utf8NoBom)
         & '/bin/chmod' '755' $jqToolPath
         if ($LASTEXITCODE -ne 0) { throw 'chmod 755 failed for the pinned jq fixture.' }
+        & '/bin/chmod' '755' $jqArmToolPath
+        if ($LASTEXITCODE -ne 0) { throw 'chmod 755 failed for the pinned jq ARM64 fixture.' }
     }
+    $jqSha256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $jqToolPath -Algorithm SHA256).Hash
+    $jqArmSha256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $jqArmToolPath -Algorithm SHA256).Hash
     $lock = [ordered]@{
-        Tools = @(
-            [ordered]@{ Name = 'jq'; Path = $jqToolRelativePath; Sha256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $jqToolPath -Algorithm SHA256).Hash }
+        schemaVersion = 1
+        manifest = [ordered]@{ created = '2026-07-20T00:00:00Z'; namespaceSeed = 'goal4-full-tools-supply-chain-v1' }
+        tools = @(
+            (New-PshBatch3NativeTool -Name 'bat' -InstalledPath 'win-x64/bat/bat.exe' -InstalledSha256 (('1' * 64) -join '') -ArmInstalledPath 'win-arm64/bat/bat.exe' -ArmInstalledSha256 (('2' * 64) -join '') -AssetId 910000)
+            (New-PshBatch3NativeTool -Name 'fd' -InstalledPath 'win-x64/fd/fd.exe' -InstalledSha256 (('3' * 64) -join '') -ArmInstalledPath 'win-arm64/fd/fd.exe' -ArmInstalledSha256 (('4' * 64) -join '') -AssetId 920000)
+            (New-PshBatch3NativeTool -Name 'jq' -InstalledPath $jqToolRelativePath -InstalledSha256 $jqSha256 -ArmInstalledPath $jqArmToolRelativePath -ArmInstalledSha256 $jqArmSha256 -AssetId 940000)
+            (New-PshBatch3NativeTool -Name 'rg' -InstalledPath 'win-x64/rg/rg.exe' -InstalledSha256 (('5' * 64) -join '') -ArmInstalledPath 'win-arm64/rg/rg.exe' -ArmInstalledSha256 (('6' * 64) -join '') -AssetId 930000)
         )
     }
-    [IO.File]::WriteAllText((Join-Path $dependencyRoot 'native-tools.lock.json'), ($lock | ConvertTo-Json -Depth 5), $utf8NoBom)
+    [IO.File]::WriteAllText((Join-Path $toolsRoot 'native-tools.lock.json'), ($lock | ConvertTo-Json -Depth 10), $utf8NoBom)
     Import-Module -Name (Join-Path $fullModuleRoot 'Psh.psd1') -Force -ErrorAction Stop
+    & (Get-Module -Name Psh -ErrorAction Stop) { $script:PshNativeToolArchitectureOverride = 'win-x64' }
     $fullCapabilities = Get-PshCapabilities
     foreach ($name in @('sed', 'awk', 'xargs')) {
         $capability = @($fullCapabilities.commands | Where-Object { [string]$_.name -ceq $name })[0]
         Assert-PshBatch3 ([string]$capability.activeBackend -ceq 'powershell') ('Full reports the wrong active backend for {0}.' -f $name)
     }
     $fullJqCapability = @($fullCapabilities.commands | Where-Object { [string]$_.name -ceq 'jq' })[0]
-    Assert-PshBatch3 ([string]$fullJqCapability.activeBackend -ceq 'native:jq') 'Full does not report native:jq as the active jq backend.'
+    Assert-PshBatch3 ([string]$fullJqCapability.activeBackend -ceq 'native:jq' -and
+        [string]$fullJqCapability.nativeState -ceq 'pinned' -and
+        [string]$fullJqCapability.nativeVersion -ceq 'fixture-1.0.0') 'Full does not report the verified pinned jq version and backend.'
 
     if ($isWindowsPlatform) {
         $fullCommandModule = Get-Module -Name Psh -ErrorAction Stop
@@ -1002,6 +1066,24 @@ exit 0
     Assert-PshBatch3 ($fullJqExitOne.ExitCode -eq 1 -and $fullJqExitTwo.ExitCode -eq 2 -and $fullJqExitNine.ExitCode -eq 3) 'Full jq did not preserve/normalize native exits.'
     Assert-PshBatch3 (-not [IO.File]::Exists($pathFallbackSentinel)) 'Full jq invoked a PATH fallback despite a valid pinned tool.'
 
+    $lockPath = Join-Path $toolsRoot 'native-tools.lock.json'
+    $lockText = [IO.File]::ReadAllText($lockPath, $utf8NoBom)
+    $lockObject = $lockText | ConvertFrom-Json -ErrorAction Stop
+    $jqEntry = @($lockObject.tools | Where-Object { [string]$_.name -ceq 'jq' })[0]
+    $originalJqPath = [string]$jqEntry.artifacts.'win-x64'.installedPath
+    $jqEntry.artifacts.'win-x64'.installedPath = '../escape.exe'
+    [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
+    $fullJqPathEscape = Invoke-PshBatch3Command -Name jq -Arguments @('--version')
+    Assert-PshBatch3 ($fullJqPathEscape.ExitCode -eq 5 -and -not [IO.File]::Exists($pathFallbackSentinel)) 'Full jq accepted an installedPath outside Tools.'
+    $jqEntry.artifacts.'win-x64'.installedPath = $originalJqPath
+    $originalJqMachine = [string]$jqEntry.artifacts.'win-x64'.peMachine
+    $jqEntry.artifacts.'win-x64'.peMachine = '0xAA64'
+    [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
+    $fullJqWrongArchitecture = Invoke-PshBatch3Command -Name jq -Arguments @('--version')
+    Assert-PshBatch3 ($fullJqWrongArchitecture.ExitCode -eq 5 -and -not [IO.File]::Exists($pathFallbackSentinel)) 'Full jq accepted a wrong-architecture PE machine.'
+    $jqEntry.artifacts.'win-x64'.peMachine = $originalJqMachine
+    [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
+
     $fullSed = Invoke-PshBatch3Command -Name sed -Arguments @('-n', '1p') -PipelineInput @('full sed') -UsePipeline
     $fullAwk = Invoke-PshBatch3Command -Name awk -Arguments @('{print $1}') -PipelineInput @('full awk') -UsePipeline
     $fullXargs = Invoke-PshBatch3Command -Name xargs -PipelineInput @('full xargs') -UsePipeline
@@ -1013,6 +1095,13 @@ exit 0
     [IO.File]::Delete($jqToolPath)
     $fullJqMissing = Invoke-PshBatch3Command -Name jq -Arguments @('--version')
     Assert-PshBatch3 ($fullJqMissing.ExitCode -eq 4 -and -not [IO.File]::Exists($pathFallbackSentinel)) 'Full jq missing pinned tool did not exit 4 or fell back to PATH.'
+
+    Remove-Module -Name Psh -Force -ErrorAction Stop
+    if ([IO.Directory]::Exists($toolsRoot)) { [IO.Directory]::Delete($toolsRoot, $true) }
+    $env:PSH_EDITION = 'Core'
+    Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+    $coreWithoutTools = Invoke-PshBatch3Command -Name jq -Arguments @('-r', '.') -PipelineInput @('{"core":true}') -UsePipeline
+    Assert-PshBatch3 ($coreWithoutTools.ExitCode -eq 0) 'Core jq failed after the optional Tools directory was removed.'
 
     foreach ($name in $commandNames) {
         Assert-PshBatch3 ($covered.ContainsKey($name)) ('no behavior row executed for {0}.' -f $name)

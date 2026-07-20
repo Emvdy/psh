@@ -1,0 +1,288 @@
+name: Goal 4 Full Tools And Supply Chain
+
+on:
+  push:
+    branches:
+      - main
+      - 'goal4/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-powershell:
+    name: Windows PowerShell 5.1 x64
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Validate supply chain and regressions
+        shell: powershell
+        env:
+          REPORT_ROOT: ${{ runner.temp }}\goal4-report-winps51
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [void](New-Item -ItemType Directory -Path $env:REPORT_ROOT -Force)
+          $transcriptPath = Join-Path $env:REPORT_ROOT 'validation-transcript.txt'
+          Start-Transcript -Path $transcriptPath -Force
+          try {
+              $PSVersionTable | Out-String | Write-Output
+              if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
+                  throw 'The Windows PowerShell job must run PowerShell 5.1.'
+              }
+
+              .\scripts\Generate-CommandArtifacts.ps1 -Check
+              .\scripts\Generate-SupplyChainArtifacts.ps1 -Check
+              .\scripts\Test-NativeTools.ps1 -Architecture all
+              .\tests\Goal4.Acceptance.ps1
+              .\tests\Goal1.Acceptance.ps1
+              .\scripts\Test-InteractiveDependencies.ps1
+              .\tests\Goal2.Acceptance.ps1
+              .\tests\Goal3.Batch1.Config.ps1
+              .\tests\Goal3.Batch1.AliasScope.ps1
+              .\tests\Goal3.Batch1.FileCommands.ps1
+              .\tests\Goal3.Batch2.TextCommands.ps1
+              .\tests\Goal3.Batch3.ComplexCommands.ps1
+              .\tests\Goal3.Batch4.SystemProcessCommands.ps1
+              .\tests\Goal3.Batch4.NetworkCommands.ps1
+              .\tests\Goal3.Batch4.ArchiveCommands.ps1
+          }
+          finally {
+              Stop-Transcript
+          }
+
+      - name: Core smoke after deleting tools
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $coreRoot = Join-Path $env:RUNNER_TEMP 'goal4-core-module-winps51'
+          $coreModule = Join-Path $coreRoot 'Psh'
+          New-Item -ItemType Directory -Path $coreRoot -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'src/Psh') -Destination $coreModule -Recurse -Force
+          Remove-Item -LiteralPath (Join-Path $coreModule 'Tools') -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $coreModule 'Dependencies/native-tools.lock.json') -Force -ErrorAction SilentlyContinue
+          $oldEdition = $env:PSH_EDITION
+          try {
+              $env:PSH_EDITION = 'Core'
+              Import-Module -Name (Join-Path $coreModule 'Psh.psd1') -Force -ErrorAction Stop
+              $capabilities = Get-PshCapabilities
+              if (@($capabilities.commands).Count -ne 64) { throw 'Core smoke did not expose all 64 commands.' }
+          }
+          finally {
+              Remove-Module -Name Psh -Force -ErrorAction SilentlyContinue
+              if ($null -eq $oldEdition) { Remove-Item Env:PSH_EDITION -ErrorAction SilentlyContinue } else { $env:PSH_EDITION = $oldEdition }
+          }
+
+      - name: Full x64 version report
+        shell: powershell
+        env:
+          REPORT_ROOT: ${{ runner.temp }}\goal4-report-winps51
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fullRoot = Join-Path $env:RUNNER_TEMP 'goal4-full-module-winps51'
+          $fullModule = Join-Path $fullRoot 'Psh'
+          $fullTools = Join-Path $fullModule 'Tools'
+          New-Item -ItemType Directory -Path $fullRoot -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'src/Psh') -Destination $fullModule -Recurse -Force
+          New-Item -ItemType Directory -Path $fullTools -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'tools/native-tools.lock.json') -Destination (Join-Path $fullTools 'native-tools.lock.json') -Force
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'tools/win-x64') -Destination $fullTools -Recurse -Force
+          $lock = Get-Content -LiteralPath (Join-Path $fullTools 'native-tools.lock.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+          $report = [ordered]@{ edition = 'Full'; architecture = 'win-x64'; tools = @() }
+          $oldEdition = $env:PSH_EDITION
+          try {
+              $env:PSH_EDITION = 'Full'
+              Import-Module -Name (Join-Path $fullModule 'Psh.psd1') -Force -ErrorAction Stop
+              $capabilities = Get-PshCapabilities
+              if ([string]$capabilities.edition -cne 'Full' -or @($capabilities.commands).Count -ne 64) {
+                  throw 'Psh did not report a complete Full capability set.'
+              }
+              foreach ($entry in @($lock.tools)) {
+                  $artifact = $entry.artifacts.'win-x64'
+                  $capability = @($capabilities.commands | Where-Object { [string]$_.name -ceq [string]$entry.name })[0]
+                  if ($null -eq $capability) { throw ('Psh capability is missing for {0}.' -f $entry.name) }
+                  if ([string]$capability.activeBackend -cne ('native:{0}' -f $entry.name) -or
+                      [string]$capability.nativeState -cne 'pinned' -or
+                      [string]$capability.nativeVersion -cne [string]$entry.version -or
+                      [string]$capability.nativeSha256 -cne ([string]$artifact.installedSha256).ToLowerInvariant() -or
+                      [string]$capability.nativeArchitecture -cne 'win-x64') {
+                      throw ('Psh reported invalid pinned capability metadata for {0}: {1}' -f $entry.name, ($capability | ConvertTo-Json -Compress -Depth 8))
+                  }
+                  $toolPath = Join-Path $fullTools ([string]$artifact.installedPath)
+                  $probeArgs = @($entry.versionProbe.arguments)
+                  $probeLines = @(& $toolPath @probeArgs 2>&1 | ForEach-Object { [string]$_ })
+                  $probeExitCode = [int]$LASTEXITCODE
+                  $probeOutput = $probeLines -join "`n"
+                  $probeFirstLine = if ($probeLines.Count -eq 0) { '' } else { ([string]$probeLines[0]).Trim() }
+                  if ($probeExitCode -ne 0 -or $probeLines.Count -eq 0 -or $probeFirstLine -notmatch [string]$entry.versionProbe.pattern) {
+                      throw ('Pinned {0} version probe failed: {1}' -f $entry.name, $probeOutput)
+                  }
+                  $wrapperCommand = Get-Command -Name ([string]$entry.name) -CommandType Function -ErrorAction Stop
+                  if ([string]$wrapperCommand.ModuleName -cne 'Psh') { throw ('Public Psh wrapper is not active for {0}.' -f $entry.name) }
+                  $wrapperLines = @(& $wrapperCommand @probeArgs 2>&1 | ForEach-Object { [string]$_ })
+                  $wrapperExitCode = [int]$LASTEXITCODE
+                  $wrapperOutput = $wrapperLines -join "`n"
+                  $wrapperFirstLine = if ($wrapperLines.Count -eq 0) { '' } else { ([string]$wrapperLines[0]).Trim() }
+                  if ($wrapperExitCode -ne 0 -or $wrapperLines.Count -eq 0 -or $wrapperFirstLine -notmatch [string]$entry.versionProbe.pattern) {
+                      throw ('Public Psh {0} wrapper version probe failed: {1}' -f $entry.name, $wrapperOutput)
+                  }
+                  $report.tools += [ordered]@{ name = [string]$entry.name; capability = $capability; path = $toolPath; probeOutput = $probeOutput; wrapperProbeOutput = $wrapperOutput }
+              }
+          }
+          finally {
+              Remove-Module -Name Psh -Force -ErrorAction SilentlyContinue
+              if ($null -eq $oldEdition) { Remove-Item Env:PSH_EDITION -ErrorAction SilentlyContinue } else { $env:PSH_EDITION = $oldEdition }
+          }
+          $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
+          [IO.File]::WriteAllText((Join-Path $env:REPORT_ROOT 'full-version-report.json'), (($report | ConvertTo-Json -Depth 8) + "`n"), $utf8)
+
+      - name: Upload Goal 4 report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal4-report-winps51
+          path: ${{ runner.temp }}\goal4-report-winps51
+          if-no-files-found: warn
+          retention-days: 30
+
+  powershell:
+    name: PowerShell 7 x64
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Validate supply chain and regressions
+        shell: pwsh
+        env:
+          REPORT_ROOT: ${{ runner.temp }}\goal4-report-pwsh7
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [void](New-Item -ItemType Directory -Path $env:REPORT_ROOT -Force)
+          $transcriptPath = Join-Path $env:REPORT_ROOT 'validation-transcript.txt'
+          Start-Transcript -Path $transcriptPath -Force
+          try {
+              $PSVersionTable | Out-String | Write-Output
+              if ($PSVersionTable.PSVersion.Major -lt 7) {
+                  throw 'The PowerShell job must run PowerShell 7 or later.'
+              }
+
+              ./scripts/Generate-CommandArtifacts.ps1 -Check
+              ./scripts/Generate-SupplyChainArtifacts.ps1 -Check
+              ./scripts/Test-NativeTools.ps1 -Architecture all
+              ./tests/Goal4.Acceptance.ps1
+              ./tests/Goal1.Acceptance.ps1
+              ./scripts/Test-InteractiveDependencies.ps1
+              ./tests/Goal2.Acceptance.ps1
+              ./tests/Goal3.Batch1.Config.ps1
+              ./tests/Goal3.Batch1.AliasScope.ps1
+              ./tests/Goal3.Batch1.FileCommands.ps1
+              ./tests/Goal3.Batch2.TextCommands.ps1
+              ./tests/Goal3.Batch3.ComplexCommands.ps1
+              ./tests/Goal3.Batch4.SystemProcessCommands.ps1
+              ./tests/Goal3.Batch4.NetworkCommands.ps1
+              ./tests/Goal3.Batch4.ArchiveCommands.ps1
+          }
+          finally {
+              Stop-Transcript
+          }
+
+      - name: Core smoke after deleting tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $coreRoot = Join-Path $env:RUNNER_TEMP 'goal4-core-module-pwsh7'
+          $coreModule = Join-Path $coreRoot 'Psh'
+          New-Item -ItemType Directory -Path $coreRoot -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'src/Psh') -Destination $coreModule -Recurse -Force
+          Remove-Item -LiteralPath (Join-Path $coreModule 'Tools') -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $coreModule 'Dependencies/native-tools.lock.json') -Force -ErrorAction SilentlyContinue
+          $oldEdition = $env:PSH_EDITION
+          try {
+              $env:PSH_EDITION = 'Core'
+              Import-Module -Name (Join-Path $coreModule 'Psh.psd1') -Force -ErrorAction Stop
+              $capabilities = Get-PshCapabilities
+              if (@($capabilities.commands).Count -ne 64) { throw 'Core smoke did not expose all 64 commands.' }
+          }
+          finally {
+              Remove-Module -Name Psh -Force -ErrorAction SilentlyContinue
+              if ($null -eq $oldEdition) { Remove-Item Env:PSH_EDITION -ErrorAction SilentlyContinue } else { $env:PSH_EDITION = $oldEdition }
+          }
+
+      - name: Full x64 version report
+        shell: pwsh
+        env:
+          REPORT_ROOT: ${{ runner.temp }}\goal4-report-pwsh7
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fullRoot = Join-Path $env:RUNNER_TEMP 'goal4-full-module-pwsh7'
+          $fullModule = Join-Path $fullRoot 'Psh'
+          $fullTools = Join-Path $fullModule 'Tools'
+          New-Item -ItemType Directory -Path $fullRoot -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'src/Psh') -Destination $fullModule -Recurse -Force
+          New-Item -ItemType Directory -Path $fullTools -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'tools/native-tools.lock.json') -Destination (Join-Path $fullTools 'native-tools.lock.json') -Force
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'tools/win-x64') -Destination $fullTools -Recurse -Force
+          $lock = Get-Content -LiteralPath (Join-Path $fullTools 'native-tools.lock.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+          $report = [ordered]@{ edition = 'Full'; architecture = 'win-x64'; tools = @() }
+          $oldEdition = $env:PSH_EDITION
+          try {
+              $env:PSH_EDITION = 'Full'
+              Import-Module -Name (Join-Path $fullModule 'Psh.psd1') -Force -ErrorAction Stop
+              $capabilities = Get-PshCapabilities
+              if ([string]$capabilities.edition -cne 'Full' -or @($capabilities.commands).Count -ne 64) {
+                  throw 'Psh did not report a complete Full capability set.'
+              }
+              foreach ($entry in @($lock.tools)) {
+                  $artifact = $entry.artifacts.'win-x64'
+                  $capability = @($capabilities.commands | Where-Object { [string]$_.name -ceq [string]$entry.name })[0]
+                  if ($null -eq $capability) { throw ('Psh capability is missing for {0}.' -f $entry.name) }
+                  if ([string]$capability.activeBackend -cne ('native:{0}' -f $entry.name) -or
+                      [string]$capability.nativeState -cne 'pinned' -or
+                      [string]$capability.nativeVersion -cne [string]$entry.version -or
+                      [string]$capability.nativeSha256 -cne ([string]$artifact.installedSha256).ToLowerInvariant() -or
+                      [string]$capability.nativeArchitecture -cne 'win-x64') {
+                      throw ('Psh reported invalid pinned capability metadata for {0}: {1}' -f $entry.name, ($capability | ConvertTo-Json -Compress -Depth 8))
+                  }
+                  $toolPath = Join-Path $fullTools ([string]$artifact.installedPath)
+                  $probeArgs = @($entry.versionProbe.arguments)
+                  $probeLines = @(& $toolPath @probeArgs 2>&1 | ForEach-Object { [string]$_ })
+                  $probeExitCode = [int]$LASTEXITCODE
+                  $probeOutput = $probeLines -join "`n"
+                  $probeFirstLine = if ($probeLines.Count -eq 0) { '' } else { ([string]$probeLines[0]).Trim() }
+                  if ($probeExitCode -ne 0 -or $probeLines.Count -eq 0 -or $probeFirstLine -notmatch [string]$entry.versionProbe.pattern) {
+                      throw ('Pinned {0} version probe failed: {1}' -f $entry.name, $probeOutput)
+                  }
+                  $wrapperCommand = Get-Command -Name ([string]$entry.name) -CommandType Function -ErrorAction Stop
+                  if ([string]$wrapperCommand.ModuleName -cne 'Psh') { throw ('Public Psh wrapper is not active for {0}.' -f $entry.name) }
+                  $wrapperLines = @(& $wrapperCommand @probeArgs 2>&1 | ForEach-Object { [string]$_ })
+                  $wrapperExitCode = [int]$LASTEXITCODE
+                  $wrapperOutput = $wrapperLines -join "`n"
+                  $wrapperFirstLine = if ($wrapperLines.Count -eq 0) { '' } else { ([string]$wrapperLines[0]).Trim() }
+                  if ($wrapperExitCode -ne 0 -or $wrapperLines.Count -eq 0 -or $wrapperFirstLine -notmatch [string]$entry.versionProbe.pattern) {
+                      throw ('Public Psh {0} wrapper version probe failed: {1}' -f $entry.name, $wrapperOutput)
+                  }
+                  $report.tools += [ordered]@{ name = [string]$entry.name; capability = $capability; path = $toolPath; probeOutput = $probeOutput; wrapperProbeOutput = $wrapperOutput }
+              }
+          }
+          finally {
+              Remove-Module -Name Psh -Force -ErrorAction SilentlyContinue
+              if ($null -eq $oldEdition) { Remove-Item Env:PSH_EDITION -ErrorAction SilentlyContinue } else { $env:PSH_EDITION = $oldEdition }
+          }
+          $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
+          [IO.File]::WriteAllText((Join-Path $env:REPORT_ROOT 'full-version-report.json'), (($report | ConvertTo-Json -Depth 8) + "`n"), $utf8)
+
+      - name: Upload Goal 4 report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal4-report-pwsh7
+          path: ${{ runner.temp }}\goal4-report-pwsh7
+          if-no-files-found: warn
+          retention-days: 30

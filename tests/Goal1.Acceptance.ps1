@@ -314,7 +314,14 @@ try {
 
         foreach ($capability in $capabilities.commands) {
             if ($edition -eq 'Full' -and $nativeFullCommands -contains $capability.name) {
-                Assert-PshCondition ($capability.activeBackend -eq ("native:{0}" -f $capability.name)) "$($capability.name) reported the wrong Full backend."
+                $nativeState = [string]$capability.nativeState
+                Assert-PshCondition ($nativeState -in @('pinned', 'unavailable', 'missing', 'invalid', 'tampered', 'wrong-architecture')) "$($capability.name) reported an unexpected Full native state: $nativeState."
+                if ($nativeState -eq 'pinned') {
+                    Assert-PshCondition ($capability.activeBackend -eq ("native:{0}" -f $capability.name)) "$($capability.name) reported the wrong Full backend for a healthy pinned tool."
+                }
+                else {
+                    Assert-PshCondition ($capability.activeBackend -eq 'unavailable') "$($capability.name) exposed a usable Full backend while its pinned tool was $nativeState."
+                }
             }
             else {
                 Assert-PshCondition ($capability.activeBackend -eq 'powershell') "$($capability.name) reported the wrong active backend for $edition."

@@ -596,18 +596,28 @@ function Get-PshCommandBackend {
 
         [Parameter(Mandatory = $true)]
         [ValidateSet('Core', 'Full')]
-        [string]$Edition
+        [string]$Edition,
+
+        [AllowNull()]
+        [object]$NativeStatus
     )
 
     if ([string]::Equals($Edition, 'Full', [System.StringComparison]::OrdinalIgnoreCase)) {
         $name = (Get-PshCommandName -Entry $Entry).ToLowerInvariant()
         if ($name -eq 'rg' -or $name -eq 'fd' -or $name -eq 'jq' -or $name -eq 'bat') {
-            $declared = Get-PshPropertyValue -InputObject $Entry -Name 'FullBackend'
-            if ($null -ne $declared -and ([string]$declared).ToLowerInvariant().StartsWith('native:')) {
-                return ([string]$declared)
+            # Full is native only when the selected, pinned artifact passes the
+            # same lock/hash/architecture checks used by command execution.
+            $status = $NativeStatus
+            if ($null -eq $status) {
+                $status = Get-PshNativeToolStatus -Name $name
+            }
+            if ($null -ne $status -and [int]$status.code -eq 0) {
+                return ('native:{0}' -f $name)
             }
 
-            return ('native:{0}' -f $name)
+            # Full deliberately does not fall back to the Core implementation
+            # when a pinned native dependency is absent or fails verification.
+            return 'unavailable'
         }
     }
 
@@ -668,7 +678,23 @@ function ConvertTo-PshCapabilityEntry {
         }
     }
 
-    $capability['activeBackend'] = Get-PshCommandBackend -Entry $Entry -Edition $Edition
+    $nativeName = $null
+    $nativeStatus = $null
+    if ([string]::Equals($Edition, 'Full', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $candidateName = $name.ToLowerInvariant()
+        if ($candidateName -in @('rg', 'fd', 'jq', 'bat')) {
+            $nativeName = $candidateName
+            $nativeStatus = Get-PshNativeToolStatus -Name $nativeName
+        }
+    }
+    $activeBackend = Get-PshCommandBackend -Entry $Entry -Edition $Edition -NativeStatus $nativeStatus
+    $capability['activeBackend'] = $activeBackend
+    if ($null -ne $nativeStatus) {
+        $capability['nativeState'] = [string]$nativeStatus.state
+        $capability['nativeVersion'] = $nativeStatus.version
+        $capability['nativeArchitecture'] = $nativeStatus.architecture
+        $capability['nativeSha256'] = $nativeStatus.sha256
+    }
     return [PSCustomObject]$capability
 }
 
@@ -1207,6 +1233,12 @@ function Get-PshCommandSpecification {
 
     return $normalized
 }
+
+$nativeToolsPath = Join-Path -Path $PSScriptRoot -ChildPath 'NativeTools.ps1'
+if (-not (Test-Path -LiteralPath $nativeToolsPath -PathType Leaf)) {
+    throw ('Psh native-tool resolver source is missing: {0}' -f $nativeToolsPath)
+}
+. $nativeToolsPath
 
 $fileCommandsPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Commands') -ChildPath 'FileCommands.ps1'
 if (-not (Test-Path -LiteralPath $fileCommandsPath -PathType Leaf)) {

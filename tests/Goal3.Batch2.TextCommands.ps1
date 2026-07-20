@@ -13,6 +13,8 @@ $moduleManifest = Join-Path -Path $RepositoryRoot -ChildPath 'src/Psh/Psh.psd1'
 $testRoot = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('psh-goal3-batch2-{0}' -f [Guid]::NewGuid().ToString('N'))
 $configRoot = Join-Path $testRoot 'local app data'
 $fixtureRoot = Join-Path $testRoot 'fixtures with spaces'
+$helperRoot = Join-Path $testRoot 'helpers'
+$isWindowsPlatform = ($env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\')
 $originalLocalAppData = $env:LOCALAPPDATA
 $originalEdition = $env:PSH_EDITION
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
@@ -33,6 +35,96 @@ function Assert-PshBatch2 {
 
     if (-not $Condition) { throw ('Goal 3 Batch 2 assertion failed: {0}' -f $Message) }
     $script:assertionCount++
+}
+
+function New-PshBatch2NativeTool {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$InstalledPath,
+        [Parameter(Mandatory = $true)][string]$InstalledSha256,
+        [Parameter(Mandatory = $true)][string]$ArmInstalledPath,
+        [Parameter(Mandatory = $true)][string]$ArmInstalledSha256,
+        [Parameter(Mandatory = $true)][int]$AssetId
+    )
+
+    $artifactX64 = [ordered]@{
+        state = 'pinned'; architecture = 'x86_64'; targetTriple = 'x86_64-pc-windows-msvc'
+        assetId = $AssetId; apiUrl = ('https://fixture.invalid/assets/{0}' -f $AssetId)
+        browserUrl = ('https://fixture.invalid/download/{0}' -f $AssetId); assetName = ('{0}-fixture.exe' -f $Name)
+        archiveType = 'exe'; archiveSha256 = $InstalledSha256; executableArchivePath = $InstalledPath
+        installedPath = $InstalledPath; installedSha256 = $InstalledSha256; peMachine = '0x8664'
+    }
+    $artifactArm64 = [ordered]@{
+        state = 'pinned'; architecture = 'aarch64'; targetTriple = 'aarch64-pc-windows-msvc'
+        assetId = $AssetId + 1; apiUrl = ('https://fixture.invalid/assets/{0}' -f ($AssetId + 1))
+        browserUrl = ('https://fixture.invalid/download/{0}' -f ($AssetId + 1)); assetName = ('{0}-fixture-arm64.exe' -f $Name)
+        archiveType = 'exe'; archiveSha256 = $ArmInstalledSha256; executableArchivePath = $ArmInstalledPath
+        installedPath = $ArmInstalledPath; installedSha256 = $ArmInstalledSha256; peMachine = '0xAA64'
+    }
+    return [ordered]@{
+        name = $Name; upstreamName = $Name; version = 'fixture-1.0.0'
+        source = [ordered]@{ repository = 'https://fixture.invalid/native'; tag = 'fixture-1.0.0'; commit = ('fixture-{0}' -f $AssetId) }
+        license = [ordered]@{ declaredSpdx = 'MIT'; files = @([ordered]@{ path = 'LICENSE'; sourceUrl = 'https://fixture.invalid/LICENSE'; sha256 = $InstalledSha256 }) }
+        versionProbe = [ordered]@{ arguments = @('--version'); pattern = 'fixture-1\.0\.0' }
+        artifacts = [ordered]@{ 'win-x64' = $artifactX64; 'win-arm64' = $artifactArm64 }
+    }
+}
+
+function New-PshBatch2WindowsNativeTool {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $sourcePath = Join-Path $Root ('{0}-native.cs' -f $Name)
+    $outputPath = Join-Path $Root ('{0}-native.exe' -f $Name)
+    $source = @'
+using System;
+using System.IO;
+
+public static class PshBatch2NativeTool
+{
+    public static int Main(string[] args)
+    {
+        if (args.Length > 0 && String.Equals(args[0], "--version", StringComparison.Ordinal))
+        {
+            Console.WriteLine("fixture-1.0.0");
+            return 0;
+        }
+        string prefix = "__PREFIX__-native:";
+        Console.Write(prefix);
+        for (int index = 0; index < args.Length; index++)
+        {
+            if (index > 0) Console.Write("|");
+            Console.Write(args[index] ?? String.Empty);
+        }
+        if (args.Length > 0 && String.Equals(args[0], "--stdin-check", StringComparison.Ordinal))
+        {
+            using (Stream input = Console.OpenStandardInput())
+            using (StreamReader reader = new StreamReader(input))
+            {
+                string value = reader.ReadToEnd();
+                Console.Write(":stdin=" + value);
+            }
+        }
+        Console.WriteLine();
+        if (args.Length > 0 && String.Equals(args[0], "--exit-one", StringComparison.Ordinal)) return 1;
+        return 0;
+    }
+}
+'@
+    [IO.File]::WriteAllText($sourcePath, $source.Replace('__PREFIX__', $Name), $utf8NoBom)
+    $cscCandidates = @(
+        (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe')
+        (Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe')
+    )
+    $cscPath = @($cscCandidates | Where-Object { [IO.File]::Exists($_) } | Select-Object -First 1)[0]
+    if ([string]::IsNullOrWhiteSpace([string]$cscPath)) { throw 'The Windows C# compiler for the Batch2 native fixture is unavailable.' }
+    $compilerOutput = @(& $cscPath '/nologo' '/target:exe' '/platform:x64' ('/out:{0}' -f $outputPath) $sourcePath 2>&1)
+    if ($LASTEXITCODE -ne 0 -or -not [IO.File]::Exists($outputPath)) {
+        throw ('The Batch2 native fixture failed to compile: {0}' -f ($compilerOutput -join ' | '))
+    }
+    return $outputPath
 }
 
 function Get-PshBatch2AliasSnapshot {
@@ -193,6 +285,7 @@ function Compare-PshBatch2Golden {
 try {
     [void][IO.Directory]::CreateDirectory($fixtureRoot)
     [void][IO.Directory]::CreateDirectory($configRoot)
+    [void][IO.Directory]::CreateDirectory($helperRoot)
     $env:LOCALAPPDATA = $configRoot
     $env:PSH_EDITION = 'Core'
     foreach ($name in $aliasNames) {
@@ -442,6 +535,12 @@ try {
     $missingBat = Invoke-PshBatch2Command -Name bat -Arguments @('--version')
     $missingRg = Invoke-PshBatch2Command -Name rg -Arguments @('--version')
     Assert-PshBatch2 ($missingBat.ExitCode -eq 4 -and $missingRg.ExitCode -eq 4) 'Full bat/rg missing dependencies did not exit 4.'
+    $missingCapabilities = Get-PshCapabilities
+    foreach ($nativeName in @('bat', 'fd', 'jq', 'rg')) {
+        $missingCapability = @($missingCapabilities.commands | Where-Object { [string]$_.name -ceq $nativeName })[0]
+        Assert-PshBatch2 ([string]$missingCapability.activeBackend -ceq 'unavailable' -and
+            [string]$missingCapability.nativeState -ceq 'unavailable') ('Full incorrectly reported a healthy backend for missing {0}.' -f $nativeName)
+    }
     $env:PSH_EDITION = 'Core'
 
     if (-not [string]::IsNullOrWhiteSpace($GoldenRoot)) {
@@ -480,48 +579,175 @@ try {
     $fullModuleRoot = Join-Path $testRoot 'full-module/Psh'
     [void][IO.Directory]::CreateDirectory((Split-Path $fullModuleRoot -Parent))
     Microsoft.PowerShell.Management\Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'src/Psh') -Destination $fullModuleRoot -Recurse -Force
-    $dependencyRoot = Join-Path $fullModuleRoot 'Dependencies'
-    $nativeRoot = Join-Path $dependencyRoot 'native'
-    [void][IO.Directory]::CreateDirectory($nativeRoot)
-    $rgToolPath = Join-Path $nativeRoot 'rg-native.ps1'
-    $batToolPath = Join-Path $nativeRoot 'bat-native.ps1'
+    $toolsRoot = Join-Path $fullModuleRoot 'Tools'
+    $x64Root = Join-Path $toolsRoot 'win-x64'
+    $arm64Root = Join-Path $toolsRoot 'win-arm64'
+    foreach ($toolName in @('rg', 'bat', 'fd', 'jq')) {
+        [void][IO.Directory]::CreateDirectory((Join-Path $x64Root $toolName))
+        [void][IO.Directory]::CreateDirectory((Join-Path $arm64Root $toolName))
+    }
+    $fixtureExtension = if ($isWindowsPlatform) { '.exe' } else { '' }
+    $rgToolRelativePath = 'win-x64/rg/rg-native' + $fixtureExtension
+    $rgArmToolRelativePath = 'win-arm64/rg/rg-native' + $fixtureExtension
+    $batToolRelativePath = 'win-x64/bat/bat-native' + $fixtureExtension
+    $batArmToolRelativePath = 'win-arm64/bat/bat-native' + $fixtureExtension
+    $fdToolRelativePath = 'win-x64/fd/fd-native' + $fixtureExtension
+    $fdArmToolRelativePath = 'win-arm64/fd/fd-native' + $fixtureExtension
+    $rgToolPath = Join-Path $toolsRoot $rgToolRelativePath
+    $rgArmToolPath = Join-Path $toolsRoot $rgArmToolRelativePath
+    $batToolPath = Join-Path $toolsRoot $batToolRelativePath
+    $batArmToolPath = Join-Path $toolsRoot $batArmToolRelativePath
+    $fdToolPath = Join-Path $toolsRoot $fdToolRelativePath
+    $fdArmToolPath = Join-Path $toolsRoot $fdArmToolRelativePath
     $toolTemplate = @'
-$pipelineItems = @($input)
-if ($args.Count -gt 0 -and $args[0] -ceq '--exit-one') { exit 1 }
-$output = '__NAME__-native:' + ($args -join '|')
-if ($pipelineItems.Count -gt 0) { $output += ':stdin=' + (($pipelineItems | ForEach-Object { [string]$_ }) -join '|') }
-Write-Output $output
+#!/bin/sh
+if [ "$1" = '--exit-one' ]; then exit 1; fi
+if [ "$1" = '--version' ]; then printf 'fixture-1.0.0\n'; exit 0; fi
+printf '__NAME__-native:'
+separator=''
+for argument in "$@"; do
+    printf '%s%s' "$separator" "$argument"
+    separator='|'
+done
+if [ "$1" = '--stdin-check' ]; then
+    stdin_value=$(cat)
+    printf ':stdin=%s' "$stdin_value"
+fi
+printf '\n'
 exit 0
 '@
-    [IO.File]::WriteAllText($rgToolPath, $toolTemplate.Replace('__NAME__', 'rg'), $utf8NoBom)
-    [IO.File]::WriteAllText($batToolPath, $toolTemplate.Replace('__NAME__', 'bat'), $utf8NoBom)
+    if ($isWindowsPlatform) {
+        $rgCompiled = New-PshBatch2WindowsNativeTool -Root $helperRoot -Name 'rg'
+        $batCompiled = New-PshBatch2WindowsNativeTool -Root $helperRoot -Name 'bat'
+        $fdCompiled = New-PshBatch2WindowsNativeTool -Root $helperRoot -Name 'fd'
+        $compiledBytes = [IO.File]::ReadAllBytes($rgCompiled)
+        $compiledPeOffset = [BitConverter]::ToInt32($compiledBytes, 0x3c)
+        $compiledMachine = ('0x{0:X4}' -f [BitConverter]::ToUInt16($compiledBytes, $compiledPeOffset + 4))
+        Assert-PshBatch2 ([string]$compiledMachine -ceq '0x8664') 'Batch2 Windows native fixture was not compiled as an x64 PE.'
+        # The ARM64 rows exercise lock/schema selection only; official ARM64
+        # PE assets are validated separately by Goal 4 supply-chain tests.
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath $rgCompiled -Destination $rgToolPath -Force
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath $rgCompiled -Destination $rgArmToolPath -Force
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath $batCompiled -Destination $batToolPath -Force
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath $batCompiled -Destination $batArmToolPath -Force
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath $fdCompiled -Destination $fdToolPath -Force
+        Microsoft.PowerShell.Management\Copy-Item -LiteralPath $fdCompiled -Destination $fdArmToolPath -Force
+    }
+    else {
+        [IO.File]::WriteAllText($rgToolPath, $toolTemplate.Replace('__NAME__', 'rg'), $utf8NoBom)
+        [IO.File]::WriteAllText($rgArmToolPath, $toolTemplate.Replace('__NAME__', 'rg'), $utf8NoBom)
+        [IO.File]::WriteAllText($batToolPath, $toolTemplate.Replace('__NAME__', 'bat'), $utf8NoBom)
+        [IO.File]::WriteAllText($batArmToolPath, $toolTemplate.Replace('__NAME__', 'bat'), $utf8NoBom)
+        [IO.File]::WriteAllText($fdToolPath, $toolTemplate.Replace('__NAME__', 'fd'), $utf8NoBom)
+        [IO.File]::WriteAllText($fdArmToolPath, $toolTemplate.Replace('__NAME__', 'fd'), $utf8NoBom)
+        foreach ($toolPath in @($rgToolPath, $rgArmToolPath, $batToolPath, $batArmToolPath, $fdToolPath, $fdArmToolPath)) {
+            & '/bin/chmod' '755' $toolPath
+            if ($LASTEXITCODE -ne 0) { throw ('chmod 755 failed for native fixture: {0}' -f $toolPath) }
+        }
+    }
     $lock = [ordered]@{
-        Tools = @(
-            [ordered]@{ Name = 'rg'; Path = 'native/rg-native.ps1'; Sha256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $rgToolPath -Algorithm SHA256).Hash }
-            [ordered]@{ Name = 'bat'; Path = 'native/bat-native.ps1'; Sha256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $batToolPath -Algorithm SHA256).Hash }
+        schemaVersion = 1
+        manifest = [ordered]@{ created = '2026-07-20T00:00:00Z'; namespaceSeed = 'goal4-full-tools-supply-chain-v1' }
+        tools = @(
+            (New-PshBatch2NativeTool -Name 'bat' -InstalledPath $batToolRelativePath -InstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $batToolPath -Algorithm SHA256).Hash -ArmInstalledPath $batArmToolRelativePath -ArmInstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $batArmToolPath -Algorithm SHA256).Hash -AssetId 910000)
+            (New-PshBatch2NativeTool -Name 'fd' -InstalledPath $fdToolRelativePath -InstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $fdToolPath -Algorithm SHA256).Hash -ArmInstalledPath $fdArmToolRelativePath -ArmInstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $fdArmToolPath -Algorithm SHA256).Hash -AssetId 920000)
+            (New-PshBatch2NativeTool -Name 'jq' -InstalledPath 'win-x64/jq/jq.exe' -InstalledSha256 (('1' * 64) -join '') -ArmInstalledPath 'win-arm64/jq/jq.exe' -ArmInstalledSha256 (('2' * 64) -join '') -AssetId 925000)
+            (New-PshBatch2NativeTool -Name 'rg' -InstalledPath $rgToolRelativePath -InstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $rgToolPath -Algorithm SHA256).Hash -ArmInstalledPath $rgArmToolRelativePath -ArmInstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $rgArmToolPath -Algorithm SHA256).Hash -AssetId 930000)
         )
     }
-    [IO.File]::WriteAllText((Join-Path $dependencyRoot 'native-tools.lock.json'), ($lock | ConvertTo-Json -Depth 5), $utf8NoBom)
+    [IO.File]::WriteAllText((Join-Path $toolsRoot 'native-tools.lock.json'), ($lock | ConvertTo-Json -Depth 10), $utf8NoBom)
     $env:PSH_EDITION = 'Full'
     Import-Module -Name (Join-Path $fullModuleRoot 'Psh.psd1') -Force -ErrorAction Stop
+    & (Get-Module -Name Psh -ErrorAction Stop) { $script:PshNativeToolArchitectureOverride = 'win-x64' }
+    $fullCapabilities = Get-PshCapabilities
+    foreach ($nativeName in @('bat', 'fd', 'rg')) {
+        $nativeCapability = @($fullCapabilities.commands | Where-Object { [string]$_.name -ceq $nativeName })[0]
+        $nativeStatus = & (Get-Module -Name Psh -ErrorAction Stop) { param($Name) Get-PshNativeToolStatus -Name $Name } $nativeName
+        Assert-PshBatch2 ([string]$nativeCapability.activeBackend -ceq ('native:{0}' -f $nativeName) -and
+            [string]$nativeCapability.nativeState -ceq 'pinned' -and
+            [string]$nativeCapability.nativeVersion -ceq 'fixture-1.0.0') ('Full capability did not report the verified pinned version for {0}: capability={1}; status={2}' -f $nativeName, ($nativeCapability | ConvertTo-Json -Compress -Depth 8), ($nativeStatus | ConvertTo-Json -Compress -Depth 8))
+    }
     $fullRg = Invoke-PshBatch2Command -Name rg -Arguments @('--native-only', 'value')
     $fullBat = Invoke-PshBatch2Command -Name bat -Arguments @('--native-only', 'value')
+    $fullFd = Invoke-PshBatch2Command -Name fd -Arguments @('--native-only', 'value')
+    $fullFdArgumentValues = @('--argv-check', '', 'a"b', 'trail\', 'space value', '--')
+    $fullFdArguments = Invoke-PshBatch2Command -Name fd -Arguments $fullFdArgumentValues
     $fullRgArguments = Invoke-PshBatch2Command -Name rg -Arguments @('--argv-check', '', 'space value', '--')
     $fullRgPipeline = Invoke-PshBatch2Command -Name rg -Arguments @('--stdin-check') -PipelineInput @('rg full stdin') -UsePipeline
     $fullBatPipeline = Invoke-PshBatch2Command -Name bat -Arguments @('--stdin-check') -PipelineInput @('bat full stdin') -UsePipeline
     $fullExitOne = Invoke-PshBatch2Command -Name rg -Arguments @('--exit-one')
     Assert-PshBatch2 ($fullRg.ExitCode -eq 0 -and $fullRg.Output[0] -eq 'rg-native:--native-only|value') ('Full rg did not transparently delegate complete native arguments (exit {0}, output <{1}>).' -f $fullRg.ExitCode, ($fullRg.Output -join '|'))
     Assert-PshBatch2 ($fullBat.ExitCode -eq 0 -and $fullBat.Output[0] -eq 'bat-native:--native-only|value') ('Full bat did not transparently delegate complete native arguments (exit {0}, output <{1}>).' -f $fullBat.ExitCode, ($fullBat.Output -join '|'))
+    Assert-PshBatch2 ($fullFd.ExitCode -eq 0 -and $fullFd.Output[0] -eq 'fd-native:--native-only|value') ('Full fd did not use the verified pinned executable (exit {0}, output <{1}>).' -f $fullFd.ExitCode, ($fullFd.Output -join '|'))
+    Assert-PshBatch2 ($fullFdArguments.ExitCode -eq 0 -and $fullFdArguments.Output[0] -eq 'fd-native:--argv-check||a"b|trail\|space value|--') 'Full fd did not preserve empty, quoted, trailing-backslash, spaced, or option-terminator arguments.'
     Assert-PshBatch2 ($fullRgArguments.ExitCode -eq 0 -and $fullRgArguments.Output[0] -eq 'rg-native:--argv-check||space value|--') 'Full rg did not preserve empty, spaced, or option-terminator arguments.'
     Assert-PshBatch2 ($fullRgPipeline.ExitCode -eq 0 -and $fullRgPipeline.Output[0] -eq 'rg-native:--stdin-check:stdin=rg full stdin') 'Full rg did not forward pipeline input to the pinned native tool.'
     Assert-PshBatch2 ($fullBatPipeline.ExitCode -eq 0 -and $fullBatPipeline.Output[0] -eq 'bat-native:--stdin-check:stdin=bat full stdin') 'Full bat did not forward pipeline input to the pinned native tool.'
     Assert-PshBatch2 ($fullExitOne.ExitCode -eq 1) 'Full rg did not preserve native exit 1.'
+
+    $lockPath = Join-Path $toolsRoot 'native-tools.lock.json'
+    $lockText = [IO.File]::ReadAllText($lockPath, $utf8NoBom)
+    $lockObject = $lockText | ConvertFrom-Json -ErrorAction Stop
+    $rgEntry = @($lockObject.tools | Where-Object { [string]$_.name -ceq 'rg' })[0]
+    $batEntry = @($lockObject.tools | Where-Object { [string]$_.name -ceq 'bat' })[0]
+    $originalInactiveArchiveSha = [string]$batEntry.artifacts.'win-arm64'.archiveSha256
+    $batEntry.artifacts.'win-arm64'.archiveSha256 = 'invalid'
+    [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
+    $fullMalformedInactiveArtifact = Invoke-PshBatch2Command -Name rg -Arguments @('--version')
+    Assert-PshBatch2 ($fullMalformedInactiveArtifact.ExitCode -eq 5) 'Full rg accepted a malformed inactive artifact from another tool.'
+    $batEntry.artifacts.'win-arm64'.archiveSha256 = $originalInactiveArchiveSha
+    [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
+
+    $originalRgPath = [string]$rgEntry.artifacts.'win-x64'.installedPath
+    $rgEntry.artifacts.'win-x64'.installedPath = '../escape.exe'
+    [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
+    $fullPathEscape = Invoke-PshBatch2Command -Name rg -Arguments @('--version')
+    Assert-PshBatch2 ($fullPathEscape.ExitCode -eq 5) 'Full rg accepted an installedPath that escaped the Tools directory.'
+    $rgEntry.artifacts.'win-x64'.installedPath = $originalRgPath
+    [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
+
+    $originalRgMachine = [string]$rgEntry.artifacts.'win-x64'.peMachine
+    $rgEntry.artifacts.'win-x64'.peMachine = '0xAA64'
+    [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
+    $fullWrongArchitecture = Invoke-PshBatch2Command -Name rg -Arguments @('--version')
+    Assert-PshBatch2 ($fullWrongArchitecture.ExitCode -eq 5) 'Full rg accepted a PE machine value for the wrong architecture.'
+    $rgEntry.artifacts.'win-x64'.peMachine = $originalRgMachine
+    [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
+
+    $outsideNativeRoot = Join-Path $testRoot 'outside native target'
+    [void][IO.Directory]::CreateDirectory($outsideNativeRoot)
+    $outsideRgPath = Join-Path $outsideNativeRoot ([IO.Path]::GetFileName($rgToolPath))
+    Microsoft.PowerShell.Management\Copy-Item -LiteralPath $rgToolPath -Destination $outsideRgPath -Force
+    $linkedRgRelativeRoot = 'win-x64/rg-linked'
+    $linkedRgRoot = Join-Path $toolsRoot $linkedRgRelativeRoot
+    if ($isWindowsPlatform) {
+        $null = Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $linkedRgRoot -Target $outsideNativeRoot -Force
+    }
+    else {
+        $null = Microsoft.PowerShell.Management\New-Item -ItemType SymbolicLink -Path $linkedRgRoot -Target $outsideNativeRoot -Force
+    }
+    $rgEntry.artifacts.'win-x64'.installedPath = $linkedRgRelativeRoot + '/' + [IO.Path]::GetFileName($outsideRgPath)
+    [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
+    $fullReparseEscape = Invoke-PshBatch2Command -Name rg -Arguments @('--version')
+    Assert-PshBatch2 ($fullReparseEscape.ExitCode -eq 5) 'Full rg accepted an executable path that traversed a reparse point.'
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $linkedRgRoot -Force
+    $rgEntry.artifacts.'win-x64'.installedPath = $originalRgPath
+    [IO.File]::WriteAllText($lockPath, ($lockObject | ConvertTo-Json -Depth 10), $utf8NoBom)
+
     [IO.File]::AppendAllText($batToolPath, "`n# checksum mismatch", $utf8NoBom)
     $fullMismatch = Invoke-PshBatch2Command -Name bat -Arguments @('--version')
     Assert-PshBatch2 ($fullMismatch.ExitCode -eq 5) 'Full bat checksum mismatch did not exit 5.'
     [IO.File]::Delete($rgToolPath)
     $fullMissing = Invoke-PshBatch2Command -Name rg -Arguments @('--version')
     Assert-PshBatch2 ($fullMissing.ExitCode -eq 4) 'Full rg missing dependency did not exit 4.'
+    Remove-Module -Name Psh -Force -ErrorAction Stop
+
+    # Core remains fully usable when the optional Tools boundary is absent.
+    if ([IO.Directory]::Exists($toolsRoot)) { [IO.Directory]::Delete($toolsRoot, $true) }
+    $env:PSH_EDITION = 'Core'
+    Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+    $coreWithoutTools = Invoke-PshBatch2Command -Name rg -Arguments @('--help')
+    Assert-PshBatch2 ($coreWithoutTools.ExitCode -eq 0) 'Core touched the native Tools boundary or failed without it.'
     Remove-Module -Name Psh -Force -ErrorAction Stop
 
     $env:PSH_EDITION = 'Core'

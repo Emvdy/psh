@@ -18,11 +18,22 @@
 *.png binary
 *.tar binary
 *.zip binary
+tools/win-x64/**/*.exe binary
+tools/win-arm64/**/*.exe binary
 
 # Vendored dependency and license bytes are verified against immutable package
 # hashes. Keep their upstream line endings unchanged on every checkout.
 src/Psh/Dependencies/PSReadLine/2.4.5/** binary
 licenses/PSReadLine-2.4.5/LICENSE.txt binary
+licenses/bat-0.26.1/LICENSE-APACHE binary
+licenses/bat-0.26.1/LICENSE-MIT binary
+licenses/bat-0.26.1/NOTICE binary
+licenses/fd-10.4.2/LICENSE-APACHE binary
+licenses/fd-10.4.2/LICENSE-MIT binary
+licenses/jq-1.8.2/COPYING binary
+licenses/ripgrep-15.2.0/COPYING binary
+licenses/ripgrep-15.2.0/LICENSE-MIT binary
+licenses/ripgrep-15.2.0/UNLICENSE binary
 
 # Real-VM evidence hashes cover the original guest bytes, including CRLF.
 evidence/goal2/**/logs/*.json binary
