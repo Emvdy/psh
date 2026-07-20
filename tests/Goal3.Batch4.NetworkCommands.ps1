@@ -174,7 +174,6 @@ function Set-PshBatch4NetworkAliasSnapshot {
     )
 
     $existing = Get-Alias -Name $Name -Scope Global -ErrorAction SilentlyContinue
-    if ($null -ne $existing) { Remove-Item -LiteralPath ('Alias:{0}' -f $Name) -Force -ErrorAction Stop }
     if ([bool]$Snapshot.Exists) {
         Set-Alias `
             -Name $Name `
@@ -184,6 +183,9 @@ function Set-PshBatch4NetworkAliasSnapshot {
             -Scope Global `
             -Force
         (Get-Alias -Name $Name -Scope Global -ErrorAction Stop).Visibility = [System.Management.Automation.SessionStateEntryVisibility][int]$Snapshot.Visibility
+    }
+    elseif ($null -ne $existing) {
+        Remove-Item -LiteralPath ('Alias:{0}' -f $Name) -Force -ErrorAction Stop
     }
 }
 
@@ -218,8 +220,13 @@ try {
     foreach ($aliasName in @('curl', 'wget')) {
         $aliasOriginal[$aliasName] = Get-PshBatch4NetworkAliasSnapshot -Name $aliasName
         $existingAlias = Get-Alias -Name $aliasName -Scope Global -ErrorAction SilentlyContinue
-        if ($null -ne $existingAlias) { Remove-Item -LiteralPath ('Alias:{0}' -f $aliasName) -Force -ErrorAction Stop }
-        Set-Alias -Name $aliasName -Value $webRequestAliasTarget -Description ('Psh Batch 4 known alias fixture: {0}' -f $aliasName) -Option None -Scope Global -Force
+        $fixtureOptions = if ($null -eq $existingAlias) {
+            [System.Management.Automation.ScopedItemOptions]::None
+        }
+        else {
+            [System.Management.Automation.ScopedItemOptions][int]$existingAlias.Options
+        }
+        Set-Alias -Name $aliasName -Value $webRequestAliasTarget -Description ('Psh Batch 4 known alias fixture: {0}' -f $aliasName) -Option $fixtureOptions -Scope Global -Force
         $aliasFixture[$aliasName] = Get-PshBatch4NetworkAliasSnapshot -Name $aliasName
     }
 
