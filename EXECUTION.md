@@ -11,8 +11,8 @@ condition has direct evidence.
 | Goal 0 | COMPLETE | `1f87695` | Safety baseline and repository |
 | Goal 1 | COMPLETE | `83ed21f` | Module and machine-readable specification |
 | Goal 2 | COMPLETE | `20a4e59` | Amendment 1 closeout merged to `main`; final branch and main CI green |
-| Goal 3 | COMPLETE | `9254f3b` | All four batches and final branch CI are green |
-| Goal 4 | PENDING | - | Awaiting Goal 3 merge and `main` CI |
+| Goal 3 | COMPLETE | `9254f3b` | Merged to `main` at `71fbda8`; final branch and `main` CI green |
+| Goal 4 | IN_PROGRESS | - | Goal 3 prerequisite met; Full tools supply chain started |
 | Goal 5 | PENDING | - | Blocked on Goal 4 DoneWhen |
 | Goal 6 | PENDING | - | Blocked on Goal 5 DoneWhen |
 | Goal 7 | PENDING | - | Blocked on Goal 6 DoneWhen |
@@ -587,7 +587,46 @@ No Goal 3 StopIf condition was hit.
 
 ### Remaining Work
 
-None. Goal 3 is complete at
-`9254f3bb93b11a470b82b7d06ade55d017203239` and is ready to merge into `main`.
-This record does not claim that the merge or post-merge `main` CI has occurred;
-Goal 4 remains pending until both are complete.
+None. Goal 3 was fast-forward merged to `main` at
+`71fbda8d27877a091caaecbf0f1617ab8133644c`. Final `main` validation runs all
+concluded `success` at that head:
+
+- [Core validation](https://github.com/Emvdy/psh/actions/runs/29735749344)
+- [Batch 1](https://github.com/Emvdy/psh/actions/runs/29735749348)
+- [Batch 2](https://github.com/Emvdy/psh/actions/runs/29735749357)
+- [Batch 3](https://github.com/Emvdy/psh/actions/runs/29735749358)
+- [Batch 4](https://github.com/Emvdy/psh/actions/runs/29735749343)
+
+## Goal 4: Full Tools And Supply Chain
+
+Started: 2026-07-20 (Asia/Shanghai)
+
+### Prerequisite
+
+- [x] Goal 3 is fast-forward merged to `main` at
+  `71fbda8d27877a091caaecbf0f1617ab8133644c`, and all five final `main` CI runs
+  above are green.
+
+### StopIf / DoneWhen
+
+- **StopIf:** A checksum mismatches, a license cannot be aggregated with GPL, or source and tag differ.
+- **DoneWhen:** Core remains functional after deleting `tools`, and Full reports every pinned (or documented-degraded) tool version on x64 CI.
+
+### Initial Status
+
+No `rg`, `fd`, `jq`, or `bat` version has been locked, and no native tool has
+been downloaded. Goal 4 implementation is not complete.
+
+### Next Work
+
+- [ ] Record the exact version, tag, source commit, download URLs, SHA256 values,
+  architectures, and license for `rg`, `fd`, `jq`, and `bat`; never resolve a
+  floating `latest` reference.
+- [ ] Select the highest stable release and apply the ARM64 ladder: official
+  ARM64 asset, reproducible CI build of the pinned tag, then documented Core
+  degradation only with explicit user approval. Never relabel an x64 executable
+  as ARM64.
+- [ ] Retain all upstream licenses, produce `THIRD_PARTY_NOTICES.md`, and produce
+  an SPDX SBOM for PSReadLine and the native tools.
+- [ ] Verify on x64 CI that Core remains functional after deleting `tools` and
+  that Full reports every pinned or documented-degraded tool version.
