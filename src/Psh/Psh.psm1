@@ -1220,6 +1220,42 @@ if (-not (Test-Path -LiteralPath $textCommandsPath -PathType Leaf)) {
 }
 . $textCommandsPath
 
+$systemCommandsPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Commands') -ChildPath 'SystemCommands.ps1'
+if (-not (Test-Path -LiteralPath $systemCommandsPath -PathType Leaf)) {
+    throw ('Psh system-command source is missing: {0}' -f $systemCommandsPath)
+}
+. $systemCommandsPath
+
+$processCommandsPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Commands') -ChildPath 'ProcessCommands.ps1'
+if (-not (Test-Path -LiteralPath $processCommandsPath -PathType Leaf)) {
+    throw ('Psh process-command source is missing: {0}' -f $processCommandsPath)
+}
+. $processCommandsPath
+
+$networkCommandsPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Commands') -ChildPath 'NetworkCommands.ps1'
+if (-not (Test-Path -LiteralPath $networkCommandsPath -PathType Leaf)) {
+    throw ('Psh network-command source is missing: {0}' -f $networkCommandsPath)
+}
+. $networkCommandsPath
+
+$compressionChecksumCommandsPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Commands') -ChildPath 'CompressionChecksumCommands.ps1'
+if (-not (Test-Path -LiteralPath $compressionChecksumCommandsPath -PathType Leaf)) {
+    throw ('Psh compression/checksum-command source is missing: {0}' -f $compressionChecksumCommandsPath)
+}
+. $compressionChecksumCommandsPath
+
+$archiveFormatsCommandsPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Commands') -ChildPath 'ArchiveFormatsCommands.ps1'
+if (-not (Test-Path -LiteralPath $archiveFormatsCommandsPath -PathType Leaf)) {
+    throw ('Psh archive-format-command source is missing: {0}' -f $archiveFormatsCommandsPath)
+}
+. $archiveFormatsCommandsPath
+
+$tarCommandPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Commands') -ChildPath 'TarCommand.ps1'
+if (-not (Test-Path -LiteralPath $tarCommandPath -PathType Leaf)) {
+    throw ('Psh tar-command source is missing: {0}' -f $tarCommandPath)
+}
+. $tarCommandPath
+
 function Initialize-PshArgumentCompleters {
     $completerPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'Generated') -ChildPath 'ArgumentCompleters.ps1'
     if (-not (Test-Path -LiteralPath $completerPath -PathType Leaf)) {
@@ -1275,6 +1311,12 @@ $exportedFunctions = @(
 )
 $exportedFunctions += @(Get-PshEnabledFileCommandNames)
 $exportedFunctions += @(Get-PshEnabledTextCommandNames)
+$exportedFunctions += @(Get-PshEnabledSystemCommandNames)
+$exportedFunctions += @(Get-PshEnabledProcessCommandNames)
+$exportedFunctions += @(Get-PshEnabledNetworkCommandNames)
+$exportedFunctions += @(Get-PshEnabledCompressionChecksumCommandNames)
+$exportedFunctions += @(Get-PshEnabledArchiveFormatCommandNames)
+$exportedFunctions += @(Get-PshEnabledTarCommandNames)
 
 Export-ModuleMember -Function $exportedFunctions
 }

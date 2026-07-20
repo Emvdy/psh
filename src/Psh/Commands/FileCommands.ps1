@@ -8,6 +8,7 @@
 function ConvertTo-PshArgumentArray {
     param(
         [AllowEmptyCollection()]
+        [AllowEmptyString()]
         [AllowNull()]
         [object[]]$InputArguments
     )
@@ -68,6 +69,7 @@ function Test-PshLongHelp {
     param(
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
+        [AllowEmptyString()]
         [string[]]$Arguments
     )
 

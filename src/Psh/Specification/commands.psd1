@@ -1033,7 +1033,7 @@
             Name = 'curl'
             Tier = 2
             PlatformShaped = $false
-            EditionNotes = 'Core and Full use the same documented PowerShell subset; unsupported syntax exits 2.'
+            EditionNotes = 'Core and Full use the same documented PowerShell subset; unsupported syntax exits 2. In the PowerShell backend, --connect-timeout conservatively applies as one budget from request start through receipt of the response headers, so POST request-stream and small-body setup consume that same budget; Windows PowerShell 5.1 and .NET Framework expose no per-request connect-only timeout. Use --max-time to bound the complete transfer. This is broader than native curl connect-only semantics.'
             CollisionTargets = @('alias:curl', 'native:curl.exe')
             CollisionNotes = 'Shadows the Windows PowerShell curl alias and Windows curl.exe; disabling it restores alias-first resolution.'
             Category = 'Network and archives'

@@ -1,0 +1,159 @@
+name: Goal 3 Batch 4
+
+on:
+  push:
+    branches:
+      - main
+      - 'goal3/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gnu-goldens:
+    name: GNU system/process and checksum goldens
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Generate deterministic Batch 4 goldens
+        shell: bash
+        env:
+          GOLDEN_ROOT: ${{ runner.temp }}/goal3-batch4-goldens
+        run: bash ./scripts/goal3-batch4-goldens.sh "$GOLDEN_ROOT"
+
+      - name: Verify golden checksums
+        shell: bash
+        env:
+          GOLDEN_ROOT: ${{ runner.temp }}/goal3-batch4-goldens
+        run: cd "$GOLDEN_ROOT" && sha256sum -c SHA256SUMS
+
+      - name: Upload GNU golden artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal3-batch4-gnu-goldens
+          path: ${{ runner.temp }}/goal3-batch4-goldens
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-powershell:
+    name: Windows PowerShell 5.1
+    needs: gnu-goldens
+    runs-on: windows-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Download GNU goldens
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal3-batch4-gnu-goldens
+          path: ${{ runner.temp }}/goal3-batch4-goldens
+
+      - name: Run Batch 4 validation and regressions
+        shell: powershell
+        env:
+          GOLDEN_ROOT: ${{ runner.temp }}/goal3-batch4-goldens
+          REPORT_ROOT: ${{ runner.temp }}/goal3-batch4-report-winps51
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [void](New-Item -ItemType Directory -Path $env:REPORT_ROOT -Force)
+          $transcriptPath = Join-Path $env:REPORT_ROOT 'validation-transcript.txt'
+          Start-Transcript -Path $transcriptPath -Force
+          try {
+              $PSVersionTable | Out-String | Write-Output
+              if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
+                  throw 'The Windows PowerShell job must run PowerShell 5.1.'
+              }
+
+              ./scripts/Generate-CommandArtifacts.ps1 -Check
+              ./tests/Goal1.Acceptance.ps1
+              ./scripts/Test-InteractiveDependencies.ps1
+              ./tests/Goal2.Acceptance.ps1
+              ./tests/Goal3.Batch1.Config.ps1
+              ./tests/Goal3.Batch1.AliasScope.ps1
+              ./tests/Goal3.Batch1.FileCommands.ps1
+              ./tests/Goal3.Batch2.TextCommands.ps1
+              ./tests/Goal3.Batch3.ComplexCommands.ps1
+              ./tests/Goal3.Batch4.SystemProcessCommands.ps1 -GoldenRoot $env:GOLDEN_ROOT
+              ./tests/Goal3.Batch4.NetworkCommands.ps1
+              ./tests/Goal3.Batch4.ArchiveCommands.ps1 -GoldenRoot $env:GOLDEN_ROOT
+              $global:LASTEXITCODE = 0
+          }
+          finally {
+              Stop-Transcript
+          }
+
+      - name: Upload Windows PowerShell report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal3-batch4-report-winps51
+          path: ${{ runner.temp }}/goal3-batch4-report-winps51
+          if-no-files-found: warn
+          retention-days: 30
+
+  powershell:
+    name: PowerShell 7
+    needs: gnu-goldens
+    runs-on: windows-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Download GNU goldens
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal3-batch4-gnu-goldens
+          path: ${{ runner.temp }}/goal3-batch4-goldens
+
+      - name: Run Batch 4 validation and regressions
+        shell: pwsh
+        env:
+          GOLDEN_ROOT: ${{ runner.temp }}/goal3-batch4-goldens
+          REPORT_ROOT: ${{ runner.temp }}/goal3-batch4-report-pwsh7
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [void](New-Item -ItemType Directory -Path $env:REPORT_ROOT -Force)
+          $transcriptPath = Join-Path $env:REPORT_ROOT 'validation-transcript.txt'
+          Start-Transcript -Path $transcriptPath -Force
+          try {
+              $PSVersionTable | Out-String | Write-Output
+              if ($PSVersionTable.PSVersion.Major -lt 7) {
+                  throw 'The PowerShell job must run PowerShell 7 or later.'
+              }
+
+              ./scripts/Generate-CommandArtifacts.ps1 -Check
+              ./tests/Goal1.Acceptance.ps1
+              ./scripts/Test-InteractiveDependencies.ps1
+              ./tests/Goal2.Acceptance.ps1
+              ./tests/Goal3.Batch1.Config.ps1
+              ./tests/Goal3.Batch1.AliasScope.ps1
+              ./tests/Goal3.Batch1.FileCommands.ps1
+              ./tests/Goal3.Batch2.TextCommands.ps1
+              ./tests/Goal3.Batch3.ComplexCommands.ps1
+              ./tests/Goal3.Batch4.SystemProcessCommands.ps1 -GoldenRoot $env:GOLDEN_ROOT
+              ./tests/Goal3.Batch4.NetworkCommands.ps1
+              ./tests/Goal3.Batch4.ArchiveCommands.ps1 -GoldenRoot $env:GOLDEN_ROOT
+              $global:LASTEXITCODE = 0
+          }
+          finally {
+              Stop-Transcript
+          }
+
+      - name: Upload PowerShell report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal3-batch4-report-pwsh7
+          path: ${{ runner.temp }}/goal3-batch4-report-pwsh7
+          if-no-files-found: warn
+          retention-days: 30

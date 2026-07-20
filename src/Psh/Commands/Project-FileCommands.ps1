@@ -35,6 +35,12 @@ if ($null -ne (Get-Variable -Name '__PshProjection_baf0d32a_Context' -ErrorActio
             sort = @('Sort-Object')
             tee = @('Tee-Object')
             echo = @('Write-Output')
+            ps = @('Get-Process')
+            kill = @('Stop-Process')
+            sleep = @('Start-Sleep')
+            curl = @(('Invoke-' + 'WebRequest'))
+            wget = @(('Invoke-' + 'WebRequest'))
+            clear = @('Clear-Host')
         }
         State = [ordered]@{
             ProjectedAliases = [ordered]@{}
@@ -473,6 +479,12 @@ try {
     if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('sort')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'sort' }
     if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('tee')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'tee' }
     if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('echo')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'echo' }
+    if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('ps')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'ps' }
+    if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('kill')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'kill' }
+    if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('sleep')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'sleep' }
+    if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('curl')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'curl' }
+    if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('wget')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'wget' }
+    if ((Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.ProjectedAliases.Contains('clear')) { . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Peel (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value 'clear' }
 }
 catch {
     . (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value.Restore (Get-Variable -Name '__PshFileCommandProjection_baf0d32a' -Scope Global -ErrorAction Stop).Value
