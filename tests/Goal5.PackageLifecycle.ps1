@@ -138,11 +138,13 @@ foreach ($case in @(
     @{ Path = 'a\b'; Id = 'PshBackslashPath' },
     @{ Path = 'con.txt'; Id = 'PshReservedPathName' },
     @{ Path = 'folder/LPT9.log'; Id = 'PshReservedPathName' },
+    @{ Path = 'bad<name'; Id = 'PshInvalidPathCharacter' },
     @{ Path = "line`nbreak"; Id = 'PshControlPath' },
     @{ Path = 'trailing.'; Id = 'PshTrailingPathCharacter' }
 )) {
     $pathValue = [string]$case.Path
-    Assert-PshGoal5Failure -Action { Assert-PshLifecycleRelativePath -Value $pathValue -Description 'fixture path' } -ExitCode 5 -ErrorId ([string]$case.Id) -Label "unsafe path '$pathValue'"
+    $pathLabel = [Regex]::Escape($pathValue)
+    Assert-PshGoal5Failure -Action { Assert-PshLifecycleRelativePath -Value $pathValue -Description 'fixture path' } -ExitCode 5 -ErrorId ([string]$case.Id) -Label "unsafe path '$pathLabel'"
 }
 $seenPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 [void](Assert-PshLifecycleRelativePath -Value 'Payload/File.txt' -Description 'fixture path' -Seen $seenPaths)

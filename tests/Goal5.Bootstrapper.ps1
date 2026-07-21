@@ -271,6 +271,9 @@ Assert-PshGoal5Bootstrapper ($programText -match '(?i)ancestor rename' -and $pro
 Assert-PshGoal5Bootstrapper ($policyText -match 'Get-AuthenticodeSignature' -and $policyText -match 'Zone\.Identifier') 'Policy probe does not inspect Authenticode and MOTW.'
 Assert-PshGoal5Bootstrapper ($policyText -match 'PSH_BOOTSTRAPPER_POLICY_SCRIPT_PATH' -and $policyText -match 'EnvironmentVariables') 'Policy probe does not pass the script path through a controlled environment variable.'
 Assert-PshGoal5Bootstrapper ($policyText -match 'OutputEncoding' -and $policyText -match 'UTF8Encoding') 'Policy probe does not fix PowerShell output encoding.'
+Assert-PshGoal5Bootstrapper ($policyText -match 'ModulePathEnvironmentVariable\s*=\s*"PSModulePath"' -and $policyText -match 'EnvironmentVariables\.Remove\(ModulePathEnvironmentVariable\)') 'Windows PowerShell child environment does not remove the inherited PSModulePath.'
+$modulePathNormalizationCall = 'WindowsPowerShellProcessEnvironment\.RemoveInheritedModulePath\(startInfo\);'
+Assert-PshGoal5Bootstrapper (([regex]::Matches($policyText, $modulePathNormalizationCall)).Count -eq 1 -and ([regex]::Matches($programText, $modulePathNormalizationCall)).Count -eq 1) 'Policy probe and installer launch do not share the PSModulePath normalization helper.'
 Assert-PshGoal5Bootstrapper ($policyText -match 'StandardOutputEncoding\s*=\s*Encoding\.UTF8' -and $policyText -match 'StandardErrorEncoding\s*=\s*Encoding\.UTF8') 'Policy probe does not fix .NET child output decoding.'
 Assert-PshGoal5Bootstrapper ($policyText -notmatch '(?i)Unblock-File|Remove-Item') 'Policy probe modifies script trust metadata.'
 
@@ -609,7 +612,8 @@ try {
     $onlineScript = @'
 [CmdletBinding()]
 param([ValidateSet('Core','Full')][string]$Edition, [string]$Version, [switch]$NonInteractive)
-$payload = [ordered]@{ mode = 'online'; edition = $Edition; version = $Version; nonInteractive = [bool]$NonInteractive }
+$effectivePolicy = [string](Get-ExecutionPolicy)
+$payload = [ordered]@{ mode = 'online'; edition = $Edition; version = $Version; nonInteractive = [bool]$NonInteractive; effectivePolicy = $effectivePolicy; psModulePath = [string]$env:PSModulePath }
 $encoding = New-Object System.Text.UTF8Encoding -ArgumentList @($false)
 [IO.File]::WriteAllText($env:PSH_BOOTSTRAPPER_CAPTURE, ($payload | ConvertTo-Json -Compress), $encoding)
 exit 23
@@ -636,10 +640,37 @@ exit 29
     Assert-PshGoal5Bootstrapper ($peBytes.Length -gt 64 -and $peBytes[0] -eq 0x4D -and $peBytes[1] -eq 0x5A) 'Built output is not a PE executable.'
 
     Set-PshFixtureExecutionPolicy -Policy 'Bypass'
-    $onlineResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--edition', 'Full', '--version', '0.0.1-test', '--non-interactive')
+    $poisonModuleRoot = Join-Path $runtimeRoot 'poison-module-root'
+    $poisonSecurityModuleRoot = Join-Path $poisonModuleRoot 'Microsoft.PowerShell.Security'
+    [void][IO.Directory]::CreateDirectory($poisonSecurityModuleRoot)
+    $poisonSecurityManifest = @'
+@{
+    RootModule = 'Microsoft.PowerShell.Security.psm1'
+    ModuleVersion = '999.0.0'
+    GUID = '4e3e65f2-1b6b-4a2f-8ec2-6a56a3b94004'
+    CompatiblePSEditions = @('Core')
+    FunctionsToExport = @('Get-ExecutionPolicy', 'Get-AuthenticodeSignature')
+    CmdletsToExport = @()
+    VariablesToExport = @()
+    AliasesToExport = @()
+}
+'@
+    [IO.File]::WriteAllText((Join-Path $poisonSecurityModuleRoot 'Microsoft.PowerShell.Security.psd1'), $poisonSecurityManifest.Replace("`r`n", "`n"), $utf8NoBom)
+    [IO.File]::WriteAllText((Join-Path $poisonSecurityModuleRoot 'Microsoft.PowerShell.Security.psm1'), "throw 'Inherited poisoned PSModulePath.'`n", $utf8NoBom)
+    $oldModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('PSModulePath', $poisonModuleRoot, 'Process')
+        $onlineResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--edition', 'Full', '--version', '0.0.1-test', '--non-interactive')
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('PSModulePath', $oldModulePath, 'Process')
+    }
     Assert-PshGoal5Bootstrapper ($onlineResult.ExitCode -eq 23) ('Online script exit code was not passed through: {0}; output={1}' -f $onlineResult.ExitCode, (Format-PshBootstrapperOutput -Output $onlineResult.Output))
     $onlinePayload = Get-Content -LiteralPath $capturePath -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-PshGoal5Bootstrapper ($onlinePayload.mode -ceq 'online' -and $onlinePayload.edition -ceq 'Full' -and $onlinePayload.version -ceq '0.0.1-test' -and $onlinePayload.nonInteractive) 'Online forwarding payload was incorrect.'
+    Assert-PshGoal5Bootstrapper ($onlinePayload.effectivePolicy -ceq 'Bypass') 'Online installer could not autoload Get-ExecutionPolicy after PSModulePath normalization.'
+    $onlineModulePath = [string]$onlinePayload.psModulePath
+    Assert-PshGoal5Bootstrapper (-not [string]::IsNullOrWhiteSpace($onlineModulePath) -and $onlineModulePath.IndexOf($poisonModuleRoot, [StringComparison]::OrdinalIgnoreCase) -lt 0) 'Online installer inherited the poisoned parent PSModulePath instead of reconstructing Windows PowerShell defaults.'
 
     $offlineResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--offline', '--edition', 'Core', '--version', 'latest')
     Assert-PshGoal5Bootstrapper ($offlineResult.ExitCode -eq 29) ('Offline script exit code was not passed through: {0}; output={1}' -f $offlineResult.ExitCode, (Format-PshBootstrapperOutput -Output $offlineResult.Output))

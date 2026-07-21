@@ -144,6 +144,7 @@ namespace Psh.Bootstrapper
                 UseShellExecute = false,
                 CreateNoWindow = false
             };
+            WindowsPowerShellProcessEnvironment.RemoveInheritedModulePath(startInfo);
 
             using (Process process = Process.Start(startInfo))
             {

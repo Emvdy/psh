@@ -492,8 +492,17 @@ esac
     Assert-PshGoal5Entry ($shellLog.Contains('-Edition Full') -and $shellLog.Contains('-Version 1.2.3') -and $shellLog.Contains('-NonInteractive')) 'Shell wrapper did not preserve named argument quoting.'
     & $bashPath (Join-Path $shellFixture 'install.sh') --help | Out-Null
     Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 0) 'Shell help did not return zero.'
-    & $bashPath (Join-Path $shellFixture 'install.sh') --edition Invalid 2>$null
-    Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 2) 'Shell invalid edition did not return structured usage code 2.'
+    $invalidEditionExit = $null
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'SilentlyContinue'
+        & $bashPath (Join-Path $shellFixture 'install.sh') --edition Invalid 2>$null
+        $invalidEditionExit = [int]$LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    Assert-PshGoal5Entry ([int]$invalidEditionExit -eq 2) 'Shell invalid edition did not return structured usage code 2.'
 
     $report = [pscustomobject][ordered]@{ schemaVersion = 1; assertions = $script:Assertions; onlineUris = @($script:Goal5OnlineSeen); acquisitionUris = @($script:Goal5AcquisitionSeen); offlineLog = $sequence }
     Write-PshGoal5Json -Path (Join-Path $reportRoot 'Goal5.OnlineOffline.summary.json') -Value $report

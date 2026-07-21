@@ -281,7 +281,16 @@ function Assert-PshLifecycleRelativePath {
         Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshInvalidRelativePath' -Message "$Description must be a non-empty relative path."
     }
     $path = [string]$Value
-    if ([IO.Path]::IsPathRooted($path) -or $path -match '\A(?:[A-Za-z]:|[/\\]|\\\\|//)') {
+    if ($path -match '\A(?:[A-Za-z]:|[/\\]|\\\\|//)') {
+        Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshAbsolutePath' -Message "$Description must not be absolute: $path"
+    }
+    if ($path -match '[\x00-\x1F\x7F]') {
+        Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshControlPath' -Message "$Description contains a control character: $path"
+    }
+    if ($path -match '[<>:"|?*]') {
+        Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshInvalidPathCharacter' -Message "$Description contains a Windows-invalid character: $path"
+    }
+    if ([IO.Path]::IsPathRooted($path)) {
         Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshAbsolutePath' -Message "$Description must not be absolute: $path"
     }
     if ($path -match '\\') {
@@ -294,12 +303,6 @@ function Assert-PshLifecycleRelativePath {
     foreach ($segment in $segments) {
         if ([string]::IsNullOrEmpty($segment) -or $segment -ceq '.' -or $segment -ceq '..') {
             Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshTraversalPath' -Message "$Description contains an empty, '.', or '..' segment: $path"
-        }
-        if ($segment -match '[\x00-\x1F\x7F]') {
-            Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshControlPath' -Message "$Description contains a control character: $path"
-        }
-        if ($segment -match '[<>:"|?*]') {
-            Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshInvalidPathCharacter' -Message "$Description contains a Windows-invalid character: $path"
         }
         if ($segment.EndsWith('.') -or $segment.EndsWith(' ')) {
             Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshTrailingPathCharacter' -Message "$Description contains a segment ending in a dot or space: $path"

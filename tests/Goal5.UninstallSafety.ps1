@@ -941,15 +941,56 @@ $config = [IO.File]::ReadAllText($ConfigPath, $utf8) | ConvertFrom-Json
 . ([string]$config.HelperPath)
 $lock = $null
 $exitCode = 0
+$probe = [pscustomobject][ordered]@{
+    stage                 = 'initialized'
+    status                = 'pending'
+    inputPath             = $null
+    resolvedPath          = $null
+    normalizedPath        = $null
+    computedMutexName     = $null
+    actualLockName        = $null
+    message               = $null
+    exceptionType         = $null
+    FullyQualifiedErrorId = $null
+    processId             = [int]$PID
+    managedThreadId       = [int][Threading.Thread]::CurrentThread.ManagedThreadId
+    driverExitCode        = 0
+}
+function Write-PshProjectionMutexProbeResult {
+    [IO.File]::WriteAllText([string]$config.ResultPath, (($probe | ConvertTo-Json -Compress -Depth 6) + "`n"), $utf8)
+}
+Write-PshProjectionMutexProbeResult
 try {
     $stateRootWithTrailingSeparator = ([string]$config.StateRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    $probe.inputPath = $stateRootWithTrailingSeparator
+    $probe.stage = 'inputPath'
+    Write-PshProjectionMutexProbeResult
+    $probe.resolvedPath = Resolve-PshFullPath -Path $stateRootWithTrailingSeparator -Description 'PSReadLine projection state root'
+    $probe.stage = 'resolvedPath'
+    Write-PshProjectionMutexProbeResult
+    $probe.normalizedPath = ([string]$probe.resolvedPath).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar).ToUpperInvariant()
+    $probe.stage = 'normalizedPath'
+    Write-PshProjectionMutexProbeResult
+    $probe.computedMutexName = 'Psh.PSReadLineProjection.' + (Get-PshSha256Hex -Bytes $utf8.GetBytes([string]$probe.normalizedPath))
+    $probe.stage = 'computedMutexName'
+    Write-PshProjectionMutexProbeResult
     $lock = Enter-PshPSReadLineProjectionLock -StateRoot $stateRootWithTrailingSeparator -TimeoutMilliseconds 500
-    [IO.File]::WriteAllText([string]$config.ResultPath, '{"status":"acquired"}', $utf8)
+    $probe.stage = 'completed'
+    $probe.status = 'acquired'
+    $probe.actualLockName = [string]$lock.Name
     if ([bool]$config.ExpectBlocked) { $exitCode = 51 }
+    $probe.driverExitCode = $exitCode
+    Write-PshProjectionMutexProbeResult
 }
 catch {
-    [IO.File]::WriteAllText([string]$config.ResultPath, (([pscustomobject][ordered]@{ status = 'error'; message = $_.Exception.Message }) | ConvertTo-Json -Compress), $utf8)
+    $probe.stage = 'completed'
+    $probe.status = 'error'
+    $probe.message = [string]$_.Exception.Message
+    $probe.exceptionType = [string]$_.Exception.GetType().FullName
+    $probe.FullyQualifiedErrorId = [string]$_.FullyQualifiedErrorId
     if (-not [bool]$config.ExpectBlocked -or $_.Exception.Message -notlike '*Timed out waiting for another PSReadLine projection transaction*') { $exitCode = 52 }
+    $probe.driverExitCode = $exitCode
+    Write-PshProjectionMutexProbeResult
 }
 finally {
     if ($null -ne $lock) { Exit-PshPSReadLineProjectionLock -Lock $lock }
@@ -990,11 +1031,26 @@ catch {
         $projectionMutexReadyDeadline = [DateTime]::UtcNow.AddSeconds(10)
         while (-not [IO.File]::Exists($projectionMutexReady) -and -not $projectionMutexParentProcess.HasExited -and [DateTime]::UtcNow -lt $projectionMutexReadyDeadline) { Start-Sleep -Milliseconds 25 }
         Assert-PshUninstallSafety ([IO.File]::Exists($projectionMutexReady) -and -not $projectionMutexParentProcess.HasExited) 'Top-level uninstall did not reach the exact-Post projection lock hold point.'
+        $projectionMutexParentReadyDocument = [IO.File]::ReadAllText($projectionMutexReady, $script:Utf8) | ConvertFrom-Json
 
         $projectionMutexProbeProcess = Start-PshUninstallSafetyProcess -DriverPath $projectionMutexProbeDriver -ConfigPath $projectionMutexProbeConfig -StandardOutputPath (Join-Path $projectionMutexDirectory 'probe.stdout') -StandardErrorPath (Join-Path $projectionMutexDirectory 'probe.stderr')
         if (-not $projectionMutexProbeProcess.WaitForExit(5000)) { throw 'Projection mutex timeout probe did not exit.' }
         $projectionMutexProbeDocument = [IO.File]::ReadAllText($projectionMutexProbeResult, $script:Utf8) | ConvertFrom-Json
-        Assert-PshUninstallSafety ($projectionMutexProbeProcess.ExitCode -eq 0 -and [string]$projectionMutexProbeDocument.status -ceq 'error' -and [string]$projectionMutexProbeDocument.message -like '*Timed out waiting for another PSReadLine projection transaction*') 'A canonical trailing-separator mutex probe overlapped the retained top-level projection lock.'
+        $projectionMutexParentAlive = -not $projectionMutexParentProcess.HasExited
+        $projectionMutexParentExitCode = if ($projectionMutexParentAlive) { $null } else { [int]$projectionMutexParentProcess.ExitCode }
+        $projectionMutexNamesEqual = [string]$projectionMutexParentReadyDocument.mutexName -ceq [string]$projectionMutexProbeDocument.computedMutexName
+        $projectionMutexTimedOut = $projectionMutexProbeProcess.ExitCode -eq 0 -and [string]$projectionMutexProbeDocument.status -ceq 'error' -and [string]$projectionMutexProbeDocument.message -like '*Timed out waiting for another PSReadLine projection transaction*'
+        $projectionMutexDiagnostic = [pscustomobject][ordered]@{
+            parentAlive    = $projectionMutexParentAlive
+            parentExitCode = $projectionMutexParentExitCode
+            parent         = $projectionMutexParentReadyDocument
+            namesEqual     = $projectionMutexNamesEqual
+            probeExitCode  = [int]$projectionMutexProbeProcess.ExitCode
+            probe          = $projectionMutexProbeDocument
+        }
+        $projectionMutexDiagnosticText = $projectionMutexDiagnostic | ConvertTo-Json -Compress -Depth 10
+        Assert-PshUninstallSafety $projectionMutexNamesEqual ("Projection mutex names differed: {0}" -f $projectionMutexDiagnosticText)
+        Assert-PshUninstallSafety $projectionMutexTimedOut ("A canonical trailing-separator mutex probe did not observe the retained top-level projection lock: {0}" -f $projectionMutexDiagnosticText)
 
         $projectionMutexStandaloneProcess = Start-PshUninstallSafetyProcess -DriverPath $projectionMutexStandaloneDriver -ConfigPath $projectionMutexStandaloneConfig -StandardOutputPath (Join-Path $projectionMutexDirectory 'standalone.stdout') -StandardErrorPath (Join-Path $projectionMutexDirectory 'standalone.stderr')
         $projectionMutexStartedDeadline = [DateTime]::UtcNow.AddSeconds(5)

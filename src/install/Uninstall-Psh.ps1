@@ -1870,6 +1870,7 @@ function Invoke-PshUninstallProjectionLockHoldInjection {
     $readyPath = [string]$env:PSH_UNINSTALL_TEST_PROJECTION_LOCK_READY_PATH
     $releasePath = [string]$env:PSH_UNINSTALL_TEST_PROJECTION_LOCK_RELEASE_PATH
     if ([string]::IsNullOrWhiteSpace($readyPath) -and [string]::IsNullOrWhiteSpace($releasePath)) { return }
+    $readyTemporaryPath = $null
     try {
         if ([string]::IsNullOrWhiteSpace($readyPath) -or [string]::IsNullOrWhiteSpace($releasePath)) {
             Stop-PshUninstall -Code 5 -Kind 'IntegrityFailure' -Message 'Projection lock hold injection requires both ready and release paths.'
@@ -1881,8 +1882,21 @@ function Invoke-PshUninstallProjectionLockHoldInjection {
             [IO.File]::Exists($releasePath) -or [IO.Directory]::Exists($releasePath)) {
             Stop-PshUninstall -Code 5 -Kind 'IntegrityFailure' -Message 'Projection lock hold injection marker path already exists.'
         }
-        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($readyPath))) | Out-Null
-        [IO.File]::WriteAllText($readyPath, "projection-lock-held`n", (New-Object System.Text.UTF8Encoding($false)))
+        $readyFullPath = [IO.Path]::GetFullPath($readyPath)
+        $readyDirectory = [IO.Path]::GetDirectoryName($readyFullPath)
+        [IO.Directory]::CreateDirectory($readyDirectory) | Out-Null
+        $readyDocument = [pscustomobject][ordered]@{
+            status          = 'held'
+            mutexName       = [string]$Lock.Inner.Name
+            processId       = [int]$PID
+            managedThreadId = [int][Threading.Thread]::CurrentThread.ManagedThreadId
+        }
+        $readyText = ($readyDocument | ConvertTo-Json -Compress) + "`n"
+        $readyTemporaryName = '.{0}.{1}.tmp' -f [IO.Path]::GetFileName($readyFullPath), [Guid]::NewGuid().ToString('N')
+        $readyTemporaryPath = [IO.Path]::Combine($readyDirectory, $readyTemporaryName)
+        [IO.File]::WriteAllText($readyTemporaryPath, $readyText, (New-Object System.Text.UTF8Encoding($false)))
+        [IO.File]::Move($readyTemporaryPath, $readyFullPath)
+        $readyTemporaryPath = $null
         $deadline = [DateTime]::UtcNow.AddSeconds(15)
         while (-not [IO.File]::Exists($releasePath)) {
             if ([DateTime]::UtcNow -ge $deadline) {
@@ -1892,6 +1906,9 @@ function Invoke-PshUninstallProjectionLockHoldInjection {
         }
     }
     finally {
+        if (-not [string]::IsNullOrWhiteSpace($readyTemporaryPath) -and [IO.File]::Exists($readyTemporaryPath)) {
+            try { [IO.File]::Delete($readyTemporaryPath) } catch {}
+        }
         Remove-Item Env:PSH_UNINSTALL_TEST_PROJECTION_LOCK_READY_PATH -ErrorAction SilentlyContinue
         Remove-Item Env:PSH_UNINSTALL_TEST_PROJECTION_LOCK_RELEASE_PATH -ErrorAction SilentlyContinue
     }

@@ -11,6 +11,23 @@ using System.Text;
 
 namespace Psh.Bootstrapper
 {
+    internal static class WindowsPowerShellProcessEnvironment
+    {
+        private const string ModulePathEnvironmentVariable = "PSModulePath";
+
+        internal static void RemoveInheritedModulePath(ProcessStartInfo startInfo)
+        {
+            if (startInfo == null)
+            {
+                throw new ArgumentNullException("startInfo");
+            }
+
+            // Windows PowerShell reconstructs its edition-specific defaults when
+            // PSModulePath is absent instead of inheriting pwsh-owned module paths.
+            startInfo.EnvironmentVariables.Remove(ModulePathEnvironmentVariable);
+        }
+    }
+
     public sealed class ExecutionPolicyResult
     {
         public string EffectivePolicy { get; set; }
@@ -159,6 +176,7 @@ namespace Psh.Bootstrapper
             startInfo.StandardOutputEncoding = Encoding.UTF8;
             startInfo.StandardErrorEncoding = Encoding.UTF8;
             startInfo.EnvironmentVariables[ScriptPathEnvironmentVariable] = scriptPath;
+            WindowsPowerShellProcessEnvironment.RemoveInheritedModulePath(startInfo);
 
             using (Process process = Process.Start(startInfo))
             {
