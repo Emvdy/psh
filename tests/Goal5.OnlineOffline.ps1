@@ -30,6 +30,43 @@ function Assert-PshGoal5Entry {
     if (-not $Condition) { throw "Goal 5 online/offline failed: $Message" }
 }
 
+function Get-PshGoal5ShellApplicationRank {
+    param([Parameter(Mandatory = $true)][string] $Name, [Parameter(Mandatory = $true)][string] $Path)
+    $separator = [string][char]92
+    $normalized = $Path.Replace('/', $separator).ToLowerInvariant()
+    if ($normalized.Length -lt 3 -or -not [char]::IsLetter($normalized[0]) -or [char]$normalized[1] -ne [char]58 -or [char]$normalized[2] -ne [char]92) { return 100 }
+    $relative = $normalized.Substring(2)
+    if ($Name -ceq 'bash' -and $relative -ceq ($separator + 'program files' + $separator + 'git' + $separator + 'bin' + $separator + 'bash.exe')) { return 10 }
+    if ($Name -ceq 'bash' -and $relative -ceq ($separator + 'program files' + $separator + 'git' + $separator + 'usr' + $separator + 'bin' + $separator + 'bash.exe')) { return 20 }
+    if ($Name -ceq 'bash' -and $relative -ceq ($separator + 'windows' + $separator + 'system32' + $separator + 'bash.exe')) { return 30 }
+    if ($Name -ceq 'sh' -and $relative -ceq ($separator + 'program files' + $separator + 'git' + $separator + 'usr' + $separator + 'bin' + $separator + 'sh.exe')) { return 10 }
+    if ($Name -ceq 'sh' -and $relative -ceq ($separator + 'program files' + $separator + 'git' + $separator + 'bin' + $separator + 'sh.exe')) { return 20 }
+    if ($Name -ceq 'sh' -and $relative -ceq ($separator + 'windows' + $separator + 'system32' + $separator + 'sh.exe')) { return 30 }
+    return 100
+}
+
+function Select-PshGoal5ShellApplicationPath {
+    param([Parameter(Mandatory = $true)][string] $Name, [Parameter(Mandatory = $true)][string[]] $CandidatePaths)
+    $selected = @($CandidatePaths | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object {
+        [pscustomobject][ordered]@{ Path = [string]$_; Rank = Get-PshGoal5ShellApplicationRank -Name $Name -Path ([string]$_) }
+    } | Sort-Object Rank, Path | Select-Object -First 1)
+    if ($selected.Count -ne 1) { return $null }
+    return [string]$selected[0].Path
+}
+
+function Get-PshGoal5ShellApplication {
+    param([Parameter(Mandatory = $true)][ValidateSet('bash', 'sh')][string] $Name)
+    $runningOnWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    $paths = @(Get-Command -Name $Name -CommandType Application -All -ErrorAction SilentlyContinue | ForEach-Object {
+        $path = [string]$_.Source
+        if ([string]::IsNullOrWhiteSpace($path)) { $path = [string]$_.Definition }
+        if (-not [string]::IsNullOrWhiteSpace($path) -and [IO.File]::Exists($path)) {
+            if (-not $runningOnWindows -or (Get-PshGoal5ShellApplicationRank -Name $Name -Path $path) -lt 100) { $path }
+        }
+    } | Select-Object -Unique)
+    return Select-PshGoal5ShellApplicationPath -Name $Name -CandidatePaths $paths
+}
+
 function Get-PshGoal5HashBytes {
     param([Parameter(Mandatory = $true)][byte[]] $Bytes)
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -300,6 +337,19 @@ $oldArchitecture = $null
 $oldPath = $null
 
 try {
+    $bashSelectionRegression = Select-PshGoal5ShellApplicationPath -Name bash -CandidatePaths @(
+        'C:\Windows\System32\bash.exe',
+        'C:\Program Files\Git\usr\bin\bash.exe',
+        'C:\Program Files\Git\bin\bash.exe'
+    )
+    Assert-PshGoal5Entry ($bashSelectionRegression -ceq 'C:\Program Files\Git\bin\bash.exe') 'Bash application selection did not prefer one deterministic Git Bash executable.'
+    $shSelectionRegression = Select-PshGoal5ShellApplicationPath -Name sh -CandidatePaths @(
+        'C:\Windows\System32\sh.exe',
+        'C:\Program Files\Git\bin\sh.exe',
+        'C:\Program Files\Git\usr\bin\sh.exe'
+    )
+    Assert-PshGoal5Entry ($shSelectionRegression -ceq 'C:\Program Files\Git\usr\bin\sh.exe') 'sh application selection did not preserve Git Bash coverage.'
+    Assert-PshGoal5Entry ((Get-PshGoal5ShellApplicationRank -Name bash -Path 'C:\spoof\Program Files\Git\bin\bash.exe') -eq 100) 'A nested Git Bash suffix spoof received a trusted rank.'
     Set-Item -Path Function:\Invoke-PshOnlineHttpRequest -Value ${function:Invoke-PshGoal5OnlineHttpMock}
     Set-Item -Path Function:\Invoke-PshAcquisitionHttpRequest -Value ${function:Invoke-PshGoal5AcquisitionHttpMock}
     Set-PshGoal5TrustMocks
@@ -356,12 +406,12 @@ try {
     [IO.Directory]::CreateDirectory($shellFixture) | Out-Null
     Copy-Item -LiteralPath $shellPath -Destination (Join-Path $shellFixture 'install.sh')
     Copy-Item -LiteralPath $offlinePath -Destination (Join-Path $shellFixture 'install-offline.ps1')
-    $bashCommand = Get-Command -Name bash -CommandType Application -ErrorAction SilentlyContinue
-    $shCommand = Get-Command -Name sh -CommandType Application -ErrorAction SilentlyContinue
-    Assert-PshGoal5Entry ($null -ne $bashCommand -and $null -ne $shCommand) 'bash and sh are required dependencies for the shell entry contract.'
-    & $bashCommand.Source -n (Join-Path $shellFixture 'install.sh')
+    $bashPath = Get-PshGoal5ShellApplication -Name bash
+    $shPath = Get-PshGoal5ShellApplication -Name sh
+    Assert-PshGoal5Entry (-not [string]::IsNullOrWhiteSpace($bashPath) -and -not [string]::IsNullOrWhiteSpace($shPath)) 'bash and sh are required dependencies for the shell entry contract.'
+    & $bashPath -n (Join-Path $shellFixture 'install.sh')
     Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 0) 'bash -n rejected install.sh.'
-    & $shCommand.Source -n (Join-Path $shellFixture 'install.sh')
+    & $shPath -n (Join-Path $shellFixture 'install.sh')
     Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 0) 'sh -n rejected install.sh.'
     $fakeBin = Join-Path $script:TestRoot 'fake-bin'
     [IO.Directory]::CreateDirectory($fakeBin) | Out-Null
@@ -375,7 +425,7 @@ case " $* " in
 esac
 '@
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-        & $bashCommand.Source -c 'chmod +x "$1"' _ $fakePowerShell
+        & $bashPath -c 'chmod +x "$1"' _ $fakePowerShell
         Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 0) 'Unable to mark the non-Windows fake powershell.exe executable.'
     }
     $oldPath = $env:PATH
@@ -383,14 +433,14 @@ esac
     $env:PSH_FAKE_LOG = Join-Path $script:TestRoot 'shell.log'
     $env:PSH_FAKE_FILE_EXIT = '7'
     $env:PSH_FAKE_PREFLIGHT_EXIT = '0'
-    & $bashCommand.Source (Join-Path $shellFixture 'install.sh') --offline --edition Full --version '1.2.3' --non-interactive
+    & $bashPath (Join-Path $shellFixture 'install.sh') --offline --edition Full --version '1.2.3' --non-interactive
     $shellExit = [int]$LASTEXITCODE
     Assert-PshGoal5Entry ($shellExit -eq 7) 'Shell wrapper did not forward the PowerShell exit code.'
     $shellLog = [IO.File]::ReadAllText($env:PSH_FAKE_LOG, $script:Utf8)
     Assert-PshGoal5Entry ($shellLog.Contains('-Edition Full') -and $shellLog.Contains('-Version 1.2.3') -and $shellLog.Contains('-NonInteractive')) 'Shell wrapper did not preserve named argument quoting.'
-    & $bashCommand.Source (Join-Path $shellFixture 'install.sh') --help | Out-Null
+    & $bashPath (Join-Path $shellFixture 'install.sh') --help | Out-Null
     Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 0) 'Shell help did not return zero.'
-    & $bashCommand.Source (Join-Path $shellFixture 'install.sh') --edition Invalid 2>$null
+    & $bashPath (Join-Path $shellFixture 'install.sh') --edition Invalid 2>$null
     Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 2) 'Shell invalid edition did not return structured usage code 2.'
 
     $report = [pscustomobject][ordered]@{ schemaVersion = 1; assertions = $script:Assertions; onlineUris = @($script:Goal5OnlineSeen); acquisitionUris = @($script:Goal5AcquisitionSeen); offlineLog = $sequence }

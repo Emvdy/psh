@@ -804,7 +804,7 @@ function Invoke-PshLifecycleScript {
 function Read-PshLifecycleCurrent {
     param([Parameter(Mandatory = $true)][string] $Root)
     $path = Join-Path -Path $Root -ChildPath 'current.json'
-    $snapshot = Read-PshStrictJsonSnapshot -Path $path -Description 'current state' -AllowMissing
+    $snapshot = Read-PshStrictJsonSnapshot -Path $path -Description 'current state' -AllowMissing -RequireLf
     if ($null -eq $snapshot) {
         return [pscustomobject][ordered]@{ exists = $false; version = $null; sha256 = $null; bytes = (New-Object byte[] 0) }
     }
@@ -821,7 +821,7 @@ function Read-PshLifecycleCurrent {
 function Get-PshLifecycleCurrentBytes {
     param([Parameter(Mandatory = $true)][string] $Version)
     $document = [ordered]@{ schemaVersion = 1; version = $Version }
-    $json = ($document | ConvertTo-Json -Compress) + [Environment]::NewLine
+    $json = (ConvertTo-PshCanonicalJson -InputObject $document) + "`n"
     return ,((New-Object System.Text.UTF8Encoding($false)).GetBytes($json))
 }
 

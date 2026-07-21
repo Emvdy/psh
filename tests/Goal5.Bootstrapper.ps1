@@ -110,6 +110,54 @@ function Invoke-PshBootstrapperProcess {
     }
 }
 
+function Get-PshFixtureZoneIdentifier {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    return @(Get-Item -LiteralPath $Path -Stream 'Zone.Identifier' -ErrorAction SilentlyContinue)
+}
+
+function Clear-PshFixtureZoneIdentifier {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    foreach ($stream in @(Get-PshFixtureZoneIdentifier -Path $Path)) {
+        Remove-Item -LiteralPath $Path -Stream ([string]$stream.Stream) -Force -ErrorAction Stop
+    }
+
+    Assert-PshGoal5Bootstrapper (@(Get-PshFixtureZoneIdentifier -Path $Path).Count -eq 0) ('Fixture retained Zone.Identifier after cleanup: {0}' -f $Path)
+}
+
+function Set-PshFixtureZoneIdentifier {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+
+    Clear-PshFixtureZoneIdentifier -Path $Path
+    Set-Content -LiteralPath $Path -Stream 'Zone.Identifier' -Value $Value -Encoding ASCII
+    $zoneStreams = @(Get-PshFixtureZoneIdentifier -Path $Path)
+    Assert-PshGoal5Bootstrapper ($zoneStreams.Count -eq 1 -and [string]$zoneStreams[0].Stream -ceq 'Zone.Identifier') ('Fixture Zone.Identifier was not established: {0}' -f $Path)
+}
+
+function Get-PshNativeExecutionPolicyState {
+    $nativePowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Assert-PshGoal5Bootstrapper ([IO.File]::Exists($nativePowerShell)) 'Native Windows PowerShell 5.1 was not found for execution-policy fixture control.'
+
+    $command = '$ErrorActionPreference=''Stop'';$byScope=@{};Get-ExecutionPolicy -List | ForEach-Object { $byScope[[string]$_.Scope]=[string]$_.ExecutionPolicy };[pscustomobject]@{effectivePolicy=[string](Get-ExecutionPolicy);machinePolicy=[string]$byScope[''MachinePolicy''];userPolicy=[string]$byScope[''UserPolicy''];processPolicy=[string]$byScope[''Process'']} | ConvertTo-Json -Compress'
+    $result = Invoke-PshBootstrapperProcess -Executable $nativePowerShell -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', $command)
+    Assert-PshGoal5Bootstrapper ($result.ExitCode -eq 0 -and $result.Output.Count -eq 1) 'Native Windows PowerShell did not return one execution-policy fixture-control document.'
+    return ($result.Output[0] | ConvertFrom-Json)
+}
+
+function Set-PshFixtureExecutionPolicy {
+    param([Parameter(Mandatory = $true)][ValidateSet('Bypass', 'RemoteSigned', 'Unrestricted', 'AllSigned', 'Restricted')][string]$Policy)
+
+    [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference', $Policy, 'Process')
+    $state = Get-PshNativeExecutionPolicyState
+    Assert-PshGoal5Bootstrapper ($state.processPolicy -ceq $Policy) ('Native Windows PowerShell did not inherit the requested Process policy {0}; got {1}.' -f $Policy, $state.processPolicy)
+    Assert-PshGoal5Bootstrapper ($state.machinePolicy -ceq 'Undefined' -and $state.userPolicy -ceq 'Undefined') ('Execution-policy fixture control is governed by GPO (MachinePolicy={0}; UserPolicy={1}).' -f $state.machinePolicy, $state.userPolicy)
+    Assert-PshGoal5Bootstrapper ($state.effectivePolicy -ceq $Policy) ('Native Windows PowerShell effective policy was {0}, not requested fixture policy {1}.' -f $state.effectivePolicy, $Policy)
+}
+
 $bootstrapperProcessCommand = Get-Command Invoke-PshBootstrapperProcess -CommandType Function
 $argumentsParameter = $bootstrapperProcessCommand.Parameters['Arguments']
 Assert-PshGoal5Bootstrapper (@($argumentsParameter.Attributes | Where-Object { $_ -is [Management.Automation.AllowEmptyCollectionAttribute] }).Count -eq 1) 'Bootstrapper process harness does not accept an empty argument array.'
@@ -552,6 +600,8 @@ exit 29
 '@
     [IO.File]::WriteAllText($runtimeOnline, $onlineScript.Replace("`r`n", "`n"), $utf8NoBom)
     [IO.File]::WriteAllText($runtimeOffline, $offlineScript.Replace("`r`n", "`n"), $utf8NoBom)
+    Clear-PshFixtureZoneIdentifier -Path $runtimeOnline
+    Clear-PshFixtureZoneIdentifier -Path $runtimeOffline
     $runtimeOnlineBytes = [IO.File]::ReadAllBytes($runtimeOnline)
     $runtimeOnlineHash = Get-PshSha256 -Path $runtimeOnline
     [Environment]::SetEnvironmentVariable('PSH_BOOTSTRAPPER_CAPTURE', $capturePath, 'Process')
@@ -561,20 +611,16 @@ exit 29
     $peBytes = [IO.File]::ReadAllBytes($runtimeOutput)
     Assert-PshGoal5Bootstrapper ($peBytes.Length -gt 64 -and $peBytes[0] -eq 0x4D -and $peBytes[1] -eq 0x5A) 'Built output is not a PE executable.'
 
+    Set-PshFixtureExecutionPolicy -Policy 'Bypass'
     $onlineResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--edition', 'Full', '--version', '0.0.1-test', '--non-interactive')
-    if ($onlineResult.ExitCode -eq 4 -and $onlineResult.Output.Count -eq 1 -and $onlineResult.Output[0] -match 'PSH_E_EXECUTION_POLICY') {
-        Write-Warning 'Windows CI execution policy forbids unsigned fixture scripts; forwarding checks are deferred for this runner.'
-    }
-    else {
-        Assert-PshGoal5Bootstrapper ($onlineResult.ExitCode -eq 23) ('Online script exit code was not passed through: {0}' -f $onlineResult.ExitCode)
-        $onlinePayload = Get-Content -LiteralPath $capturePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        Assert-PshGoal5Bootstrapper ($onlinePayload.mode -ceq 'online' -and $onlinePayload.edition -ceq 'Full' -and $onlinePayload.version -ceq '0.0.1-test' -and $onlinePayload.nonInteractive) 'Online forwarding payload was incorrect.'
+    Assert-PshGoal5Bootstrapper ($onlineResult.ExitCode -eq 23) ('Online script exit code was not passed through: {0}' -f $onlineResult.ExitCode)
+    $onlinePayload = Get-Content -LiteralPath $capturePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-PshGoal5Bootstrapper ($onlinePayload.mode -ceq 'online' -and $onlinePayload.edition -ceq 'Full' -and $onlinePayload.version -ceq '0.0.1-test' -and $onlinePayload.nonInteractive) 'Online forwarding payload was incorrect.'
 
-        $offlineResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--offline', '--edition', 'Core', '--version', 'latest')
-        Assert-PshGoal5Bootstrapper ($offlineResult.ExitCode -eq 29) ('Offline script exit code was not passed through: {0}' -f $offlineResult.ExitCode)
-        $offlinePayload = Get-Content -LiteralPath $capturePath -Raw -Encoding UTF8 | ConvertFrom-Json
-        Assert-PshGoal5Bootstrapper ($offlinePayload.mode -ceq 'offline' -and $offlinePayload.edition -ceq 'Core' -and $offlinePayload.version -ceq 'latest') 'Offline forwarding payload was incorrect.'
-    }
+    $offlineResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--offline', '--edition', 'Core', '--version', 'latest')
+    Assert-PshGoal5Bootstrapper ($offlineResult.ExitCode -eq 29) ('Offline script exit code was not passed through: {0}' -f $offlineResult.ExitCode)
+    $offlinePayload = Get-Content -LiteralPath $capturePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-PshGoal5Bootstrapper ($offlinePayload.mode -ceq 'offline' -and $offlinePayload.edition -ceq 'Core' -and $offlinePayload.version -ceq 'latest') 'Offline forwarding payload was incorrect.'
 
     [IO.File]::AppendAllText($runtimeOnline, "`n# tamper`n", $utf8NoBom)
     $integrityResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @()
@@ -586,12 +632,13 @@ exit 29
     Assert-PshGoal5Bootstrapper ($usageResult.ExitCode -eq 2) 'Unknown option did not return usage exit code 2.'
 
     [IO.File]::WriteAllBytes($runtimeOnline, $runtimeOnlineBytes)
+    Clear-PshFixtureZoneIdentifier -Path $runtimeOnline
 
-    [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference', 'RemoteSigned', 'Process')
+    Set-PshFixtureExecutionPolicy -Policy 'RemoteSigned'
     $remoteLocalResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @()
     Assert-PshGoal5Bootstrapper ($remoteLocalResult.ExitCode -eq 23) ('RemoteSigned did not allow an unsigned local script: {0}' -f $remoteLocalResult.ExitCode)
 
-    Set-Content -LiteralPath $runtimeOnline -Stream 'Zone.Identifier' -Value "[ZoneTransfer]`r`nZoneId=3" -Encoding ASCII
+    Set-PshFixtureZoneIdentifier -Path $runtimeOnline -Value "[ZoneTransfer]`r`nZoneId=3"
     Assert-PshGoal5Bootstrapper ((Get-PshSha256 -Path $runtimeOnline) -ceq $runtimeOnlineHash) 'Adding MOTW unexpectedly changed the primary script bytes.'
 
     $remoteInternetResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @()
@@ -599,37 +646,37 @@ exit 29
     $remoteInternetEnvelope = $remoteInternetResult.Output[0] | ConvertFrom-Json
     Assert-PshGoal5Bootstrapper ($remoteInternetEnvelope.code -ceq 'PSH_E_EXECUTION_POLICY' -and $remoteInternetEnvelope.effectivePolicy -ceq 'RemoteSigned') 'RemoteSigned Internet-zone denial envelope was incorrect.'
 
-    Set-Content -LiteralPath $runtimeOnline -Stream 'Zone.Identifier' -Value "[ZoneTransfer]`r`nZoneId=9" -Encoding ASCII
+    Set-PshFixtureZoneIdentifier -Path $runtimeOnline -Value "[ZoneTransfer]`r`nZoneId=9"
     $unknownZoneResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @()
     Assert-PshGoal5Bootstrapper ($unknownZoneResult.ExitCode -eq 4 -and $unknownZoneResult.Output.Count -eq 1) 'Unknown ZoneId did not fail closed with dependency exit 4.'
     $unknownZoneEnvelope = $unknownZoneResult.Output[0] | ConvertFrom-Json
     Assert-PshGoal5Bootstrapper ($unknownZoneEnvelope.code -ceq 'PSH_E_EXECUTION_POLICY_PROBE' -and [int]$unknownZoneEnvelope.exitCode -eq 4) 'Unknown ZoneId did not return the policy-probe error envelope.'
 
-    Set-Content -LiteralPath $runtimeOnline -Stream 'Zone.Identifier' -Value "[ZoneTransfer]`r`nHostUrl=https://example.invalid" -Encoding ASCII
+    Set-PshFixtureZoneIdentifier -Path $runtimeOnline -Value "[ZoneTransfer]`r`nHostUrl=https://example.invalid"
     $malformedZoneResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--non-interactive')
     Assert-PshGoal5Bootstrapper ($malformedZoneResult.ExitCode -eq 4 -and $malformedZoneResult.Output.Count -eq 1) 'Malformed Zone.Identifier did not fail closed with dependency exit 4.'
     $malformedZoneEnvelope = $malformedZoneResult.Output[0] | ConvertFrom-Json
     Assert-PshGoal5Bootstrapper ($malformedZoneEnvelope.code -ceq 'PSH_E_EXECUTION_POLICY_PROBE' -and [int]$malformedZoneEnvelope.exitCode -eq 4) 'Malformed Zone.Identifier did not return the policy-probe error envelope.'
 
-    Set-Content -LiteralPath $runtimeOnline -Stream 'Zone.Identifier' -Value "[ZoneTransfer]`r`nZoneId=3" -Encoding ASCII
-    [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference', 'Unrestricted', 'Process')
+    Set-PshFixtureZoneIdentifier -Path $runtimeOnline -Value "[ZoneTransfer]`r`nZoneId=3"
+    Set-PshFixtureExecutionPolicy -Policy 'Unrestricted'
     $unrestrictedNonInteractive = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--non-interactive')
     Assert-PshGoal5Bootstrapper ($unrestrictedNonInteractive.ExitCode -eq 4 -and $unrestrictedNonInteractive.Output.Count -eq 1) 'Unrestricted non-interactive mode did not reject an unsigned Internet-zone prompt.'
     $unrestrictedEnvelope = $unrestrictedNonInteractive.Output[0] | ConvertFrom-Json
     Assert-PshGoal5Bootstrapper ($unrestrictedEnvelope.code -ceq 'PSH_E_EXECUTION_POLICY' -and $unrestrictedEnvelope.effectivePolicy -ceq 'Unrestricted') 'Unrestricted non-interactive denial envelope was incorrect.'
 
-    [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference', 'Bypass', 'Process')
+    Set-PshFixtureExecutionPolicy -Policy 'Bypass'
     $existingBypassResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--non-interactive')
     Assert-PshGoal5Bootstrapper ($existingBypassResult.ExitCode -eq 23) 'Bootstrapper did not respect an already-configured Bypass process policy.'
 
-    Remove-Item -LiteralPath $runtimeOnline -Stream 'Zone.Identifier' -Force
-    [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference', 'AllSigned', 'Process')
+    Clear-PshFixtureZoneIdentifier -Path $runtimeOnline
+    Set-PshFixtureExecutionPolicy -Policy 'AllSigned'
     $allSignedResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @()
     Assert-PshGoal5Bootstrapper ($allSignedResult.ExitCode -eq 4 -and $allSignedResult.Output.Count -eq 1) 'AllSigned did not reject the unsigned local fixture.'
     $allSignedEnvelope = $allSignedResult.Output[0] | ConvertFrom-Json
     Assert-PshGoal5Bootstrapper ($allSignedEnvelope.code -ceq 'PSH_E_EXECUTION_POLICY' -and $allSignedEnvelope.effectivePolicy -ceq 'AllSigned') 'AllSigned denial envelope was incorrect.'
 
-    [Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference', 'Restricted', 'Process')
+    Set-PshFixtureExecutionPolicy -Policy 'Restricted'
     $policyResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @()
     Assert-PshGoal5Bootstrapper ($policyResult.ExitCode -eq 4 -and $policyResult.Output.Count -eq 1) 'Restricted Process policy did not return a one-line error with exit 4.'
     $policyEnvelope = $policyResult.Output[0] | ConvertFrom-Json

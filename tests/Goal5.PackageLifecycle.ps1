@@ -427,8 +427,9 @@ try {
     Assert-PshGoal5 ([string]$missingStateDecision.Action -ceq 'Inspect' -and -not [bool]$missingStateDecision.Safe) 'Recovery without necessary ownership state was marked safe.'
 
     $currentPath = Join-Path $installRoot 'current.json'
-    $currentWrite = Write-PshCanonicalJsonAtomic -Path $currentPath -InputObject ([ordered]@{ schemaVersion = 1; version = '0.1.0-test.1' })
     [byte[]]$canonicalCurrentBytes = Get-PshLifecycleCanonicalCurrentBytes -Version '0.1.0-test.1'
+    [IO.File]::WriteAllBytes($currentPath, $canonicalCurrentBytes)
+    $currentWriteSha256 = Get-PshLifecycleSha256Bytes -Bytes $canonicalCurrentBytes
     [byte[]]$diskCurrentBytes = [IO.File]::ReadAllBytes($currentPath)
     $diskCurrentDecision = Get-PshRecoveryDecision -InstallRoot $installRoot -Transaction $published -OwnershipSha256 $transitionedOwnershipHash
     $canonicalCurrentText = (New-Object Text.UTF8Encoding($false, $true)).GetString($canonicalCurrentBytes)
@@ -436,15 +437,16 @@ try {
     [IO.File]::WriteAllBytes($currentPath, $windowsNewlineBytes)
     $windowsNewlineObservation = Get-PshRecoveryCurrentObservation -InstallRoot $installRoot
     $windowsNewlineDecision = Get-PshRecoveryDecision -InstallRoot $installRoot -Transaction $published -OwnershipSha256 $transitionedOwnershipHash
+    Assert-PshGoal5Failure -Action { Read-PshStrictJsonSnapshot -Path $currentPath -Description 'Windows newline current state' -RequireLf | Out-Null } -ExitCode 5 -ErrorId PshJsonLineEnding -Label 'CRLF current.json strict snapshot'
     Assert-PshGoal5 (
         [string]$diskCurrentDecision.Action -ceq 'CompleteCommit' -and [bool]$diskCurrentDecision.Safe -and
-        [string]$currentWrite.Sha256 -ceq [string]$targetCurrentSha256 -and
+        [string]$currentWriteSha256 -ceq [string]$targetCurrentSha256 -and
         [Convert]::ToBase64String($diskCurrentBytes) -ceq [Convert]::ToBase64String($canonicalCurrentBytes) -and
         $diskCurrentBytes.Length -gt 0 -and $diskCurrentBytes[$diskCurrentBytes.Length - 1] -eq 0x0A -and
         @($diskCurrentBytes | Where-Object { $_ -eq 0x0D }).Count -eq 0 -and
         -not [bool]$windowsNewlineObservation.Available -and [string]$windowsNewlineDecision.Action -ceq 'Inspect' -and -not [bool]$windowsNewlineDecision.Safe
     ) 'Canonical current.json write/hash/snapshot contract did not remain UTF-8 without BOM and with LF-only bytes.'
-    Write-PshCanonicalJsonAtomic -Path $currentPath -InputObject ([ordered]@{ schemaVersion = 1; version = '0.1.0-test.1' }) | Out-Null
+    [IO.File]::WriteAllBytes($currentPath, $canonicalCurrentBytes)
     $ownershipObservation = Get-PshRecoveryOwnershipObservation -InstallRoot $installRoot
     Assert-PshGoal5 ([bool]$ownershipObservation.Available -and [string]$ownershipObservation.ActiveVersion -ceq '0.1.0-test.1') 'Recovery ownership observation did not expose the validated activeVersion.'
 
