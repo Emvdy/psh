@@ -4,7 +4,15 @@
 #Requires -Version 5.1
 
 [CmdletBinding()]
-param([string] $RepositoryRoot = (Split-Path -Parent $PSScriptRoot))
+param([string] $RepositoryRoot)
+
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $scriptPath = [string]$MyInvocation.MyCommand.Path
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        throw 'Goal 5 package build acceptance could not resolve its script path.'
+    }
+    $RepositoryRoot = Split-Path -Parent (Split-Path -Parent $scriptPath)
+}
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -19,6 +27,14 @@ if (-not [IO.File]::Exists($lifecyclePath) -or -not [IO.File]::Exists($trustPath
 . $trustPath
 
 $script:Goal5PackageBuildAssertions = 0
+$unicodeReport = -join ([char[]]@(0x62A5, 0x544A))
+$unicodeSpace = -join ([char[]]@(0x7A7A, 0x683C))
+$unicodeChinese = -join ([char[]]@(0x4E2D, 0x6587))
+$unicodeInput = -join ([char[]]@(0x8F93, 0x5165))
+$unicodeVersion = -join ([char[]]@(0x7248, 0x672C))
+$unicodeTwo = [string][char]0x4E8C
+$unicodeExternal = -join ([char[]]@(0x5916, 0x90E8))
+$unicodeContains = [string][char]0x542B
 
 function Assert-PshGoal5PackageBuild {
     param([Parameter(Mandatory = $true)][bool] $Condition, [Parameter(Mandatory = $true)][string] $Message)
@@ -239,7 +255,7 @@ foreach ($path in @($buildScript, $indexScript, $artifactScript, $lifecyclePath,
 
 $reportRootValue = [Environment]::GetEnvironmentVariable('PSH_GOAL5_REPORT_ROOT')
 if ([string]::IsNullOrWhiteSpace($reportRootValue)) {
-    $reportRootValue = Join-Path ([IO.Path]::GetTempPath()) ('psh-goal5-报告 空格-' + [Guid]::NewGuid().ToString('N'))
+    $reportRootValue = Join-Path ([IO.Path]::GetTempPath()) ('psh-goal5-' + $unicodeReport + ' ' + $unicodeSpace + '-' + [Guid]::NewGuid().ToString('N'))
 }
 $reportRoot = [IO.Path]::GetFullPath($reportRootValue)
 [void](Assert-PshLifecycleNoReparseAncestors -Path $reportRoot -Description 'Goal 5 report root')
@@ -251,14 +267,14 @@ $reportPrefix = $reportRoot.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]
 Assert-PshGoal5PackageBuild ($preSignRoot.StartsWith($reportPrefix, (Get-PshLifecyclePathComparison))) 'PSH_GOAL5_PRE_SIGN_ROOT must be inside PSH_GOAL5_REPORT_ROOT.'
 Assert-PshGoal5PackageBuild (-not [IO.File]::Exists($preSignRoot) -and -not [IO.Directory]::Exists($preSignRoot)) 'Pre-sign report root must start absent.'
 
-$workRoot = New-PshGoal5Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('psh-goal5-work-中文 空格-' + [Guid]::NewGuid().ToString('N')))
-$fixtureRoot = New-PshGoal5Directory -Path (Join-Path $workRoot '输入 fixtures')
+$workRoot = New-PshGoal5Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('psh-goal5-work-' + $unicodeChinese + ' ' + $unicodeSpace + '-' + [Guid]::NewGuid().ToString('N')))
+$fixtureRoot = New-PshGoal5Directory -Path (Join-Path $workRoot ($unicodeInput + ' fixtures'))
 $bootstrapperPath = Join-Path $fixtureRoot 'psh-installer.exe'
 $releaseNotesPath = Join-Path $fixtureRoot 'RELEASE_NOTES.md'
 $releaseNotesZhPath = Join-Path $fixtureRoot 'RELEASE_NOTES.zh-CN.md'
 New-PshGoal5PeFixture -Path $bootstrapperPath
 Write-PshGoal5Text -Path $releaseNotesPath -Text "# Release 1.2.3`n"
-Write-PshGoal5Text -Path $releaseNotesZhPath -Text "# 版本 1.2.3`n"
+Write-PshGoal5Text -Path $releaseNotesZhPath -Text ('# ' + $unicodeVersion + " 1.2.3`n")
 
 $version = '1.2.3'
 $commit = '1234567890abcdef1234567890abcdef12345678'
@@ -288,7 +304,7 @@ Assert-PshGoal5PackageBuild ([int]$firstBuild.code -eq 4 -and [string]$firstBuil
 Assert-PshGoal5PackageBuild (@($firstBuild.packages).Count -eq 3) 'Public pre-sign build did not create three package slots.'
 Assert-PshGoal5PackageBuild (@(Get-ChildItem -LiteralPath $preSignRoot -Recurse -Force -File -Filter '*.cat').Count -eq 0) 'Pre-sign build fabricated a catalog.'
 
-$secondRoot = Join-Path $workRoot 'determinism build 二'
+$secondRoot = Join-Path $workRoot ('determinism build ' + $unicodeTwo)
 $secondParameters = @{} + $baseBuildParameters
 $secondParameters.OutputRoot = $secondRoot
 $secondBuild = @(& $buildScript @secondParameters)[-1]
@@ -303,14 +319,14 @@ foreach ($package in @($firstBuild.packages)) {
 }
 Assert-PshGoal5PackageBuild ([string]$firstBuild.onlineInstaller.embeddedSha256 -ceq [string]$secondBuild.onlineInstaller.embeddedSha256) 'Embedded online installer hash changed across deterministic builds.'
 
-$catalogRoot = New-PshGoal5Directory -Path (Join-Path $workRoot '外部 package catalogs')
+$catalogRoot = New-PshGoal5Directory -Path (Join-Path $workRoot ($unicodeExternal + ' package catalogs'))
 foreach ($name in @(
         "psh-$version-core", "psh-$version-full-win-x64", "psh-$version-full-win-arm64",
         'psh-0.0.1-test-core', 'psh-0.0.1-test-full-win-x64', 'psh-0.0.1-test-full-win-arm64'
     )) {
     Write-PshGoal5Text -Path (Join-Path $catalogRoot ($name + '.manifest.cat')) -Text "external catalog fixture for $name`n"
 }
-$finalRoot = Join-Path $workRoot 'finalized build 含 fixtures'
+$finalRoot = Join-Path $workRoot ('finalized build ' + $unicodeContains + ' fixtures')
 $finalParameters = @{} + $baseBuildParameters
 $finalParameters.OutputRoot = $finalRoot
 $finalParameters.IncludeTestFixtures = $true

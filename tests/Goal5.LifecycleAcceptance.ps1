@@ -220,8 +220,15 @@ try {
     $firstResult = $first[-1]
     Assert-PshGoal5Lifecycle ([bool]$firstResult.success -and [int]$firstResult.code -eq 0) 'Initial offline installation failed.'
     Assert-PshGoal5Lifecycle ([IO.File]::Exists((Join-Path $installRoot 'versions/0.0.1-test/Psh/Psh.psd1'))) 'Initial version was not published.'
-    $currentText = [IO.File]::ReadAllText((Join-Path $installRoot 'current.json'), $script:Utf8)
-    Assert-PshGoal5Lifecycle ($currentText -ceq "{`"schemaVersion`":1,`"version`":`"0.0.1-test`"}`n") 'current.json did not keep its exact two-field schema.'
+    $currentPath = Join-Path $installRoot 'current.json'
+    [byte[]]$currentBytes = [IO.File]::ReadAllBytes($currentPath)
+    $currentText = $script:Utf8.GetString($currentBytes)
+    Assert-PshGoal5Lifecycle (
+        $currentText -ceq "{`"schemaVersion`":1,`"version`":`"0.0.1-test`"}`n" -and
+        $currentBytes.Length -gt 0 -and $currentBytes[$currentBytes.Length - 1] -eq 0x0A -and
+        @($currentBytes | Where-Object { $_ -eq 0x0D }).Count -eq 0 -and
+        (Get-PshGoal5LifecycleHash -Path $currentPath) -ceq (Get-PshLifecycleCanonicalCurrentSha256 -Version '0.0.1-test')
+    ) 'current.json did not keep its exact UTF-8 no-BOM LF two-field byte contract.'
     Assert-PshGoal5Lifecycle ([IO.File]::ReadAllText($profilePath, $script:Utf8).Contains('# >>> Psh managed profile >>>')) 'Profile loader was not installed.'
     Assert-PshGoal5Lifecycle (-not [IO.File]::Exists((Join-Path $installRoot 'transaction.json'))) 'Completed install left a transaction journal.'
 

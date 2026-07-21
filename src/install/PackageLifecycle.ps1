@@ -650,7 +650,8 @@ function Read-PshStrictJsonSnapshot {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
         [Parameter(Mandatory = $true)][string] $Description,
-        [Parameter()][switch] $AllowMissing
+        [Parameter()][switch] $AllowMissing,
+        [Parameter()][switch] $RequireLf
     )
 
     $entry = Get-PshLifecyclePathEntry -Path $Path -Description $Description
@@ -680,7 +681,7 @@ function Read-PshStrictJsonSnapshot {
         if (Test-PshLifecycleExceptionMetadata $_) { throw }
         Throw-PshLifecycleError -ExitCode 3 -Kind 'Io' -ErrorId 'PshJsonReadFailed' -Message "Unable to read ${Description}: $Path" -InnerException $_.Exception
     }
-    return New-PshStrictJsonSnapshotFromBytes -Path $Path -Bytes $bytes -Description $Description
+    return New-PshStrictJsonSnapshotFromBytes -Path $Path -Bytes $bytes -Description $Description -RequireLf:$RequireLf
 }
 
 function New-PshStrictJsonSnapshotFromBytes {
@@ -688,11 +689,22 @@ function New-PshStrictJsonSnapshotFromBytes {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes,
-        [Parameter(Mandatory = $true)][string] $Description
+        [Parameter(Mandatory = $true)][string] $Description,
+        [Parameter()][switch] $RequireLf
     )
 
     if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
         Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshJsonBom' -Message "$Description must be UTF-8 without a BOM: $Path"
+    }
+    if ($RequireLf) {
+        if ($Bytes.Length -eq 0 -or $Bytes[$Bytes.Length - 1] -ne 0x0A) {
+            Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshJsonLineEnding' -Message "$Description must use UTF-8 LF line endings and end with LF: $Path"
+        }
+        for ($index = 0; $index -lt $Bytes.Length; $index++) {
+            if ($Bytes[$index] -eq 0x0D) {
+                Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshJsonLineEnding' -Message "$Description must use UTF-8 LF line endings and must not contain CR bytes: $Path"
+            }
+        }
     }
     $encoding = New-Object System.Text.UTF8Encoding($false, $true)
     try { $text = $encoding.GetString($Bytes) }
@@ -1856,7 +1868,7 @@ function Get-PshRecoveryCurrentObservation {
     }
     $path = Join-Path $root 'current.json'
     try {
-        $snapshot = Read-PshStrictJsonSnapshot -Path $path -Description 'current state' -AllowMissing
+        $snapshot = Read-PshStrictJsonSnapshot -Path $path -Description 'current state' -AllowMissing -RequireLf
         if ($null -eq $snapshot) {
             return [pscustomobject][ordered]@{ Available = $true; Exists = $false; Version = $null; Sha256 = $null; Reason = 'current.json is absent.' }
         }
@@ -1877,11 +1889,20 @@ function Get-PshRecoveryCurrentObservation {
 function Get-PshLifecycleCanonicalCurrentSha256 {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string] $Version)
+
+    $bytes = Get-PshLifecycleCanonicalCurrentBytes -Version $Version
+    return Get-PshLifecycleSha256Bytes -Bytes $bytes
+}
+
+function Get-PshLifecycleCanonicalCurrentBytes {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string] $Version)
+
     $validated = Assert-PshLifecycleSemVer -Value $Version -Description 'target current version'
     $document = [ordered]@{ schemaVersion = 1; version = $validated }
-    $json = ($document | ConvertTo-Json -Compress) + [Environment]::NewLine
+    $json = (ConvertTo-PshCanonicalJson -InputObject $document) + "`n"
     $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($json)
-    return Get-PshLifecycleSha256Bytes -Bytes $bytes
+    return (,$bytes)
 }
 
 function Get-PshRecoveryOwnershipObservation {

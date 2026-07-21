@@ -4,7 +4,15 @@
 #Requires -Version 5.1
 
 [CmdletBinding()]
-param([string] $RepositoryRoot = (Split-Path -Parent $PSScriptRoot))
+param([string] $RepositoryRoot)
+
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $scriptPath = [string]$MyInvocation.MyCommand.Path
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        throw 'Goal 5 uninstall safety acceptance could not resolve its script path.'
+    }
+    $RepositoryRoot = Split-Path -Parent (Split-Path -Parent $scriptPath)
+}
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'

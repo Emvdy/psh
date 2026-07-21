@@ -110,7 +110,7 @@ $currentDocument = [ordered]@{
     schemaVersion = 1
     version       = $Version
 }
-$currentJson = ($currentDocument | ConvertTo-Json -Compress) + [Environment]::NewLine
+$currentJson = ($currentDocument | ConvertTo-Json -Compress) + "`n"
 $currentBytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($currentJson)
 $targetSha256 = Get-PshCurrentSwitchBytesHash -Bytes $currentBytes
 $operationId = ([Guid]::NewGuid()).ToString('N')

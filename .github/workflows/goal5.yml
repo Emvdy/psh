@@ -413,7 +413,7 @@ jobs:
               $lines = New-Object System.Collections.Generic.List[string]
               $testExitCode = 1
               try {
-                  & $enginePath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $testPath 2>&1 | ForEach-Object {
+                  & $enginePath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $testPath -RepositoryRoot $env:GITHUB_WORKSPACE 2>&1 | ForEach-Object {
                       $line = [string]$_
                       [void]$lines.Add($line)
                       Write-Output ('[{0}] {1}' -f $test.Name, $line)

@@ -4,7 +4,15 @@
 #Requires -Version 5.1
 
 [CmdletBinding()]
-param([string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot))
+param([string]$RepositoryRoot)
+
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $scriptPath = [string]$MyInvocation.MyCommand.Path
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        throw 'Goal 5 workflow contract could not resolve its script path.'
+    }
+    $RepositoryRoot = Split-Path -Parent (Split-Path -Parent $scriptPath)
+}
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -191,7 +199,8 @@ Assert-PshGoal5WorkflowNoMatch $workflowText '(?im)Get-ChildItem[^\n]*(?:tests[/
 Assert-PshGoal5WorkflowNoMatch $workflowText '(?im)tests[/\\]Goal5\*' 'Workflow must not use wildcard Goal 5 test paths.'
 
 Assert-PshGoal5WorkflowMatch $workflowText 'Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force' 'process-only Bypass test policy' 3 3
-Assert-PshGoal5WorkflowMatch $workflowText '& \$enginePath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \$testPath' 'isolated test process invocation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText '& \$enginePath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \$testPath -RepositoryRoot \$env:GITHUB_WORKSPACE' 'isolated test process invocation with explicit repository root' 1 1
+Assert-PshGoal5WorkflowNoMatch $workflowText '& \$enginePath[^\n]*-File \$testPath(?![^\n]*-RepositoryRoot \$env:GITHUB_WORKSPACE)' 'Every isolated test invocation must pass the fixed GitHub workspace as RepositoryRoot.'
 Assert-PshGoal5WorkflowMatch $workflowText '\$testExitCode = if \(\$null -eq \$LASTEXITCODE\)' 'test exit-code capture' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText '\$global:LASTEXITCODE = 0' 'LASTEXITCODE reset' 6 6
 Assert-PshGoal5WorkflowMatch $workflowText "\\b\(\?:deferred\|skipped\)\\b" 'deferred/skipped log gate' 1 1

@@ -5,8 +5,16 @@
 
 [CmdletBinding()]
 param(
-    [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot)
+    [string]$RepositoryRoot
 )
+
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $scriptPath = [string]$MyInvocation.MyCommand.Path
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        throw 'Goal 5 bootstrapper acceptance could not resolve its script path.'
+    }
+    $RepositoryRoot = Split-Path -Parent (Split-Path -Parent $scriptPath)
+}
 
 $ErrorActionPreference = 'Stop'
 $script:Assertions = 0
@@ -92,7 +100,7 @@ function Invoke-PshExpectedProbeParseFailure {
 function Invoke-PshBootstrapperProcess {
     param(
         [Parameter(Mandatory = $true)][string]$Executable,
-        [Parameter(Mandatory = $true)][string[]]$Arguments
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Arguments
     )
 
     $output = @(& $Executable @Arguments 2>&1 | ForEach-Object { [string]$_ })
@@ -101,6 +109,10 @@ function Invoke-PshBootstrapperProcess {
         Output   = $output
     }
 }
+
+$bootstrapperProcessCommand = Get-Command Invoke-PshBootstrapperProcess -CommandType Function
+$argumentsParameter = $bootstrapperProcessCommand.Parameters['Arguments']
+Assert-PshGoal5Bootstrapper (@($argumentsParameter.Attributes | Where-Object { $_ -is [Management.Automation.AllowEmptyCollectionAttribute] }).Count -eq 1) 'Bootstrapper process harness does not accept an empty argument array.'
 
 $bootstrapperRoot = Join-Path $RepositoryRoot 'src/bootstrapper'
 $parserPath = Join-Path $bootstrapperRoot 'ArgumentParser.cs'
