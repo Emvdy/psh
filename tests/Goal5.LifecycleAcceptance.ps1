@@ -12,6 +12,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $script:Assertions = 0
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
+$script:FullNativeToolNames = @('bat', 'fd', 'jq', 'rg')
 
 $lifecycleHelpers = Join-Path $RepositoryRoot 'src/install/PackageLifecycle.ps1'
 $installScript = Join-Path $RepositoryRoot 'src/install/Install-PshPackage.ps1'
@@ -39,6 +40,35 @@ function Get-PshGoal5LifecycleHash {
 function Test-PshGoal5LifecycleBytesEqual {
     param([Parameter(Mandatory = $true)][byte[]] $Left, [Parameter(Mandatory = $true)][byte[]] $Right)
     return [Convert]::ToBase64String($Left) -ceq [Convert]::ToBase64String($Right)
+}
+
+function Assert-PshGoal5LifecycleFullTools {
+    param(
+        [Parameter(Mandatory = $true)][string] $InstallRoot,
+        [Parameter(Mandatory = $true)][string] $Version
+    )
+
+    $toolsRoot = Join-Path $InstallRoot ("versions/$Version/Psh/Tools")
+    $lockPath = Join-Path $toolsRoot 'native-tools.lock.json'
+    Assert-PshGoal5Lifecycle ([IO.File]::Exists($lockPath)) "Full $Version did not install the native tools lock."
+    $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
+    foreach ($toolName in $script:FullNativeToolNames) {
+        $tool = @($lock.tools | Where-Object { [string]$_.name -ceq $toolName })
+        $artifact = if ($tool.Count -eq 1) { $tool[0].artifacts.'win-x64' } else { $null }
+        $relativePath = if ($null -eq $artifact) { $null } else { [string]$artifact.installedPath }
+        $installedPath = if ([string]::IsNullOrWhiteSpace($relativePath)) { $null } else { Join-Path $toolsRoot $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar) }
+        $sourcePath = if ([string]::IsNullOrWhiteSpace($relativePath)) { $null } else { Join-Path (Join-Path $RepositoryRoot 'tools') $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar) }
+        Assert-PshGoal5Lifecycle (
+            $tool.Count -eq 1 -and
+            $null -ne $artifact -and [string]$artifact.state -ceq 'pinned' -and
+            -not [string]::IsNullOrWhiteSpace($relativePath) -and
+            $relativePath.StartsWith('win-x64/', [StringComparison]::Ordinal) -and
+            [IO.File]::Exists($installedPath) -and [IO.File]::Exists($sourcePath) -and
+            (Get-PshGoal5LifecycleHash -Path $installedPath) -ceq [string]$artifact.installedSha256 -and
+            (Get-PshGoal5LifecycleHash -Path $sourcePath) -ceq [string]$artifact.installedSha256
+        ) "Full $Version did not retain the pinned win-x64 $toolName executable."
+    }
+    Assert-PshGoal5Lifecycle (-not [IO.Directory]::Exists((Join-Path $toolsRoot 'win-arm64'))) "Full $Version included win-arm64 tools in its win-x64 package."
 }
 
 function Write-PshGoal5LifecycleText {
@@ -139,8 +169,17 @@ Set-StrictMode -Version 2.0
     $effectiveArchitecture = if ([string]::IsNullOrWhiteSpace($Architecture)) { if ($Edition -ceq 'Full') { 'win-x64' } else { 'any' } } else { $Architecture }
     $nativeLockHash = $null
     if ($Edition -ceq 'Full') {
-        $nativeLockPath = Join-Path $Root 'payload/native-tools.lock.json'
-        Write-PshGoal5LifecycleText -Path $nativeLockPath -Text "{`"synthetic`":true}`n"
+        $nativeToolsSourceRoot = Join-Path $RepositoryRoot 'tools'
+        $nativeToolsTargetRoot = Join-Path $moduleRoot 'Tools'
+        [IO.Directory]::CreateDirectory($nativeToolsTargetRoot) | Out-Null
+        $nativeLockPath = Join-Path $nativeToolsTargetRoot 'native-tools.lock.json'
+        Copy-Item -LiteralPath (Join-Path $nativeToolsSourceRoot 'native-tools.lock.json') -Destination $nativeLockPath
+        foreach ($toolName in $script:FullNativeToolNames) {
+            $toolRelativePath = "$effectiveArchitecture/$toolName/$toolName.exe"
+            $toolTargetPath = Join-Path $nativeToolsTargetRoot $toolRelativePath.Replace('/', [IO.Path]::DirectorySeparatorChar)
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($toolTargetPath)) | Out-Null
+            Copy-Item -LiteralPath (Join-Path $nativeToolsSourceRoot $toolRelativePath.Replace('/', [IO.Path]::DirectorySeparatorChar)) -Destination $toolTargetPath
+        }
         $nativeLockHash = Get-PshGoal5LifecycleHash -Path $nativeLockPath
     }
 
@@ -350,10 +389,81 @@ try {
         $editionMismatchRoot = Join-Path $testRoot 'edition-mismatch/Psh'
         $editionMismatch = Invoke-PshGoal5LifecycleFailure { & $installScript -PackageRoot $editionMismatchPackage -InstallRoot $editionMismatchRoot -ProfilePath @() -ModuleRoot @() -Offline -Confirm:$false }
         Assert-PshGoal5Lifecycle ([int]$editionMismatch.Exception.Data['PshExitCode'] -eq 5 -and -not [IO.File]::Exists((Join-Path $editionMismatchRoot 'ownership.json'))) 'A Full package with a Core config was not rejected before ownership commit.'
-        $fullPackage = New-PshGoal5LifecyclePackage -Root (Join-Path $testRoot 'packages/full') -Version '0.0.6-test' -Edition Full -Architecture win-x64
+        $fullSyntheticPackage = New-PshGoal5LifecyclePackage -Root (Join-Path $testRoot 'packages/full-synthetic') -Version '0.0.1-test' -Marker 'full-synthetic' -Edition Full -Architecture win-x64
+        $fullReleasePackage = New-PshGoal5LifecyclePackage -Root (Join-Path $testRoot 'packages/full-release') -Version '0.1.0' -Marker 'full-release' -Edition Full -Architecture win-x64
+        $fullSyntheticManifest = Read-PshPackageManifest -Path (Join-Path $fullSyntheticPackage 'package.manifest.json')
+        $fullReleaseManifest = Read-PshPackageManifest -Path (Join-Path $fullReleasePackage 'package.manifest.json')
+        $fullSyntheticLock = @($fullSyntheticManifest.files | Where-Object { [string]$_.relativePath -ceq 'payload/Psh/Tools/native-tools.lock.json' })
+        $fullReleaseLock = @($fullReleaseManifest.files | Where-Object { [string]$_.relativePath -ceq 'payload/Psh/Tools/native-tools.lock.json' })
+        Assert-PshGoal5Lifecycle (
+            [string]$fullSyntheticManifest.edition -ceq 'Full' -and [string]$fullSyntheticManifest.architecture -ceq 'win-x64' -and
+            [string]$fullReleaseManifest.edition -ceq 'Full' -and [string]$fullReleaseManifest.architecture -ceq 'win-x64' -and
+            $fullSyntheticLock.Count -eq 1 -and [string]$fullSyntheticLock[0].sha256 -ceq [string]$fullSyntheticManifest.nativeToolsLockSha256 -and
+            $fullReleaseLock.Count -eq 1 -and [string]$fullReleaseLock[0].sha256 -ceq [string]$fullReleaseManifest.nativeToolsLockSha256
+        ) 'The Full lifecycle fixtures were not distinct Full win-x64 packages with the production native-tools lock path.'
         $fullRoot = Join-Path $testRoot 'full/Psh'
-        $fullInstall = @(& $installScript -PackageRoot $fullPackage -InstallRoot $fullRoot -ProfilePath @() -ModuleRoot @() -Offline -Confirm:$false)
-        Assert-PshGoal5Lifecycle ([bool]$fullInstall[-1].success -and (Get-Content -LiteralPath (Join-Path $fullRoot 'config.psd1') -Raw).Contains("Edition = 'Full'")) 'A matching Full package did not persist an edition-specific config.'
+        $fullProfilePath = Join-Path $testRoot 'full/profile.ps1'
+        $fullOriginalProfile = "# full user profile`r`n`$global:Goal5FullUserValue = 11`r`n"
+        Write-PshGoal5LifecycleText -Path $fullProfilePath -Text $fullOriginalProfile
+        [byte[]]$fullOriginalProfileBytes = [IO.File]::ReadAllBytes($fullProfilePath)
+        $fullUserContentPath = Join-Path $fullRoot 'user-notes.txt'
+        $fullUserContent = "pre-existing Full user content`r`n"
+        Write-PshGoal5LifecycleText -Path $fullUserContentPath -Text $fullUserContent
+        [byte[]]$fullUserContentBytes = [IO.File]::ReadAllBytes($fullUserContentPath)
+
+        $fullInstall = @(& $installScript -PackageRoot $fullSyntheticPackage -InstallRoot $fullRoot -Edition Full -Version '0.0.1-test' -ProfilePath @($fullProfilePath) -ModuleRoot @() -Offline -Confirm:$false)
+        $fullInstallResult = $fullInstall[-1]
+        Assert-PshGoal5Lifecycle (
+            [bool]$fullInstallResult.success -and [string]$fullInstallResult.edition -ceq 'Full' -and [string]$fullInstallResult.version -ceq '0.0.1-test' -and
+            (Get-Content -LiteralPath (Join-Path $fullRoot 'config.psd1') -Raw).Contains("Edition = 'Full'") -and
+            [IO.File]::ReadAllText($fullProfilePath, $script:Utf8).Contains('# >>> Psh managed profile >>>')
+        ) 'The synthetic Full win-x64 package did not complete its initial offline install.'
+        Assert-PshGoal5LifecycleFullTools -InstallRoot $fullRoot -Version '0.0.1-test'
+
+        [byte[]]$fullCurrentBeforeRepeat = [IO.File]::ReadAllBytes((Join-Path $fullRoot 'current.json'))
+        [byte[]]$fullOwnershipBeforeRepeat = [IO.File]::ReadAllBytes((Join-Path $fullRoot 'ownership.json'))
+        [byte[]]$fullProfileBeforeRepeat = [IO.File]::ReadAllBytes($fullProfilePath)
+        $fullToolsBeforeRepeat = @(Get-ChildItem -LiteralPath (Join-Path $fullRoot 'versions/0.0.1-test/Psh/Tools') -Recurse -Force -File | Sort-Object FullName | ForEach-Object { '{0}:{1}:{2}' -f $_.FullName, [long]$_.Length, (Get-PshGoal5LifecycleHash -Path $_.FullName) }) -join "`n"
+        $fullRepeat = @(& $installScript -PackageRoot $fullSyntheticPackage -InstallRoot $fullRoot -Edition Full -Version '0.0.1-test' -ProfilePath @($fullProfilePath) -ModuleRoot @() -Offline -Confirm:$false)
+        $fullToolsAfterRepeat = @(Get-ChildItem -LiteralPath (Join-Path $fullRoot 'versions/0.0.1-test/Psh/Tools') -Recurse -Force -File | Sort-Object FullName | ForEach-Object { '{0}:{1}:{2}' -f $_.FullName, [long]$_.Length, (Get-PshGoal5LifecycleHash -Path $_.FullName) }) -join "`n"
+        Assert-PshGoal5Lifecycle (
+            [bool]$fullRepeat[-1].success -and [bool]$fullRepeat[-1].idempotent -and [string]$fullRepeat[-1].edition -ceq 'Full' -and
+            (Test-PshGoal5LifecycleBytesEqual $fullCurrentBeforeRepeat ([IO.File]::ReadAllBytes((Join-Path $fullRoot 'current.json'))) -and
+            (Test-PshGoal5LifecycleBytesEqual $fullOwnershipBeforeRepeat ([IO.File]::ReadAllBytes((Join-Path $fullRoot 'ownership.json'))) -and
+            (Test-PshGoal5LifecycleBytesEqual $fullProfileBeforeRepeat ([IO.File]::ReadAllBytes($fullProfilePath)) -and
+            $fullToolsBeforeRepeat -ceq $fullToolsAfterRepeat -and -not [IO.File]::Exists((Join-Path $fullRoot 'transaction.json'))
+        ) 'Repeat installation of the Full win-x64 package changed lifecycle, profile, or tool bytes.'
+
+        $fullUpgrade = @(& $installScript -PackageRoot $fullReleasePackage -InstallRoot $fullRoot -Edition Full -Version '0.1.0' -ProfilePath @($fullProfilePath) -ModuleRoot @() -Offline -Confirm:$false)
+        $fullOwnership = Read-PshOwnershipState -InstallRoot $fullRoot
+        $fullOwnedVersions = @($fullOwnership.versions | Where-Object { [string]$_.edition -ceq 'Full' -and [string]$_.architecture -ceq 'win-x64' } | ForEach-Object { [string]$_.version } | Sort-Object)
+        Assert-PshGoal5Lifecycle (
+            [bool]$fullUpgrade[-1].success -and [string]$fullUpgrade[-1].edition -ceq 'Full' -and [string]$fullUpgrade[-1].version -ceq '0.1.0' -and
+            [string]$fullOwnership.activeVersion -ceq '0.1.0' -and ($fullOwnedVersions -join '|') -ceq '0.0.1-test|0.1.0'
+        ) 'Full did not upgrade from synthetic 0.0.1-test to v0.1.0 with two retained win-x64 Full versions.'
+        Assert-PshGoal5LifecycleFullTools -InstallRoot $fullRoot -Version '0.1.0'
+
+        $fullRollback = @(& $rollbackScript -InstallRoot $fullRoot -Version '0.0.1-test' -ModuleRoot @() -Offline -Confirm:$false)
+        $fullRolledOwnership = Read-PshOwnershipState -InstallRoot $fullRoot
+        $fullRolledActive = @($fullRolledOwnership.versions | Where-Object { [string]$_.version -ceq [string]$fullRolledOwnership.activeVersion })
+        Assert-PshGoal5Lifecycle (
+            [bool]$fullRollback[-1].success -and [string]$fullRollback[-1].status -ceq 'switched' -and
+            [string]$fullRollback[-1].version -ceq '0.0.1-test' -and [string]$fullRollback[-1].previousVersion -ceq '0.1.0' -and
+            [string]$fullRolledOwnership.activeVersion -ceq '0.0.1-test' -and $fullRolledActive.Count -eq 1 -and
+            [string]$fullRolledActive[0].edition -ceq 'Full' -and [string]$fullRolledActive[0].architecture -ceq 'win-x64' -and
+            (Get-Content -LiteralPath (Join-Path $fullRoot 'config.psd1') -Raw).Contains("Edition = 'Full'")
+        ) 'Full rollback did not switch v0.1.0 back to synthetic 0.0.1-test as the active Full win-x64 version.'
+
+        $fullUninstall = @(& $uninstallScript -InstallRoot $fullRoot -ProfilePath @($fullProfilePath) -ModuleRoot @() -Confirm:$false)
+        Assert-PshGoal5Lifecycle (
+            [bool]$fullUninstall[-1].success -and -not [bool]$fullUninstall[-1].restartRequired -and
+            (Test-PshGoal5LifecycleBytesEqual $fullOriginalProfileBytes ([IO.File]::ReadAllBytes($fullProfilePath))) -and
+            -not [IO.File]::Exists((Join-Path $fullRoot 'ownership.json')) -and
+            -not [IO.File]::Exists((Join-Path $fullRoot 'current.json')) -and
+            -not [IO.Directory]::Exists((Join-Path $fullRoot 'versions')) -and
+            [IO.File]::Exists($fullUserContentPath) -and
+            (Test-PshGoal5LifecycleBytesEqual $fullUserContentBytes ([IO.File]::ReadAllBytes($fullUserContentPath)))
+        ) 'Full uninstall did not remove owned versions, restore the original profile, or retain pre-existing user bytes.'
     }
     finally {
         $env:PROCESSOR_ARCHITECTURE = $originalProcessorArchitecture
