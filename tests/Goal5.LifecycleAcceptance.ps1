@@ -50,25 +50,34 @@ function Assert-PshGoal5LifecycleFullTools {
 
     $toolsRoot = Join-Path $InstallRoot ("versions/$Version/Psh/Tools")
     $lockPath = Join-Path $toolsRoot 'native-tools.lock.json'
-    Assert-PshGoal5Lifecycle ([IO.File]::Exists($lockPath)) "Full $Version did not install the native tools lock."
+    $lockExists = [bool]([IO.File]::Exists($lockPath))
+    Assert-PshGoal5Lifecycle $lockExists "Full $Version did not install the native tools lock."
     $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
     foreach ($toolName in $script:FullNativeToolNames) {
         $tool = @($lock.tools | Where-Object { [string]$_.name -ceq $toolName })
-        $artifact = if ($tool.Count -eq 1) { $tool[0].artifacts.'win-x64' } else { $null }
-        $relativePath = if ($null -eq $artifact) { $null } else { [string]$artifact.installedPath }
-        $installedPath = if ([string]::IsNullOrWhiteSpace($relativePath)) { $null } else { Join-Path $toolsRoot $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar) }
-        $sourcePath = if ([string]::IsNullOrWhiteSpace($relativePath)) { $null } else { Join-Path (Join-Path $RepositoryRoot 'tools') $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar) }
-        Assert-PshGoal5Lifecycle (
-            $tool.Count -eq 1 -and
-            $null -ne $artifact -and [string]$artifact.state -ceq 'pinned' -and
-            -not [string]::IsNullOrWhiteSpace($relativePath) -and
-            $relativePath.StartsWith('win-x64/', [StringComparison]::Ordinal) -and
-            [IO.File]::Exists($installedPath) -and [IO.File]::Exists($sourcePath) -and
-            (Get-PshGoal5LifecycleHash -Path $installedPath) -ceq [string]$artifact.installedSha256 -and
-            (Get-PshGoal5LifecycleHash -Path $sourcePath) -ceq [string]$artifact.installedSha256
-        ) "Full $Version did not retain the pinned win-x64 $toolName executable."
+        $toolCount = [int]$tool.Count
+        $toolCountIsOne = [bool]($toolCount -eq 1)
+        $artifact = if ($toolCountIsOne) { $tool[0].artifacts.'win-x64' } else { $null }
+        $artifactExists = [bool]($null -ne $artifact)
+        $artifactState = if ($artifactExists) { [string]$artifact.state } else { [string]::Empty }
+        $relativePath = if ($artifactExists) { [string]$artifact.installedPath } else { [string]::Empty }
+        $expectedHash = if ($artifactExists) { [string]$artifact.installedSha256 } else { [string]::Empty }
+        $artifactIsPinned = [bool]($artifactState -ceq 'pinned')
+        $relativePathIsPresent = [bool](-not [string]::IsNullOrWhiteSpace($relativePath))
+        $relativePathIsX64 = if ($relativePathIsPresent) { [bool]($relativePath.StartsWith('win-x64/', [StringComparison]::Ordinal)) } else { $false }
+        $installedPath = if ($relativePathIsPresent) { Join-Path $toolsRoot $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar) } else { [string]::Empty }
+        $sourcePath = if ($relativePathIsPresent) { Join-Path (Join-Path $RepositoryRoot 'tools') $relativePath.Replace('/', [IO.Path]::DirectorySeparatorChar) } else { [string]::Empty }
+        $installedExists = [bool]([IO.File]::Exists($installedPath))
+        $sourceExists = [bool]([IO.File]::Exists($sourcePath))
+        $installedHash = if ($installedExists) { [string](Get-PshGoal5LifecycleHash -Path $installedPath) } else { [string]::Empty }
+        $sourceHash = if ($sourceExists) { [string](Get-PshGoal5LifecycleHash -Path $sourcePath) } else { [string]::Empty }
+        $installedHashMatches = [bool]($installedHash -ceq $expectedHash)
+        $sourceHashMatches = [bool]($sourceHash -ceq $expectedHash)
+        $toolIsPinnedX64 = [bool]($toolCountIsOne -and $artifactExists -and $artifactIsPinned -and $relativePathIsPresent -and $relativePathIsX64 -and $installedExists -and $sourceExists -and $installedHashMatches -and $sourceHashMatches)
+        Assert-PshGoal5Lifecycle $toolIsPinnedX64 "Full $Version did not retain the pinned win-x64 $toolName executable."
     }
-    Assert-PshGoal5Lifecycle (-not [IO.Directory]::Exists((Join-Path $toolsRoot 'win-arm64'))) "Full $Version included win-arm64 tools in its win-x64 package."
+    $arm64ToolsAreAbsent = [bool](-not [IO.Directory]::Exists((Join-Path $toolsRoot 'win-arm64')))
+    Assert-PshGoal5Lifecycle $arm64ToolsAreAbsent "Full $Version included win-arm64 tools in its win-x64 package."
 }
 
 function Write-PshGoal5LifecycleText {
@@ -395,12 +404,26 @@ try {
         $fullReleaseManifest = Read-PshPackageManifest -Path (Join-Path $fullReleasePackage 'package.manifest.json')
         $fullSyntheticLock = @($fullSyntheticManifest.files | Where-Object { [string]$_.relativePath -ceq 'payload/Psh/Tools/native-tools.lock.json' })
         $fullReleaseLock = @($fullReleaseManifest.files | Where-Object { [string]$_.relativePath -ceq 'payload/Psh/Tools/native-tools.lock.json' })
-        Assert-PshGoal5Lifecycle (
-            [string]$fullSyntheticManifest.edition -ceq 'Full' -and [string]$fullSyntheticManifest.architecture -ceq 'win-x64' -and
-            [string]$fullReleaseManifest.edition -ceq 'Full' -and [string]$fullReleaseManifest.architecture -ceq 'win-x64' -and
-            $fullSyntheticLock.Count -eq 1 -and [string]$fullSyntheticLock[0].sha256 -ceq [string]$fullSyntheticManifest.nativeToolsLockSha256 -and
-            $fullReleaseLock.Count -eq 1 -and [string]$fullReleaseLock[0].sha256 -ceq [string]$fullReleaseManifest.nativeToolsLockSha256
-        ) 'The Full lifecycle fixtures were not distinct Full win-x64 packages with the production native-tools lock path.'
+        $fullSyntheticEdition = [string]$fullSyntheticManifest.edition
+        $fullSyntheticArchitecture = [string]$fullSyntheticManifest.architecture
+        $fullReleaseEdition = [string]$fullReleaseManifest.edition
+        $fullReleaseArchitecture = [string]$fullReleaseManifest.architecture
+        $fullSyntheticLockCount = [int]$fullSyntheticLock.Count
+        $fullReleaseLockCount = [int]$fullReleaseLock.Count
+        $fullSyntheticLockCountIsOne = [bool]($fullSyntheticLockCount -eq 1)
+        $fullReleaseLockCountIsOne = [bool]($fullReleaseLockCount -eq 1)
+        $fullSyntheticLockHash = if ($fullSyntheticLockCountIsOne) { [string]$fullSyntheticLock[0].sha256 } else { [string]::Empty }
+        $fullReleaseLockHash = if ($fullReleaseLockCountIsOne) { [string]$fullReleaseLock[0].sha256 } else { [string]::Empty }
+        $fullSyntheticExpectedLockHash = [string]$fullSyntheticManifest.nativeToolsLockSha256
+        $fullReleaseExpectedLockHash = [string]$fullReleaseManifest.nativeToolsLockSha256
+        $fullSyntheticEditionIsFull = [bool]($fullSyntheticEdition -ceq 'Full')
+        $fullSyntheticArchitectureIsX64 = [bool]($fullSyntheticArchitecture -ceq 'win-x64')
+        $fullReleaseEditionIsFull = [bool]($fullReleaseEdition -ceq 'Full')
+        $fullReleaseArchitectureIsX64 = [bool]($fullReleaseArchitecture -ceq 'win-x64')
+        $fullSyntheticLockMatches = [bool]($fullSyntheticLockHash -ceq $fullSyntheticExpectedLockHash)
+        $fullReleaseLockMatches = [bool]($fullReleaseLockHash -ceq $fullReleaseExpectedLockHash)
+        $fullManifestsAreValid = [bool]($fullSyntheticEditionIsFull -and $fullSyntheticArchitectureIsX64 -and $fullReleaseEditionIsFull -and $fullReleaseArchitectureIsX64 -and $fullSyntheticLockCountIsOne -and $fullReleaseLockCountIsOne -and $fullSyntheticLockMatches -and $fullReleaseLockMatches)
+        Assert-PshGoal5Lifecycle $fullManifestsAreValid 'The Full lifecycle fixtures were not distinct Full win-x64 packages with the production native-tools lock path.'
         $fullRoot = Join-Path $testRoot 'full/Psh'
         $fullProfilePath = Join-Path $testRoot 'full/profile.ps1'
         $fullOriginalProfile = "# full user profile`r`n`$global:Goal5FullUserValue = 11`r`n"
@@ -413,11 +436,18 @@ try {
 
         $fullInstall = @(& $installScript -PackageRoot $fullSyntheticPackage -InstallRoot $fullRoot -Edition Full -Version '0.0.1-test' -ProfilePath @($fullProfilePath) -ModuleRoot @() -Offline -Confirm:$false)
         $fullInstallResult = $fullInstall[-1]
-        Assert-PshGoal5Lifecycle (
-            [bool]$fullInstallResult.success -and [string]$fullInstallResult.edition -ceq 'Full' -and [string]$fullInstallResult.version -ceq '0.0.1-test' -and
-            (Get-Content -LiteralPath (Join-Path $fullRoot 'config.psd1') -Raw).Contains("Edition = 'Full'") -and
-            [IO.File]::ReadAllText($fullProfilePath, $script:Utf8).Contains('# >>> Psh managed profile >>>')
-        ) 'The synthetic Full win-x64 package did not complete its initial offline install.'
+        $fullInstallSuccess = [bool]$fullInstallResult.success
+        $fullInstallEdition = [string]$fullInstallResult.edition
+        $fullInstallVersion = [string]$fullInstallResult.version
+        $fullInstalledConfigText = [string](Get-Content -LiteralPath (Join-Path $fullRoot 'config.psd1') -Raw)
+        $fullInstalledProfileText = [string]([IO.File]::ReadAllText($fullProfilePath, $script:Utf8))
+        $fullInstallSucceeded = [bool]($fullInstallSuccess)
+        $fullInstallEditionIsFull = [bool]($fullInstallEdition -ceq 'Full')
+        $fullInstallVersionIsSynthetic = [bool]($fullInstallVersion -ceq '0.0.1-test')
+        $fullInstalledConfigIsFull = [bool]($fullInstalledConfigText.Contains("Edition = 'Full'"))
+        $fullProfileLoaderIsPresent = [bool]($fullInstalledProfileText.Contains('# >>> Psh managed profile >>>'))
+        $fullInitialInstallPassed = [bool]($fullInstallSucceeded -and $fullInstallEditionIsFull -and $fullInstallVersionIsSynthetic -and $fullInstalledConfigIsFull -and $fullProfileLoaderIsPresent)
+        Assert-PshGoal5Lifecycle $fullInitialInstallPassed 'The synthetic Full win-x64 package did not complete its initial offline install.'
         Assert-PshGoal5LifecycleFullTools -InstallRoot $fullRoot -Version '0.0.1-test'
 
         [byte[]]$fullCurrentBeforeRepeat = [IO.File]::ReadAllBytes((Join-Path $fullRoot 'current.json'))
@@ -426,44 +456,94 @@ try {
         $fullToolsBeforeRepeat = @(Get-ChildItem -LiteralPath (Join-Path $fullRoot 'versions/0.0.1-test/Psh/Tools') -Recurse -Force -File | Sort-Object FullName | ForEach-Object { '{0}:{1}:{2}' -f $_.FullName, [long]$_.Length, (Get-PshGoal5LifecycleHash -Path $_.FullName) }) -join "`n"
         $fullRepeat = @(& $installScript -PackageRoot $fullSyntheticPackage -InstallRoot $fullRoot -Edition Full -Version '0.0.1-test' -ProfilePath @($fullProfilePath) -ModuleRoot @() -Offline -Confirm:$false)
         $fullToolsAfterRepeat = @(Get-ChildItem -LiteralPath (Join-Path $fullRoot 'versions/0.0.1-test/Psh/Tools') -Recurse -Force -File | Sort-Object FullName | ForEach-Object { '{0}:{1}:{2}' -f $_.FullName, [long]$_.Length, (Get-PshGoal5LifecycleHash -Path $_.FullName) }) -join "`n"
-        Assert-PshGoal5Lifecycle (
-            [bool]$fullRepeat[-1].success -and [bool]$fullRepeat[-1].idempotent -and [string]$fullRepeat[-1].edition -ceq 'Full' -and
-            (Test-PshGoal5LifecycleBytesEqual $fullCurrentBeforeRepeat ([IO.File]::ReadAllBytes((Join-Path $fullRoot 'current.json'))) -and
-            (Test-PshGoal5LifecycleBytesEqual $fullOwnershipBeforeRepeat ([IO.File]::ReadAllBytes((Join-Path $fullRoot 'ownership.json'))) -and
-            (Test-PshGoal5LifecycleBytesEqual $fullProfileBeforeRepeat ([IO.File]::ReadAllBytes($fullProfilePath)) -and
-            $fullToolsBeforeRepeat -ceq $fullToolsAfterRepeat -and -not [IO.File]::Exists((Join-Path $fullRoot 'transaction.json'))
-        ) 'Repeat installation of the Full win-x64 package changed lifecycle, profile, or tool bytes.'
+        $fullRepeatResult = $fullRepeat[-1]
+        $fullRepeatSuccess = [bool]$fullRepeatResult.success
+        $fullRepeatIdempotent = [bool]$fullRepeatResult.idempotent
+        $fullRepeatEdition = [string]$fullRepeatResult.edition
+        $fullRepeatSucceeded = [bool]($fullRepeatSuccess)
+        $fullRepeatWasIdempotent = [bool]($fullRepeatIdempotent)
+        $fullRepeatEditionIsFull = [bool]($fullRepeatEdition -ceq 'Full')
+        $fullCurrentIsUnchanged = [bool](Test-PshGoal5LifecycleBytesEqual $fullCurrentBeforeRepeat ([IO.File]::ReadAllBytes((Join-Path $fullRoot 'current.json'))))
+        $fullOwnershipIsUnchanged = [bool](Test-PshGoal5LifecycleBytesEqual $fullOwnershipBeforeRepeat ([IO.File]::ReadAllBytes((Join-Path $fullRoot 'ownership.json'))))
+        $fullProfileIsUnchanged = [bool](Test-PshGoal5LifecycleBytesEqual $fullProfileBeforeRepeat ([IO.File]::ReadAllBytes($fullProfilePath)))
+        $fullToolsAreUnchanged = [bool]($fullToolsBeforeRepeat -ceq $fullToolsAfterRepeat)
+        $fullRepeatTransactionIsAbsent = [bool](-not [IO.File]::Exists((Join-Path $fullRoot 'transaction.json')))
+        $fullRepeatPassed = [bool]($fullRepeatSucceeded -and $fullRepeatWasIdempotent -and $fullRepeatEditionIsFull -and $fullCurrentIsUnchanged -and $fullOwnershipIsUnchanged -and $fullProfileIsUnchanged -and $fullToolsAreUnchanged -and $fullRepeatTransactionIsAbsent)
+        Assert-PshGoal5Lifecycle $fullRepeatPassed 'Repeat installation of the Full win-x64 package changed lifecycle, profile, or tool bytes.'
 
         $fullUpgrade = @(& $installScript -PackageRoot $fullReleasePackage -InstallRoot $fullRoot -Edition Full -Version '0.1.0' -ProfilePath @($fullProfilePath) -ModuleRoot @() -Offline -Confirm:$false)
         $fullOwnership = Read-PshOwnershipState -InstallRoot $fullRoot
-        $fullOwnedVersions = @($fullOwnership.versions | Where-Object { [string]$_.edition -ceq 'Full' -and [string]$_.architecture -ceq 'win-x64' } | ForEach-Object { [string]$_.version } | Sort-Object)
-        Assert-PshGoal5Lifecycle (
-            [bool]$fullUpgrade[-1].success -and [string]$fullUpgrade[-1].edition -ceq 'Full' -and [string]$fullUpgrade[-1].version -ceq '0.1.0' -and
-            [string]$fullOwnership.activeVersion -ceq '0.1.0' -and ($fullOwnedVersions -join '|') -ceq '0.0.1-test|0.1.0'
-        ) 'Full did not upgrade from synthetic 0.0.1-test to v0.1.0 with two retained win-x64 Full versions.'
+        $fullOwnedVersionList = New-Object System.Collections.Generic.List[string]
+        foreach ($fullOwnedVersion in @($fullOwnership.versions)) {
+            $fullOwnedEdition = [string]$fullOwnedVersion.edition
+            $fullOwnedArchitecture = [string]$fullOwnedVersion.architecture
+            $fullOwnedEditionIsFull = [bool]($fullOwnedEdition -ceq 'Full')
+            $fullOwnedArchitectureIsX64 = [bool]($fullOwnedArchitecture -ceq 'win-x64')
+            $fullOwnedVersionIsFullX64 = [bool]($fullOwnedEditionIsFull -and $fullOwnedArchitectureIsX64)
+            if ($fullOwnedVersionIsFullX64) { [void]$fullOwnedVersionList.Add([string]$fullOwnedVersion.version) }
+        }
+        $fullOwnedVersions = @($fullOwnedVersionList.ToArray() | Sort-Object)
+        $fullUpgradeResult = $fullUpgrade[-1]
+        $fullUpgradeSuccess = [bool]$fullUpgradeResult.success
+        $fullUpgradeEdition = [string]$fullUpgradeResult.edition
+        $fullUpgradeVersion = [string]$fullUpgradeResult.version
+        $fullUpgradedActiveVersion = [string]$fullOwnership.activeVersion
+        $fullOwnedVersionText = [string]($fullOwnedVersions -join '|')
+        $fullUpgradeSucceeded = [bool]($fullUpgradeSuccess)
+        $fullUpgradeEditionIsFull = [bool]($fullUpgradeEdition -ceq 'Full')
+        $fullUpgradeVersionIsRelease = [bool]($fullUpgradeVersion -ceq '0.1.0')
+        $fullUpgradedActiveVersionIsRelease = [bool]($fullUpgradedActiveVersion -ceq '0.1.0')
+        $fullOwnedVersionsAreExpected = [bool]($fullOwnedVersionText -ceq '0.0.1-test|0.1.0')
+        $fullUpgradePassed = [bool]($fullUpgradeSucceeded -and $fullUpgradeEditionIsFull -and $fullUpgradeVersionIsRelease -and $fullUpgradedActiveVersionIsRelease -and $fullOwnedVersionsAreExpected)
+        Assert-PshGoal5Lifecycle $fullUpgradePassed 'Full did not upgrade from synthetic 0.0.1-test to v0.1.0 with two retained win-x64 Full versions.'
         Assert-PshGoal5LifecycleFullTools -InstallRoot $fullRoot -Version '0.1.0'
 
         $fullRollback = @(& $rollbackScript -InstallRoot $fullRoot -Version '0.0.1-test' -ModuleRoot @() -Offline -Confirm:$false)
         $fullRolledOwnership = Read-PshOwnershipState -InstallRoot $fullRoot
-        $fullRolledActive = @($fullRolledOwnership.versions | Where-Object { [string]$_.version -ceq [string]$fullRolledOwnership.activeVersion })
-        Assert-PshGoal5Lifecycle (
-            [bool]$fullRollback[-1].success -and [string]$fullRollback[-1].status -ceq 'switched' -and
-            [string]$fullRollback[-1].version -ceq '0.0.1-test' -and [string]$fullRollback[-1].previousVersion -ceq '0.1.0' -and
-            [string]$fullRolledOwnership.activeVersion -ceq '0.0.1-test' -and $fullRolledActive.Count -eq 1 -and
-            [string]$fullRolledActive[0].edition -ceq 'Full' -and [string]$fullRolledActive[0].architecture -ceq 'win-x64' -and
-            (Get-Content -LiteralPath (Join-Path $fullRoot 'config.psd1') -Raw).Contains("Edition = 'Full'")
-        ) 'Full rollback did not switch v0.1.0 back to synthetic 0.0.1-test as the active Full win-x64 version.'
+        $fullRolledActiveVersion = [string]$fullRolledOwnership.activeVersion
+        $fullRolledActiveList = New-Object System.Collections.Generic.List[object]
+        foreach ($fullRolledVersion in @($fullRolledOwnership.versions)) {
+            $fullRolledCandidateVersion = [string]$fullRolledVersion.version
+            $fullRolledCandidateIsActive = [bool]($fullRolledCandidateVersion -ceq $fullRolledActiveVersion)
+            if ($fullRolledCandidateIsActive) { [void]$fullRolledActiveList.Add($fullRolledVersion) }
+        }
+        $fullRolledActive = @($fullRolledActiveList.ToArray())
+        $fullRolledActiveCount = [int]$fullRolledActive.Count
+        $fullRolledActiveCountIsOne = [bool]($fullRolledActiveCount -eq 1)
+        $fullRolledActiveEdition = if ($fullRolledActiveCountIsOne) { [string]$fullRolledActive[0].edition } else { [string]::Empty }
+        $fullRolledActiveArchitecture = if ($fullRolledActiveCountIsOne) { [string]$fullRolledActive[0].architecture } else { [string]::Empty }
+        $fullRolledConfigText = [string](Get-Content -LiteralPath (Join-Path $fullRoot 'config.psd1') -Raw)
+        $fullRollbackResult = $fullRollback[-1]
+        $fullRollbackSuccess = [bool]$fullRollbackResult.success
+        $fullRollbackStatus = [string]$fullRollbackResult.status
+        $fullRollbackVersion = [string]$fullRollbackResult.version
+        $fullRollbackPreviousVersion = [string]$fullRollbackResult.previousVersion
+        $fullRollbackSucceeded = [bool]($fullRollbackSuccess)
+        $fullRollbackStatusIsSwitched = [bool]($fullRollbackStatus -ceq 'switched')
+        $fullRollbackVersionIsSynthetic = [bool]($fullRollbackVersion -ceq '0.0.1-test')
+        $fullRollbackPreviousVersionIsRelease = [bool]($fullRollbackPreviousVersion -ceq '0.1.0')
+        $fullRolledActiveVersionIsSynthetic = [bool]($fullRolledActiveVersion -ceq '0.0.1-test')
+        $fullRolledActiveEditionIsFull = [bool]($fullRolledActiveEdition -ceq 'Full')
+        $fullRolledActiveArchitectureIsX64 = [bool]($fullRolledActiveArchitecture -ceq 'win-x64')
+        $fullRolledConfigIsFull = [bool]($fullRolledConfigText.Contains("Edition = 'Full'"))
+        $fullRollbackPassed = [bool]($fullRollbackSucceeded -and $fullRollbackStatusIsSwitched -and $fullRollbackVersionIsSynthetic -and $fullRollbackPreviousVersionIsRelease -and $fullRolledActiveVersionIsSynthetic -and $fullRolledActiveCountIsOne -and $fullRolledActiveEditionIsFull -and $fullRolledActiveArchitectureIsX64 -and $fullRolledConfigIsFull)
+        Assert-PshGoal5Lifecycle $fullRollbackPassed 'Full rollback did not switch v0.1.0 back to synthetic 0.0.1-test as the active Full win-x64 version.'
 
         $fullUninstall = @(& $uninstallScript -InstallRoot $fullRoot -ProfilePath @($fullProfilePath) -ModuleRoot @() -Confirm:$false)
-        Assert-PshGoal5Lifecycle (
-            [bool]$fullUninstall[-1].success -and -not [bool]$fullUninstall[-1].restartRequired -and
-            (Test-PshGoal5LifecycleBytesEqual $fullOriginalProfileBytes ([IO.File]::ReadAllBytes($fullProfilePath))) -and
-            -not [IO.File]::Exists((Join-Path $fullRoot 'ownership.json')) -and
-            -not [IO.File]::Exists((Join-Path $fullRoot 'current.json')) -and
-            -not [IO.Directory]::Exists((Join-Path $fullRoot 'versions')) -and
-            [IO.File]::Exists($fullUserContentPath) -and
-            (Test-PshGoal5LifecycleBytesEqual $fullUserContentBytes ([IO.File]::ReadAllBytes($fullUserContentPath)))
-        ) 'Full uninstall did not remove owned versions, restore the original profile, or retain pre-existing user bytes.'
+        $fullUninstallResult = $fullUninstall[-1]
+        $fullUninstallSuccess = [bool]$fullUninstallResult.success
+        $fullUninstallRestartRequired = [bool]$fullUninstallResult.restartRequired
+        $fullProfileExistsAfterUninstall = [bool]([IO.File]::Exists($fullProfilePath))
+        $fullUserContentExistsAfterUninstall = [bool]([IO.File]::Exists($fullUserContentPath))
+        $fullProfileWasRestored = if ($fullProfileExistsAfterUninstall) { [bool](Test-PshGoal5LifecycleBytesEqual $fullOriginalProfileBytes ([IO.File]::ReadAllBytes($fullProfilePath))) } else { $false }
+        $fullUserContentWasRetained = if ($fullUserContentExistsAfterUninstall) { [bool](Test-PshGoal5LifecycleBytesEqual $fullUserContentBytes ([IO.File]::ReadAllBytes($fullUserContentPath))) } else { $false }
+        $fullUninstallSucceeded = [bool]($fullUninstallSuccess)
+        $fullUninstallNeedsNoRestart = [bool](-not $fullUninstallRestartRequired)
+        $fullOwnershipIsAbsent = [bool](-not [IO.File]::Exists((Join-Path $fullRoot 'ownership.json')))
+        $fullCurrentIsAbsent = [bool](-not [IO.File]::Exists((Join-Path $fullRoot 'current.json')))
+        $fullVersionsAreAbsent = [bool](-not [IO.Directory]::Exists((Join-Path $fullRoot 'versions')))
+        $fullUninstallPassed = [bool]($fullUninstallSucceeded -and $fullUninstallNeedsNoRestart -and $fullProfileWasRestored -and $fullOwnershipIsAbsent -and $fullCurrentIsAbsent -and $fullVersionsAreAbsent -and $fullUserContentExistsAfterUninstall -and $fullUserContentWasRetained)
+        Assert-PshGoal5Lifecycle $fullUninstallPassed 'Full uninstall did not remove owned versions, restore the original profile, or retain pre-existing user bytes.'
     }
     finally {
         $env:PROCESSOR_ARCHITECTURE = $originalProcessorArchitecture
