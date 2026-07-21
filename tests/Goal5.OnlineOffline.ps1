@@ -205,8 +205,56 @@ if (-not [string]::IsNullOrWhiteSpace($log)) { [IO.File]::AppendAllText($log, ((
 
 function New-PshGoal5ZipBytes {
     param([Parameter(Mandatory = $true)][string] $PackageRoot, [Parameter(Mandatory = $true)][string] $ZipPath)
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
-    [IO.Compression.ZipFile]::CreateFromDirectory($PackageRoot, $ZipPath)
+    $packageRootFull = [IO.Path]::GetFullPath($PackageRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $zipParent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($ZipPath))
+    if (-not [string]::IsNullOrWhiteSpace($zipParent)) { [IO.Directory]::CreateDirectory($zipParent) | Out-Null }
+    $stream = $null
+    $archive = $null
+    try {
+        $stream = New-Object IO.FileStream($ZipPath, ([IO.FileMode]::CreateNew), ([IO.FileAccess]::ReadWrite), ([IO.FileShare]::None))
+        $archive = New-Object IO.Compression.ZipArchive($stream, ([IO.Compression.ZipArchiveMode]::Create), $true, (New-Object Text.UTF8Encoding($false)))
+        $files = @(Get-ChildItem -LiteralPath $packageRootFull -Recurse -Force -File | ForEach-Object {
+            $relative = $_.FullName.Substring(($packageRootFull + [IO.Path]::DirectorySeparatorChar).Length)
+            $relative = $relative.Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+            [pscustomobject][ordered]@{ Name = $relative; Path = [string]$_.FullName }
+        } | Sort-Object Name)
+        foreach ($file in $files) {
+            $entry = $archive.CreateEntry([string]$file.Name, [IO.Compression.CompressionLevel]::Optimal)
+            $entry.LastWriteTime = New-Object DateTimeOffset(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+            $entry.ExternalAttributes = 0
+            $entryStream = $null
+            $sourceStream = $null
+            try {
+                $entryStream = $entry.Open()
+                $sourceStream = New-Object IO.FileStream([string]$file.Path, ([IO.FileMode]::Open), ([IO.FileAccess]::Read), ([IO.FileShare]::Read))
+                $sourceStream.CopyTo($entryStream)
+            }
+            finally {
+                if ($null -ne $sourceStream) { $sourceStream.Dispose() }
+                if ($null -ne $entryStream) { $entryStream.Dispose() }
+            }
+        }
+    }
+    catch {
+        if ([IO.File]::Exists($ZipPath)) { try { [IO.File]::Delete($ZipPath) } catch { } }
+        throw
+    }
+    finally {
+        if ($null -ne $archive) { $archive.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+
+    $readArchive = $null
+    try {
+        $readArchive = [IO.Compression.ZipFile]::OpenRead($ZipPath)
+        $backslashEntries = @($readArchive.Entries | Where-Object { ([string]$_.FullName).Contains('\') })
+        Assert-PshGoal5Entry ($backslashEntries.Count -eq 0) 'The online/offline fixture ZIP contains a non-canonical backslash entry name.'
+    }
+    finally {
+        if ($null -ne $readArchive) { $readArchive.Dispose() }
+    }
     return [IO.File]::ReadAllBytes($ZipPath)
 }
 
@@ -379,7 +427,11 @@ try {
     Set-PshGoal5OnlineTransportFixture -Fixture $script:Goal5Fixture -BadRedirect
     Assert-PshGoal5Failure -Action { Invoke-PshOnlineInstall -Edition Core -Version 1.2.3 -NonInteractive } -ExitCode 5
 
-    $offlineRoot = Join-Path $script:TestRoot '中文 路径/offline-one'
+    # Keep the fixture source ASCII while retaining Unicode path coverage.
+    $unicodeChinese = ([string][char]0x4E2D) + ([string][char]0x6587)
+    $unicodePath = ([string][char]0x8DEF) + ([string][char]0x5F84)
+    $unicodeSpace = ([string][char]0x7A7A) + ([string][char]0x683C)
+    $offlineRoot = Join-Path $script:TestRoot ($unicodeChinese + ' ' + $unicodePath + '/offline-one')
     $offlinePackage = New-PshGoal5EntryPackage -Root $offlineRoot -Version '0.0.1-test' -Edition Core -RealOffline
     . (Join-Path $offlineRoot 'install-offline.ps1')
     Set-PshGoal5TrustMocks
@@ -402,7 +454,7 @@ try {
     Assert-PshGoal5Entry (@($sequence | Where-Object { $_ -in @('0.0.1-test', '0.0.2-test') }).Count -ge 3) 'Repeat/upgrade/rollback entry sequencing was not exercised.'
     Assert-PshGoal5Failure -Action { Invoke-PshOfflineInstall -Edition Full -Version 0.0.1-test -NonInteractive } -ExitCode 5 -ErrorId 'PshOfflineEditionMismatch'
 
-    $shellFixture = Join-Path $script:TestRoot '中文 空格/shell'
+    $shellFixture = Join-Path $script:TestRoot ($unicodeChinese + ' ' + $unicodeSpace + '/shell')
     [IO.Directory]::CreateDirectory($shellFixture) | Out-Null
     Copy-Item -LiteralPath $shellPath -Destination (Join-Path $shellFixture 'install.sh')
     Copy-Item -LiteralPath $offlinePath -Destination (Join-Path $shellFixture 'install-offline.ps1')

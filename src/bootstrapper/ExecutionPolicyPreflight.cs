@@ -114,6 +114,9 @@ namespace Psh.Bootstrapper
 
         private const string ProbeCommand =
             "$ErrorActionPreference='Stop';" +
+            "$utf8=New-Object System.Text.UTF8Encoding -ArgumentList @($false);" +
+            "[Console]::OutputEncoding=$utf8;" +
+            "$OutputEncoding=$utf8;" +
             "$scriptPath=$env:PSH_BOOTSTRAPPER_POLICY_SCRIPT_PATH;" +
             "if([string]::IsNullOrWhiteSpace($scriptPath)){throw 'Controlled installer script path is missing'};" +
             "$byScope=@{};" +
@@ -153,6 +156,8 @@ namespace Psh.Bootstrapper
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
+            startInfo.StandardOutputEncoding = Encoding.UTF8;
+            startInfo.StandardErrorEncoding = Encoding.UTF8;
             startInfo.EnvironmentVariables[ScriptPathEnvironmentVariable] = scriptPath;
 
             using (Process process = Process.Start(startInfo))

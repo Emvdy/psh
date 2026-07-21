@@ -257,6 +257,22 @@ try {
     [byte[]]$rollbackCurrentBeforeWhatIf = [IO.File]::ReadAllBytes((Join-Path $installRoot 'current.json'))
     [byte[]]$rollbackOwnershipBeforeWhatIf = [IO.File]::ReadAllBytes((Join-Path $installRoot 'ownership.json'))
     [byte[]]$rollbackProfileBeforeWhatIf = [IO.File]::ReadAllBytes($profilePath)
+    $rollbackCrLfBuilder = New-Object 'System.Collections.Generic.List[byte]'
+    foreach ($rollbackByte in $rollbackCurrentBeforeWhatIf) {
+        if ([byte]$rollbackByte -eq 0x0A) { [void]$rollbackCrLfBuilder.Add([byte]0x0D) }
+        [void]$rollbackCrLfBuilder.Add([byte]$rollbackByte)
+    }
+    [byte[]]$rollbackCurrentCrLf = $rollbackCrLfBuilder.ToArray()
+    [IO.File]::WriteAllBytes((Join-Path $installRoot 'current.json'), $rollbackCurrentCrLf)
+    $rollbackCrLfFailure = Invoke-PshGoal5LifecycleFailure { & $rollbackScript -InstallRoot $installRoot -Version '0.0.1-test' -ModuleRoot @() -Offline -Confirm:$false }
+    Assert-PshGoal5Lifecycle (
+        [int]$rollbackCrLfFailure.Exception.Data['PshExitCode'] -eq 5 -and
+        (Test-PshGoal5LifecycleBytesEqual $rollbackCurrentCrLf ([IO.File]::ReadAllBytes((Join-Path $installRoot 'current.json')))) -and
+        (Test-PshGoal5LifecycleBytesEqual $rollbackOwnershipBeforeWhatIf ([IO.File]::ReadAllBytes((Join-Path $installRoot 'ownership.json')))) -and
+        (Test-PshGoal5LifecycleBytesEqual $rollbackProfileBeforeWhatIf ([IO.File]::ReadAllBytes($profilePath))) -and
+        -not [IO.File]::Exists((Join-Path $installRoot 'transaction.json'))
+    ) 'Rollback accepted a CRLF current.json or changed lifecycle state.'
+    [IO.File]::WriteAllBytes((Join-Path $installRoot 'current.json'), $rollbackCurrentBeforeWhatIf)
     $rollbackWhatIf = @(& $rollbackScript -InstallRoot $installRoot -Version '0.0.1-test' -ModuleRoot @() -Offline -WhatIf -Confirm:$false)
     Assert-PshGoal5Lifecycle ([bool]$rollbackWhatIf[-1].whatIf -and (Test-PshGoal5LifecycleBytesEqual $rollbackCurrentBeforeWhatIf ([IO.File]::ReadAllBytes((Join-Path $installRoot 'current.json')))) -and (Test-PshGoal5LifecycleBytesEqual $rollbackOwnershipBeforeWhatIf ([IO.File]::ReadAllBytes((Join-Path $installRoot 'ownership.json')))) -and (Test-PshGoal5LifecycleBytesEqual $rollbackProfileBeforeWhatIf ([IO.File]::ReadAllBytes($profilePath))) -and -not [IO.File]::Exists((Join-Path $installRoot 'transaction.json'))) 'Rollback -WhatIf changed lifecycle state.'
 

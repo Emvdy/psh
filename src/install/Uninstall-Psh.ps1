@@ -243,11 +243,7 @@ function Get-PshUninstallBytesHash {
 
 function Get-PshUninstallCanonicalCurrentSha256 {
     param([Parameter(Mandatory = $true)][string] $Version)
-    $validated = Assert-PshLifecycleSemVer -Value $Version -Description 'current version'
-    $document = [ordered]@{ schemaVersion = 1; version = $validated }
-    $json = ($document | ConvertTo-Json -Compress) + [Environment]::NewLine
-    $encoding = New-Object System.Text.UTF8Encoding($false)
-    return Get-PshUninstallBytesHash -Bytes ($encoding.GetBytes($json))
+    return Get-PshLifecycleCanonicalCurrentSha256 -Version $Version
 }
 
 function Get-PshUninstallRelativePath {

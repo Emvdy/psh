@@ -110,6 +110,17 @@ function Invoke-PshBootstrapperProcess {
     }
 }
 
+function Format-PshBootstrapperOutput {
+    param([AllowNull()][object[]]$Output)
+
+    if ($null -eq $Output -or $Output.Count -eq 0) {
+        return '<no output>'
+    }
+
+    $lines = @($Output | ForEach-Object { [string]$_ })
+    return [string]::Join(' | ', $lines)
+}
+
 function Get-PshFixtureZoneIdentifier {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -259,13 +270,26 @@ Assert-PshGoal5Bootstrapper ($programText -match 'using \(verifiedScript\)' -and
 Assert-PshGoal5Bootstrapper ($programText -match '(?i)ancestor rename' -and $programText -match 'GetCurrentFinalPath') 'Residual ancestor-rename limitation is not documented alongside the final-path refresh.'
 Assert-PshGoal5Bootstrapper ($policyText -match 'Get-AuthenticodeSignature' -and $policyText -match 'Zone\.Identifier') 'Policy probe does not inspect Authenticode and MOTW.'
 Assert-PshGoal5Bootstrapper ($policyText -match 'PSH_BOOTSTRAPPER_POLICY_SCRIPT_PATH' -and $policyText -match 'EnvironmentVariables') 'Policy probe does not pass the script path through a controlled environment variable.'
+Assert-PshGoal5Bootstrapper ($policyText -match 'OutputEncoding' -and $policyText -match 'UTF8Encoding') 'Policy probe does not fix PowerShell output encoding.'
+Assert-PshGoal5Bootstrapper ($policyText -match 'StandardOutputEncoding\s*=\s*Encoding\.UTF8' -and $policyText -match 'StandardErrorEncoding\s*=\s*Encoding\.UTF8') 'Policy probe does not fix .NET child output decoding.'
 Assert-PshGoal5Bootstrapper ($policyText -notmatch '(?i)Unblock-File|Remove-Item') 'Policy probe modifies script trust metadata.'
 
 # Parser checks run on every platform. The parser has no Windows-only API and
 # therefore gives the non-Windows gate useful coverage before CI runs a PE.
 $parserType = 'Psh.Bootstrapper.ArgumentParser' -as [type]
 if ($null -eq $parserType) {
-    Add-Type -Path @($parserPath, $commandLinePath, $policyPath, $integrityPath, $locatorPath) -ErrorAction Stop
+    $bootstrapperFrameworkReferences = @('System', 'System.Core', 'System.Runtime.Serialization', 'System.Xml')
+    Assert-PshGoal5Bootstrapper (@($bootstrapperFrameworkReferences | Where-Object { $_ -ceq 'System.Runtime.Serialization' }).Count -eq 1) 'The Windows PowerShell Add-Type harness reference list omits System.Runtime.Serialization.'
+    $bootstrapperSourcePaths = @($parserPath, $commandLinePath, $policyPath, $integrityPath, $locatorPath)
+    if ([string]$PSVersionTable.PSEdition -ceq 'Desktop') {
+        # Windows PowerShell 5.1 Add-Type does not automatically reference the
+        # serialization assembly used by the policy probe. Core runtimes provide
+        # their own framework reference resolution and must keep the defaults.
+        Add-Type -Path $bootstrapperSourcePaths -ReferencedAssemblies $bootstrapperFrameworkReferences -ErrorAction Stop
+    }
+    else {
+        Add-Type -Path $bootstrapperSourcePaths -ErrorAction Stop
+    }
     $parserType = 'Psh.Bootstrapper.ArgumentParser' -as [type]
 }
 Assert-PshGoal5Bootstrapper ($null -ne $parserType) 'Could not load the C# argument parser.'
@@ -613,12 +637,12 @@ exit 29
 
     Set-PshFixtureExecutionPolicy -Policy 'Bypass'
     $onlineResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--edition', 'Full', '--version', '0.0.1-test', '--non-interactive')
-    Assert-PshGoal5Bootstrapper ($onlineResult.ExitCode -eq 23) ('Online script exit code was not passed through: {0}' -f $onlineResult.ExitCode)
+    Assert-PshGoal5Bootstrapper ($onlineResult.ExitCode -eq 23) ('Online script exit code was not passed through: {0}; output={1}' -f $onlineResult.ExitCode, (Format-PshBootstrapperOutput -Output $onlineResult.Output))
     $onlinePayload = Get-Content -LiteralPath $capturePath -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-PshGoal5Bootstrapper ($onlinePayload.mode -ceq 'online' -and $onlinePayload.edition -ceq 'Full' -and $onlinePayload.version -ceq '0.0.1-test' -and $onlinePayload.nonInteractive) 'Online forwarding payload was incorrect.'
 
     $offlineResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--offline', '--edition', 'Core', '--version', 'latest')
-    Assert-PshGoal5Bootstrapper ($offlineResult.ExitCode -eq 29) ('Offline script exit code was not passed through: {0}' -f $offlineResult.ExitCode)
+    Assert-PshGoal5Bootstrapper ($offlineResult.ExitCode -eq 29) ('Offline script exit code was not passed through: {0}; output={1}' -f $offlineResult.ExitCode, (Format-PshBootstrapperOutput -Output $offlineResult.Output))
     $offlinePayload = Get-Content -LiteralPath $capturePath -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-PshGoal5Bootstrapper ($offlinePayload.mode -ceq 'offline' -and $offlinePayload.edition -ceq 'Core' -and $offlinePayload.version -ceq 'latest') 'Offline forwarding payload was incorrect.'
 

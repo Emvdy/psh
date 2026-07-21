@@ -97,8 +97,10 @@ foreach ($name in $publicFunctions) {
     Assert-PshGoal5 ($null -ne (Get-Command $name -CommandType Function -ErrorAction SilentlyContinue)) "Public helper is missing: $name"
 }
 
-$canonical = ConvertTo-PshCanonicalJson -InputObject ([ordered]@{ z = '中文 path'; a = @($true, $null, 2) })
-Assert-PshGoal5 ($canonical -ceq '{"a":[true,null,2],"z":"中文 path"}') 'Canonical JSON did not sort keys ordinally or preserve Unicode.'
+$unicodeChinese = ([string][char]0x4E2D) + ([string][char]0x6587)
+$unicodePath = ([string][char]0x8DEF) + ([string][char]0x5F84)
+$canonical = ConvertTo-PshCanonicalJson -InputObject ([ordered]@{ z = "$unicodeChinese path"; a = @($true, $null, 2) })
+Assert-PshGoal5 ($canonical -ceq ('{"a":[true,null,2],"z":"' + $unicodeChinese + ' path"}')) 'Canonical JSON did not sort keys ordinally or preserve Unicode.'
 Assert-PshGoal5 ((Get-PshCanonicalJsonSha256 -InputObject ([ordered]@{ b = 2; a = 1 })) -ceq '43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777') 'Canonical JSON SHA256 is unstable.'
 $canonicalEscapeInput = [ordered]@{
     quote = [string][char]0x22
@@ -109,10 +111,10 @@ $canonicalEscapeInput = [ordered]@{
     formfeed = [string][char]0x0C
     carriageReturn = "`r"
     control = [string][char]0x01
-    windowsPath = 'C:\Users\中文 路径\Psh'
+    windowsPath = ('C:\Users\' + $unicodeChinese + ' ' + $unicodePath + '\Psh')
 }
 $canonicalEscapes = ConvertTo-PshCanonicalJson -InputObject $canonicalEscapeInput
-$expectedCanonicalEscapes = '{"backslash":"\\","backspace":"\b","carriageReturn":"\r","control":"\u0001","formfeed":"\f","newline":"\n","quote":"\"","tab":"\t","windowsPath":"C:\\Users\\中文 路径\\Psh"}'
+$expectedCanonicalEscapes = '{"backslash":"\\","backspace":"\b","carriageReturn":"\r","control":"\u0001","formfeed":"\f","newline":"\n","quote":"\"","tab":"\t","windowsPath":"C:\\Users\\' + $unicodeChinese + ' ' + $unicodePath + '\\Psh"}'
 Assert-PshGoal5 ($canonicalEscapes -ceq $expectedCanonicalEscapes) 'Canonical JSON string escapes are not byte-exact.'
 $canonicalEscapeRoundTrip = $canonicalEscapes | ConvertFrom-Json -ErrorAction Stop
 Assert-PshGoal5 ([string]$canonicalEscapeRoundTrip.quote -ceq [string]$canonicalEscapeInput.quote) 'Canonical quote escape did not round-trip.'
@@ -153,7 +155,7 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -and [IO.Directo
 $temporaryRoot = Join-Path $temporaryBase ('psh-goal5-lifecycle-' + [Guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($temporaryRoot)
 try {
-    $packageRoot = Join-Path $temporaryRoot 'package with 中文'
+    $packageRoot = Join-Path $temporaryRoot ('package with ' + $unicodeChinese)
     [void][IO.Directory]::CreateDirectory($packageRoot)
     $fixtureFiles = [ordered]@{
         'payload/Psh/Psh.psd1' = @{ Text = "@{ ModuleVersion = '0.1.0' }`n"; Role = 'payload' }

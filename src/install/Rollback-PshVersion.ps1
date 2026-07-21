@@ -213,7 +213,7 @@ function Exit-PshRollbackProjectionLock {
 function Read-PshRollbackCurrent {
     param([Parameter(Mandatory = $true)][string] $Root)
     $path = Join-Path $Root 'current.json'
-    $snapshot = Read-PshStrictJsonSnapshot -Path $path -Description 'current state' -AllowMissing
+    $snapshot = Read-PshStrictJsonSnapshot -Path $path -Description 'current state' -AllowMissing -RequireLf
     if ($null -eq $snapshot) { return [pscustomobject][ordered]@{ exists = $false; version = $null; sha256 = $null; bytes = (New-Object byte[] 0) } }
     $document = $snapshot.Document
     Assert-PshLifecycleAllowedProperties -InputObject $document -Allowed @('schemaVersion', 'version') -Description 'current state'
@@ -530,9 +530,8 @@ function ConvertTo-PshRollbackCanonicalBytes {
 
 function Get-PshRollbackCurrentBytes {
     param([Parameter(Mandatory = $true)][string] $Version)
-    $document = [ordered]@{ schemaVersion = 1; version = $Version }
-    $json = ($document | ConvertTo-Json -Compress) + [Environment]::NewLine
-    return ,((New-Object System.Text.UTF8Encoding($false)).GetBytes($json))
+    [byte[]]$bytes = Get-PshLifecycleCanonicalCurrentBytes -Version $Version
+    return ,$bytes
 }
 
 $lock = $null

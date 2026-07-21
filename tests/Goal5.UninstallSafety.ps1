@@ -394,7 +394,8 @@ try {
     $canonicalStateUnchanged = Test-PshUninstallSafetyBytesEqual $gateOwnership ([IO.File]::ReadAllBytes((Join-Path $gateRoot 'ownership.json')))
     $canonicalProfileUnchanged = Test-PshUninstallSafetyBytesEqual $gateProfileInstalled ([IO.File]::ReadAllBytes($gateProfile))
     Assert-PshUninstallSafety ([int]$canonicalFailure.Exception.Data['PshExitCode'] -eq 5 -and $canonicalStateUnchanged -and $canonicalProfileUnchanged) 'Valid but non-canonical current.json was not rejected before mutation.'
-    [IO.File]::WriteAllText($currentPath, "{`"schemaVersion`":1,`"version`":`"$version`"}" + [Environment]::NewLine, $script:Utf8)
+    [byte[]]$canonicalCurrentBytes = Get-PshLifecycleCanonicalCurrentBytes -Version $version
+    [IO.File]::WriteAllBytes($currentPath, $canonicalCurrentBytes)
 
     $helperPath = Join-Path $gateRoot "versions/$version/profile/Uninstall-PshProfile.ps1"
     [byte[]]$helperBytes = [IO.File]::ReadAllBytes($helperPath)
