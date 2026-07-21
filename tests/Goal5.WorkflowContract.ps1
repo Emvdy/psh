@@ -201,6 +201,9 @@ Assert-PshGoal5WorkflowNoMatch $workflowText '(?im)tests[/\\]Goal5\*' 'Workflow 
 Assert-PshGoal5WorkflowMatch $workflowText 'Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force' 'process-only Bypass test policy' 3 3
 Assert-PshGoal5WorkflowMatch $workflowText '& \$enginePath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \$testPath -RepositoryRoot \$env:GITHUB_WORKSPACE' 'isolated test process invocation with explicit repository root' 1 1
 Assert-PshGoal5WorkflowNoMatch $workflowText '& \$enginePath[^\n]*-File \$testPath(?![^\n]*-RepositoryRoot \$env:GITHUB_WORKSPACE)' 'Every isolated test invocation must pass the fixed GitHub workspace as RepositoryRoot.'
+Assert-PshGoal5WorkflowMatch $workflowText '\$testErrorActionPreference = \$ErrorActionPreference' 'isolated test error-action preference save' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText '\$ErrorActionPreference = \x27Continue\x27' 'isolated native stderr continuation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText '\$ErrorActionPreference = \$testErrorActionPreference' 'isolated test error-action preference restore' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText '\$testExitCode = if \(\$null -eq \$LASTEXITCODE\)' 'test exit-code capture' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText '\$global:LASTEXITCODE = 0' 'LASTEXITCODE reset' 6 6
 Assert-PshGoal5WorkflowMatch $workflowText "\\b\(\?:deferred\|skipped\)\\b" 'deferred/skipped log gate' 1 1

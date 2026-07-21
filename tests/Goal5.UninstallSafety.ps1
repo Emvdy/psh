@@ -1041,6 +1041,7 @@ catch {
         $projectionMutexNamesEqual = [string]$projectionMutexParentReadyDocument.mutexName -ceq [string]$projectionMutexProbeDocument.computedMutexName
         $projectionMutexTimedOut = $projectionMutexProbeProcess.ExitCode -eq 0 -and [string]$projectionMutexProbeDocument.status -ceq 'error' -and [string]$projectionMutexProbeDocument.message -like '*Timed out waiting for another PSReadLine projection transaction*'
         $projectionMutexDiagnostic = [pscustomobject][ordered]@{
+            schemaVersion  = 1
             parentAlive    = $projectionMutexParentAlive
             parentExitCode = $projectionMutexParentExitCode
             parent         = $projectionMutexParentReadyDocument
@@ -1049,6 +1050,24 @@ catch {
             probe          = $projectionMutexProbeDocument
         }
         $projectionMutexDiagnosticText = $projectionMutexDiagnostic | ConvertTo-Json -Compress -Depth 10
+        $projectionMutexReportRoot = [string]$env:PSH_GOAL5_REPORT_ROOT
+        if (-not [string]::IsNullOrWhiteSpace($projectionMutexReportRoot)) {
+            $projectionMutexReportDirectory = [IO.Path]::GetFullPath($projectionMutexReportRoot)
+            [IO.Directory]::CreateDirectory($projectionMutexReportDirectory) | Out-Null
+            $projectionMutexReportPath = [IO.Path]::Combine($projectionMutexReportDirectory, 'goal5-uninstall-mutex-diagnostic.json')
+            $projectionMutexReportTemporaryName = '.goal5-uninstall-mutex-diagnostic.json.{0}.tmp' -f [Guid]::NewGuid().ToString('N')
+            $projectionMutexReportTemporaryPath = [IO.Path]::Combine($projectionMutexReportDirectory, $projectionMutexReportTemporaryName)
+            try {
+                [IO.File]::WriteAllText($projectionMutexReportTemporaryPath, ($projectionMutexDiagnosticText + "`n"), $script:Utf8)
+                [IO.File]::Move($projectionMutexReportTemporaryPath, $projectionMutexReportPath)
+                $projectionMutexReportTemporaryPath = $null
+            }
+            finally {
+                if (-not [string]::IsNullOrWhiteSpace($projectionMutexReportTemporaryPath) -and [IO.File]::Exists($projectionMutexReportTemporaryPath)) {
+                    try { [IO.File]::Delete($projectionMutexReportTemporaryPath) } catch {}
+                }
+            }
+        }
         Assert-PshUninstallSafety $projectionMutexNamesEqual ("Projection mutex names differed: {0}" -f $projectionMutexDiagnosticText)
         Assert-PshUninstallSafety $projectionMutexTimedOut ("A canonical trailing-separator mutex probe did not observe the retained top-level projection lock: {0}" -f $projectionMutexDiagnosticText)
 

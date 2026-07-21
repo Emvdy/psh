@@ -412,7 +412,9 @@ jobs:
               $logPath = Join-Path $logRoot (([string]$test.Name) + '.log')
               $lines = New-Object System.Collections.Generic.List[string]
               $testExitCode = 1
+              $testErrorActionPreference = $ErrorActionPreference
               try {
+                  $ErrorActionPreference = 'Continue'
                   & $enginePath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $testPath -RepositoryRoot $env:GITHUB_WORKSPACE 2>&1 | ForEach-Object {
                       $line = [string]$_
                       [void]$lines.Add($line)
@@ -423,6 +425,9 @@ jobs:
               catch {
                   [void]$lines.Add([string]$_)
                   $testExitCode = 1
+              }
+              finally {
+                  $ErrorActionPreference = $testErrorActionPreference
               }
               $global:LASTEXITCODE = 0
               $logText = ($lines.ToArray() -join "`n") + "`n"
