@@ -3,10 +3,14 @@
 
 [CmdletBinding()]
 param(
-    [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot)
+    [string]$RepositoryRoot
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $RepositoryRoot = Split-Path -Parent (Split-Path -Parent ([string]$MyInvocation.MyCommand.Path))
+}
+$RepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
 
 function Assert-PshCondition {
     param(
@@ -20,6 +24,107 @@ function Assert-PshCondition {
     if (-not $Condition) {
         throw "Goal 1 acceptance failed: $Message"
     }
+}
+
+function Get-PshGoal1RelativePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    $prefix = $fullRoot + [IO.Path]::DirectorySeparatorChar
+    if (-not $fullPath.StartsWith($prefix, $comparison)) { return $null }
+    return $fullPath.Substring($prefix.Length).Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+}
+
+function Test-PshGoal1AllowedPolicyRemediationMatch {
+    param(
+        [Parameter(Mandatory = $true)][object]$Match,
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Remediation
+    )
+
+    $relative = Get-PshGoal1RelativePath -Root $Root -Path ([string]$Match.Path)
+    $line = ([string]$Match.Line).Trim()
+    $singleQuotedRemediation = "'$Remediation'"
+    switch -CaseSensitive ($relative) {
+        'src/bootstrapper/Program.cs' {
+            return $line -ceq ('private const string PolicyRemediation = "' + $Remediation + '";')
+        }
+        'src/install/install.ps1' {
+            return $line -ceq ('$script:PshOnlinePolicyRemediation = ' + $singleQuotedRemediation)
+        }
+        'src/install/install-offline.ps1' {
+            return $line -ceq ('$script:PshOfflinePolicyRemediation = ' + $singleQuotedRemediation)
+        }
+        'src/install/install.sh' {
+            if ($line -ceq ('policy_remediation=' + $singleQuotedRemediation)) { return $true }
+            $embeddedAssignment = '$remediation="' + $Remediation + '";'
+            $allLines = [IO.File]::ReadAllLines([string]$Match.Path)
+            $previousLine = if ([int]$Match.LineNumber -gt 1) { ([string]$allLines[[int]$Match.LineNumber - 2]).Trim() } else { '' }
+            return ($previousLine -ceq '"$powershell_path" -NoLogo -NoProfile -NonInteractive -Command \' -and
+                $line -cmatch '\A''\$ErrorActionPreference="Stop";.*''\s*\\\z' -and
+                $line.IndexOf($embeddedAssignment, [StringComparison]::Ordinal) -ge 0 -and
+                [regex]::Matches($line, [regex]::Escape($Remediation)).Count -eq 1)
+        }
+    }
+    return $false
+}
+
+function Get-PshGoal1PowerShellMutationFindingsFromAst {
+    param(
+        [Parameter(Mandatory = $true)][Management.Automation.Language.ScriptBlockAst]$Ast,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $findings = New-Object System.Collections.Generic.List[string]
+    foreach ($command in @($Ast.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] }, $true))) {
+        $name = [string]$command.GetCommandName()
+        $leafName = $name
+        if (-not [string]::IsNullOrEmpty($name) -and $name.LastIndexOf('\') -ge 0) {
+            $leafName = $name.Substring($name.LastIndexOf('\') + 1)
+        }
+        if ($leafName -iin @('Set-ExecutionPolicy', 'Set-GPRegistryValue', 'Remove-GPRegistryValue', 'Set-GPLink', 'New-GPLink', 'Remove-GPLink')) {
+            $findings.Add(('{0}:{1}:{2}' -f $Label, $command.Extent.StartLineNumber, $leafName))
+        }
+        if ($leafName -iin @('Set-Item', 'Set-ItemProperty', 'New-ItemProperty', 'Remove-ItemProperty') -and
+            [string]$command.Extent.Text -match '(?i)(?:\\Policies\\|(?:Env:|Environment).*\bPath\b)') {
+            $findings.Add(('{0}:{1}:registry-or-path-mutation' -f $Label, $command.Extent.StartLineNumber))
+        }
+        if ($command.CommandElements.Count -gt 0) {
+            $collapsedHead = [regex]::Replace([string]$command.CommandElements[0].Extent.Text, '[\s''"`+()]', '')
+            if ($collapsedHead -ieq 'Set-ExecutionPolicy') {
+                $findings.Add(('{0}:{1}:composed-Set-ExecutionPolicy' -f $Label, $command.Extent.StartLineNumber))
+            }
+        }
+    }
+    foreach ($binary in @($Ast.FindAll({ param($node) $node -is [Management.Automation.Language.BinaryExpressionAst] }, $true))) {
+        $collapsedExpression = [regex]::Replace([string]$binary.Extent.Text, '[\s''"`+()]', '')
+        if ($collapsedExpression -ieq 'Set-ExecutionPolicy') {
+            $findings.Add(('{0}:{1}:composed-Set-ExecutionPolicy' -f $Label, $binary.Extent.StartLineNumber))
+        }
+    }
+    foreach ($assignment in @($Ast.FindAll({ param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] }, $true))) {
+        if ([string]$assignment.Left.Extent.Text -match '(?i)\A\s*\$env:path\s*\z') {
+            $findings.Add(('{0}:{1}:environment-PATH-mutation' -f $Label, $assignment.Extent.StartLineNumber))
+        }
+    }
+    foreach ($memberCall in @($Ast.FindAll({ param($node) $node -is [Management.Automation.Language.InvokeMemberExpressionAst] }, $true))) {
+        $memberName = if ($memberCall.Member -is [Management.Automation.Language.StringConstantExpressionAst]) { [string]$memberCall.Member.Value } else { [string]$memberCall.Member.Extent.Text }
+        $memberText = [string]$memberCall.Extent.Text
+        if ($memberName -ieq 'SetEnvironmentVariable' -and
+            $memberText -match '(?i)SetEnvironmentVariable\s*\(\s*[''"]Path[''"]' -and
+            $memberText -match '(?i)[''"](?:User|Machine)[''"]\s*\)') {
+            $findings.Add(('{0}:{1}:persistent-PATH-mutation' -f $Label, $memberCall.Extent.StartLineNumber))
+        }
+        if ($memberName -ieq 'SetValue' -and $memberText -match '(?i)(?:\\Policies\\|\\Environment\\.*\bPath\b)') {
+            $findings.Add(('{0}:{1}:registry-policy-or-PATH-mutation' -f $Label, $memberCall.Extent.StartLineNumber))
+        }
+    }
+    return $findings.ToArray()
 }
 
 function Convert-PshOutputFromJson {
@@ -279,12 +384,10 @@ foreach ($pattern in $unsafePatterns) {
     Assert-PshCondition ($matches.Count -eq 0) "Goal 1 source contains a forbidden startup, elevation, or policy pattern: $pattern"
 }
 
-# Goal 5 must be able to print a read-only execution-policy remediation hint.
-# Permit exactly that diagnostic constant while keeping the policy mutation
-# spelling forbidden everywhere else.  The PowerShell AST check below catches
-# an actual command invocation independently of comments and string literals.
-$policyDiagnosticPath = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot 'src/bootstrapper/Program.cs'))
-$policyDiagnosticLine = 'private const string PolicyRemediation = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned";'
+# Goal 5 entrypoints may print this exact read-only remediation. Every literal
+# occurrence is pinned to a reviewed entrypoint assignment; executable
+# PowerShell, including the install.sh preflight payload, is checked by AST.
+$policyRemediation = 'Set-ExecutionPolicy -Scope CurrentUser RemoteSigned'
 $policyLiteralMatches = @(
     $sourceFiles | ForEach-Object {
         Select-String -LiteralPath $_.FullName -SimpleMatch 'Set-ExecutionPolicy'
@@ -292,12 +395,10 @@ $policyLiteralMatches = @(
 )
 $unexpectedPolicyLiteralMatches = @(
     $policyLiteralMatches | Where-Object {
-        $matchPath = [IO.Path]::GetFullPath([string]$_.Path)
-        -not ([string]::Equals($matchPath, $policyDiagnosticPath, [StringComparison]::OrdinalIgnoreCase) -and
-            [string]::Equals(([string]$_.Line).Trim(), $policyDiagnosticLine, [StringComparison]::Ordinal))
+        -not (Test-PshGoal1AllowedPolicyRemediationMatch -Match $_ -Root $RepositoryRoot -Remediation $policyRemediation)
     }
 )
-Assert-PshCondition ($policyLiteralMatches.Count -eq 1 -and $unexpectedPolicyLiteralMatches.Count -eq 0) 'Goal 1 source contains an execution-policy mutation or an unapproved policy diagnostic.'
+Assert-PshCondition ($policyLiteralMatches.Count -eq 5 -and $unexpectedPolicyLiteralMatches.Count -eq 0) 'Goal 1 source contains an execution-policy mutation or an unapproved policy diagnostic.'
 
 $policyCommandFindings = New-Object System.Collections.Generic.List[string]
 foreach ($powerShellSource in @($sourceFiles | Where-Object { $_.Extension -in @('.ps1', '.psm1') })) {
@@ -305,15 +406,64 @@ foreach ($powerShellSource in @($sourceFiles | Where-Object { $_.Extension -in @
     $parseErrors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($powerShellSource.FullName, [ref]$tokens, [ref]$parseErrors)
     Assert-PshCondition (@($parseErrors).Count -eq 0) "PowerShell source could not be parsed for policy-command validation: $($powerShellSource.FullName)"
-    foreach ($command in @($ast.FindAll({
-                param($node)
-                $node -is [System.Management.Automation.Language.CommandAst] -and
-                    [string]$node.GetCommandName() -ieq 'Set-ExecutionPolicy'
-            }, $true))) {
-        $policyCommandFindings.Add(('{0}:{1}' -f $powerShellSource.FullName, $command.Extent.StartLineNumber))
+    foreach ($finding in @(Get-PshGoal1PowerShellMutationFindingsFromAst -Ast $ast -Label $powerShellSource.FullName)) { $policyCommandFindings.Add($finding) }
+}
+
+$shellPolicyMatch = @($policyLiteralMatches | Where-Object {
+        (Get-PshGoal1RelativePath -Root $RepositoryRoot -Path ([string]$_.Path)) -ceq 'src/install/install.sh' -and
+        ([string]$_.Line).Contains('$remediation="')
+    })
+Assert-PshCondition ($shellPolicyMatch.Count -eq 1) 'The install.sh PowerShell policy preflight was not uniquely identified.'
+$shellPolicyLine = ([string]$shellPolicyMatch[0].Line).Trim()
+$shellPolicyLastQuote = $shellPolicyLine.LastIndexOf("'")
+Assert-PshCondition ($shellPolicyLine.StartsWith("'", [StringComparison]::Ordinal) -and $shellPolicyLastQuote -gt 0) 'The install.sh PowerShell policy preflight has an invalid shell literal boundary.'
+$shellPolicyScript = $shellPolicyLine.Substring(1, $shellPolicyLastQuote - 1)
+$shellPolicyTokens = $null
+$shellPolicyParseErrors = $null
+$shellPolicyAst = [System.Management.Automation.Language.Parser]::ParseInput($shellPolicyScript, [ref]$shellPolicyTokens, [ref]$shellPolicyParseErrors)
+Assert-PshCondition (@($shellPolicyParseErrors).Count -eq 0) 'The install.sh PowerShell policy preflight could not be parsed.'
+foreach ($finding in @(Get-PshGoal1PowerShellMutationFindingsFromAst -Ast $shellPolicyAst -Label 'src/install/install.sh:policy-preflight')) { $policyCommandFindings.Add($finding) }
+
+$policyFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('psh-goal1-policy-fixtures-' + [Guid]::NewGuid().ToString('N'))
+try {
+    foreach ($relativeDirectory in @('src/bootstrapper', 'src/install', 'reject')) {
+        [void][IO.Directory]::CreateDirectory((Join-Path $policyFixtureRoot $relativeDirectory))
+    }
+    $fixtureEncoding = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText((Join-Path $policyFixtureRoot 'src/bootstrapper/Program.cs'), ('private const string PolicyRemediation = "' + $policyRemediation + '";' + "`n"), $fixtureEncoding)
+    [IO.File]::WriteAllText((Join-Path $policyFixtureRoot 'src/install/install.ps1'), ('$script:PshOnlinePolicyRemediation = ' + "'$policyRemediation'" + "`n"), $fixtureEncoding)
+    [IO.File]::WriteAllText((Join-Path $policyFixtureRoot 'src/install/install-offline.ps1'), ('$script:PshOfflinePolicyRemediation = ' + "'$policyRemediation'" + "`n"), $fixtureEncoding)
+    $allowedShellFixture = ('policy_remediation=' + "'$policyRemediation'" + "`n" +
+        '"$powershell_path" -NoLogo -NoProfile -NonInteractive -Command \' + "`n" +
+        '    ''$ErrorActionPreference="Stop";$remediation="' + $policyRemediation + '";[Console]::Error.WriteLine($remediation)'' \' + "`n")
+    [IO.File]::WriteAllText((Join-Path $policyFixtureRoot 'src/install/install.sh'), $allowedShellFixture, $fixtureEncoding)
+    $allowedFixtureFiles = @(Get-ChildItem -LiteralPath (Join-Path $policyFixtureRoot 'src') -Recurse -File)
+    $allowedFixtureMatches = @($allowedFixtureFiles | ForEach-Object { Select-String -LiteralPath $_.FullName -SimpleMatch 'Set-ExecutionPolicy' })
+    Assert-PshCondition ($allowedFixtureMatches.Count -eq 5 -and
+        @($allowedFixtureMatches | Where-Object { -not (Test-PshGoal1AllowedPolicyRemediationMatch -Match $_ -Root $policyFixtureRoot -Remediation $policyRemediation) }).Count -eq 0) 'The exact read-only remediation fixture was not allowed.'
+
+    $rejectedPolicyFixtures = @(
+        @{ Name = 'direct-policy.ps1'; Text = 'Set-ExecutionPolicy -Scope CurrentUser RemoteSigned' },
+        @{ Name = 'composed-policy.ps1'; Text = "& ('Set-' + 'ExecutionPolicy') -Scope CurrentUser RemoteSigned" },
+        @{ Name = 'gpo-mutation.ps1'; Text = "Set-GPRegistryValue -Name Psh -Key 'HKCU\Software\Policies\Psh' -ValueName Enabled -Value 1" },
+        @{ Name = 'path-mutation.ps1'; Text = '$env:Path = ''C:\unsafe''' },
+        @{ Name = 'persistent-path-mutation.ps1'; Text = "[Environment]::SetEnvironmentVariable('Path', 'C:\unsafe', 'User')" }
+    )
+    foreach ($fixtureCase in $rejectedPolicyFixtures) {
+        $fixturePath = Join-Path (Join-Path $policyFixtureRoot 'reject') ([string]$fixtureCase.Name)
+        [IO.File]::WriteAllText($fixturePath, ([string]$fixtureCase.Text + "`n"), $fixtureEncoding)
+        $fixtureTokens = $null
+        $fixtureParseErrors = $null
+        $fixtureAst = [System.Management.Automation.Language.Parser]::ParseFile($fixturePath, [ref]$fixtureTokens, [ref]$fixtureParseErrors)
+        Assert-PshCondition (@($fixtureParseErrors).Count -eq 0) "Rejected policy fixture did not parse: $($fixtureCase.Name)"
+        Assert-PshCondition (@(Get-PshGoal1PowerShellMutationFindingsFromAst -Ast $fixtureAst -Label ([string]$fixtureCase.Name)).Count -gt 0) "Policy mutation fixture was not rejected: $($fixtureCase.Name)"
     }
 }
-Assert-PshCondition ($policyCommandFindings.Count -eq 0) ('Goal 1 source executes Set-ExecutionPolicy: {0}' -f ([string]::Join(', ', $policyCommandFindings.ToArray())))
+finally {
+    if ([IO.Directory]::Exists($policyFixtureRoot)) { Remove-Item -LiteralPath $policyFixtureRoot -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Assert-PshCondition ($policyCommandFindings.Count -eq 0) ('Goal 1 source mutates execution policy, GPO, or persistent PATH: {0}' -f ([string]::Join(', ', $policyCommandFindings.ToArray())))
 
 $originalEdition = $env:PSH_EDITION
 try {

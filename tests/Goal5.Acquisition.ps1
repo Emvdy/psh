@@ -5,10 +5,14 @@
 
 [CmdletBinding()]
 param(
-    [string] $RepositoryRoot = (Split-Path -Parent $PSScriptRoot)
+    [string] $RepositoryRoot
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $RepositoryRoot = Split-Path -Parent (Split-Path -Parent ([string]$MyInvocation.MyCommand.Path))
+}
+$RepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
 $script:Goal5AcquisitionAssertions = 0
 $acquisitionPath = Join-Path $RepositoryRoot 'src/install/PackageAcquisition.ps1'
 . $acquisitionPath
@@ -340,6 +344,19 @@ try {
     $temporaryBase = if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -and [IO.Directory]::Exists('/private/tmp')) { '/private/tmp' } else { [IO.Path]::GetTempPath() }
     $testRoot = Join-Path $temporaryBase ('psh-goal5-acquisition-' + [Guid]::NewGuid().ToString('N'))
     [void][IO.Directory]::CreateDirectory($testRoot)
+
+    $pathProbePath = Join-Path $testRoot 'readwrite-handle-path-probe.bin'
+    $pathProbeBytes = (New-Object Text.UTF8Encoding($false)).GetBytes('path probe')
+    $pathProbeStream = New-Object IO.FileStream($pathProbePath, ([IO.FileMode]::CreateNew), ([IO.FileAccess]::ReadWrite), ([IO.FileShare]::Read))
+    try {
+        $pathProbeStream.Write($pathProbeBytes, 0, $pathProbeBytes.Length)
+        try { $pathProbeStream.Flush($true) } catch { $pathProbeStream.Flush() }
+        $pathProbeState = Get-PshAcquisitionPathState -Path $pathProbePath -Description 'Goal 5 read/write handle path probe'
+        Assert-PshGoal5Acquisition ([int64]$pathProbeState.Length -eq [int64]$pathProbeBytes.Length -and
+            [string]$pathProbeState.Sha256 -ceq (Get-PshLifecycleSha256Bytes -Bytes $pathProbeBytes)) 'Read-only acquisition path CAS could not coexist with an owned read/write handle.'
+    }
+    finally { $pathProbeStream.Dispose() }
+
     $fixture = New-PshGoal5AcquisitionFixture -Root (Join-Path $testRoot 'release')
     $trusted = $fixture.TrustedRelease
     $coreAsset = Resolve-PshTrustedReleaseAsset -TrustedRelease $trusted -AssetName $fixture.CoreName

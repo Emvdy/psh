@@ -5,10 +5,14 @@
 
 [CmdletBinding()]
 param(
-    [string] $RepositoryRoot = (Split-Path -Parent $PSScriptRoot)
+    [string] $RepositoryRoot
 )
 
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $RepositoryRoot = Split-Path -Parent (Split-Path -Parent ([string]$MyInvocation.MyCommand.Path))
+}
+$RepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
 $script:Goal5ReleaseTrustAssertions = 0
 $trustPath = Join-Path $RepositoryRoot 'src/install/ReleaseTrust.ps1'
 . $trustPath
@@ -301,6 +305,18 @@ try {
     $fixture = New-PshGoal5ReleaseFixture -Root (Join-Path $testRoot 'valid')
     $validVerifier = { param($request) [pscustomobject][ordered]@{ Trusted = $true; Publisher = 'Emvdy Software'; Subject = 'fixture' } }
 
+    $pathProbePath = Join-Path $testRoot 'readwrite-handle-path-probe.bin'
+    $pathProbeBytes = (New-Object Text.UTF8Encoding($false)).GetBytes('path probe')
+    $pathProbeStream = New-Object IO.FileStream($pathProbePath, ([IO.FileMode]::CreateNew), ([IO.FileAccess]::ReadWrite), ([IO.FileShare]::Read))
+    try {
+        $pathProbeStream.Write($pathProbeBytes, 0, $pathProbeBytes.Length)
+        try { $pathProbeStream.Flush($true) } catch { $pathProbeStream.Flush() }
+        $pathProbeState = Get-PshTrustPathState -Path $pathProbePath -Description 'Goal 5 read/write handle path probe'
+        Assert-PshGoal5ReleaseTrust ([int64]$pathProbeState.Length -eq [int64]$pathProbeBytes.Length -and
+            [string]$pathProbeState.Sha256 -ceq (Get-PshLifecycleSha256Bytes -Bytes $pathProbeBytes)) 'Read-only trust path CAS could not coexist with an owned read/write handle.'
+    }
+    finally { $pathProbeStream.Dispose() }
+
     $parsedIndex = Read-PshReleaseIndex -Path $fixture.IndexPath
     Assert-PshGoal5ReleaseTrust ([string]$parsedIndex.version -ceq $fixture.Version -and @($parsedIndex.assets).Count -eq 3) 'Valid release index did not parse.'
     $parsedChecksums = Read-PshSha256Sums -Path $fixture.ChecksumPath
@@ -331,9 +347,9 @@ try {
         Assert-PshGoal5ReleaseTrust (@($request.SnapshotFiles).Count -eq 3) 'Release verifier did not receive index, checksums, and catalog snapshots.'
         $indexFile = @($request.SnapshotFiles | Where-Object { [string]$_.Role -ceq 'index' })[0]
         $checksumFile = @($request.SnapshotFiles | Where-Object { [string]$_.Role -ceq 'checksums' })[0]
-        Assert-PshGoal5ReleaseTrust ([Convert]::ToBase64String([IO.File]::ReadAllBytes([string]$indexFile.Path)) -ceq [Convert]::ToBase64String($script:Goal5SnapshotIndexBytes)) 'Index snapshot bytes differ from the locked source.'
-        Assert-PshGoal5ReleaseTrust ([Convert]::ToBase64String([IO.File]::ReadAllBytes([string]$checksumFile.Path)) -ceq [Convert]::ToBase64String($script:Goal5SnapshotChecksumBytes)) 'Checksum snapshot bytes differ from the locked source.'
-        Assert-PshGoal5ReleaseTrust ([Convert]::ToBase64String([IO.File]::ReadAllBytes([string]$request.CatalogPath)) -ceq [Convert]::ToBase64String($script:Goal5SnapshotCatalogBytes)) 'Catalog snapshot bytes differ from the locked source.'
+        Assert-PshGoal5ReleaseTrust ([Convert]::ToBase64String((Get-PshTrustPathState -Path ([string]$indexFile.Path) -Description 'fixture index snapshot').Bytes) -ceq [Convert]::ToBase64String($script:Goal5SnapshotIndexBytes)) 'Index snapshot bytes differ from the locked source.'
+        Assert-PshGoal5ReleaseTrust ([Convert]::ToBase64String((Get-PshTrustPathState -Path ([string]$checksumFile.Path) -Description 'fixture checksum snapshot').Bytes) -ceq [Convert]::ToBase64String($script:Goal5SnapshotChecksumBytes)) 'Checksum snapshot bytes differ from the locked source.'
+        Assert-PshGoal5ReleaseTrust ([Convert]::ToBase64String((Get-PshTrustPathState -Path ([string]$request.CatalogPath) -Description 'fixture catalog snapshot').Bytes) -ceq [Convert]::ToBase64String($script:Goal5SnapshotCatalogBytes)) 'Catalog snapshot bytes differ from the locked source.'
         [pscustomobject][ordered]@{ Trusted = $true; Publisher = 'Emvdy Software'; Subject = 'fixture' }
     }
     $trusted = Invoke-PshGoal5ReleaseTrustHarness -IndexPath $fixture.IndexPath -ChecksumPath $fixture.ChecksumPath -CatalogPath $fixture.CatalogPath -PublisherPolicy $fixture.Policy -Verifier $snapshotVerifier
@@ -533,8 +549,8 @@ try {
         $script:Goal5PackageSnapshotRoot = [IO.Path]::GetDirectoryName([string]$request.ContentRoot)
         Assert-PshGoal5ReleaseTrust (@($request.SnapshotFiles).Count -eq 2) 'Package verifier did not receive manifest and catalog snapshots.'
         $manifestFile = @($request.SnapshotFiles | Where-Object { [string]$_.Role -ceq 'manifest' })[0]
-        Assert-PshGoal5ReleaseTrust ([Convert]::ToBase64String([IO.File]::ReadAllBytes([string]$manifestFile.Path)) -ceq [Convert]::ToBase64String($script:Goal5PackageSnapshotManifestBytes)) 'Package manifest snapshot bytes differ from the locked source.'
-        Assert-PshGoal5ReleaseTrust ([Convert]::ToBase64String([IO.File]::ReadAllBytes([string]$request.CatalogPath)) -ceq [Convert]::ToBase64String($script:Goal5PackageSnapshotCatalogBytes)) 'Package catalog snapshot bytes differ from the locked source.'
+        Assert-PshGoal5ReleaseTrust ([Convert]::ToBase64String((Get-PshTrustPathState -Path ([string]$manifestFile.Path) -Description 'fixture manifest snapshot').Bytes) -ceq [Convert]::ToBase64String($script:Goal5PackageSnapshotManifestBytes)) 'Package manifest snapshot bytes differ from the locked source.'
+        Assert-PshGoal5ReleaseTrust ([Convert]::ToBase64String((Get-PshTrustPathState -Path ([string]$request.CatalogPath) -Description 'fixture package catalog snapshot').Bytes) -ceq [Convert]::ToBase64String($script:Goal5PackageSnapshotCatalogBytes)) 'Package catalog snapshot bytes differ from the locked source.'
         [pscustomobject][ordered]@{ Trusted = $true; Publisher = 'Emvdy Software'; Subject = 'fixture' }
     }
     $trustedPackage = Invoke-PshGoal5PackageTrustHarness -ManifestPath $fixture.ManifestPath -CatalogPath $fixture.CatalogPath -PublisherPolicy $fixture.Policy -ExpectedAsset $fixture.CoreAsset -TrustedRelease $trusted -Verifier $packageSnapshotVerifier

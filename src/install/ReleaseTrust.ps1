@@ -676,7 +676,12 @@ function Get-PshTrustPathState {
     }
     $stream = $null
     try {
-        $stream = New-Object IO.FileStream($fullPath, ([IO.FileMode]::Open), ([IO.FileAccess]::Read), ([IO.FileShare]::Read))
+        # Windows validates sharing in both directions. Snapshot files retain a
+        # ReadWrite handle whose FileShare.Read lock blocks outside mutation, so
+        # this read-only path probe must share Write with that existing handle.
+        # The probe itself never writes, and the long-lived handle still denies
+        # new writers and replacement while the hash CAS is in progress.
+        $stream = New-Object IO.FileStream($fullPath, ([IO.FileMode]::Open), ([IO.FileAccess]::Read), ([IO.FileShare]::ReadWrite))
         return Get-PshTrustStreamState -Stream $stream -Description $Description
     }
     finally {

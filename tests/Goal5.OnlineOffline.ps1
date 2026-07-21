@@ -5,11 +5,15 @@
 
 [CmdletBinding()]
 param(
-    [string] $RepositoryRoot = (Split-Path -Parent $PSScriptRoot)
+    [string] $RepositoryRoot
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    $RepositoryRoot = Split-Path -Parent (Split-Path -Parent ([string]$MyInvocation.MyCommand.Path))
+}
+$RepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
 $script:Assertions = 0
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:TestRoot = Join-Path ([IO.Path]::GetTempPath()) ('psh-goal5-online-offline-' + [Guid]::NewGuid().ToString('N'))

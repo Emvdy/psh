@@ -307,7 +307,11 @@ function Get-PshAcquisitionPathState {
     }
     $stream = $null
     try {
-        $stream = New-Object IO.FileStream($fullPath, ([IO.FileMode]::Open), ([IO.FileAccess]::Read), ([IO.FileShare]::Read))
+        # A read-only CAS probe may coexist with an owned ReadWrite staging
+        # handle on Windows only when its share mode admits that existing write
+        # access. The owned handle's FileShare.Read lock still blocks every new
+        # writer and replacement; this probe remains read-only.
+        $stream = New-Object IO.FileStream($fullPath, ([IO.FileMode]::Open), ([IO.FileAccess]::Read), ([IO.FileShare]::ReadWrite))
         return Get-PshAcquisitionStreamState -Stream $stream -Description $Description
     }
     catch {
