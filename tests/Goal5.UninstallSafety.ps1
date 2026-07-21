@@ -1036,18 +1036,30 @@ catch {
         $projectionMutexProbeProcess = Start-PshUninstallSafetyProcess -DriverPath $projectionMutexProbeDriver -ConfigPath $projectionMutexProbeConfig -StandardOutputPath (Join-Path $projectionMutexDirectory 'probe.stdout') -StandardErrorPath (Join-Path $projectionMutexDirectory 'probe.stderr')
         if (-not $projectionMutexProbeProcess.WaitForExit(5000)) { throw 'Projection mutex timeout probe did not exit.' }
         $projectionMutexProbeDocument = [IO.File]::ReadAllText($projectionMutexProbeResult, $script:Utf8) | ConvertFrom-Json
+        $projectionMutexProbeExitCode = [int]$projectionMutexProbeProcess.ExitCode
+        $projectionMutexProbeStatus = [string]$projectionMutexProbeDocument.status
+        $projectionMutexProbeMessage = [string]$projectionMutexProbeDocument.message
+        $projectionMutexProbeExitCodeIsZero = [bool]($projectionMutexProbeExitCode -eq 0)
+        $projectionMutexProbeStatusIsError = [bool]($projectionMutexProbeStatus -ceq 'error')
+        $projectionMutexProbeMessageIsTimeout = [bool]($projectionMutexProbeMessage -like '*Timed out waiting for another PSReadLine projection transaction*')
+        $projectionMutexTimedOut = [bool]($projectionMutexProbeExitCodeIsZero -and $projectionMutexProbeStatusIsError -and $projectionMutexProbeMessageIsTimeout)
         $projectionMutexParentAlive = -not $projectionMutexParentProcess.HasExited
         $projectionMutexParentExitCode = if ($projectionMutexParentAlive) { $null } else { [int]$projectionMutexParentProcess.ExitCode }
         $projectionMutexNamesEqual = [string]$projectionMutexParentReadyDocument.mutexName -ceq [string]$projectionMutexProbeDocument.computedMutexName
-        $projectionMutexTimedOut = $projectionMutexProbeProcess.ExitCode -eq 0 -and [string]$projectionMutexProbeDocument.status -ceq 'error' -and [string]$projectionMutexProbeDocument.message -like '*Timed out waiting for another PSReadLine projection transaction*'
         $projectionMutexDiagnostic = [pscustomobject][ordered]@{
-            schemaVersion  = 1
-            parentAlive    = $projectionMutexParentAlive
-            parentExitCode = $projectionMutexParentExitCode
-            parent         = $projectionMutexParentReadyDocument
-            namesEqual     = $projectionMutexNamesEqual
-            probeExitCode  = [int]$projectionMutexProbeProcess.ExitCode
-            probe          = $projectionMutexProbeDocument
+            schemaVersion               = 2
+            parentAlive                 = $projectionMutexParentAlive
+            parentExitCode              = $projectionMutexParentExitCode
+            parent                      = $projectionMutexParentReadyDocument
+            namesEqual                  = $projectionMutexNamesEqual
+            probeExitCode               = $projectionMutexProbeExitCode
+            probeStatus                 = $projectionMutexProbeStatus
+            probeMessage                = $projectionMutexProbeMessage
+            probeExitCodeIsZero         = $projectionMutexProbeExitCodeIsZero
+            probeStatusIsError          = $projectionMutexProbeStatusIsError
+            probeMessageIsTimeout       = $projectionMutexProbeMessageIsTimeout
+            probeTimedOut               = $projectionMutexTimedOut
+            probe                       = $projectionMutexProbeDocument
         }
         $projectionMutexDiagnosticText = $projectionMutexDiagnostic | ConvertTo-Json -Compress -Depth 10
         $projectionMutexReportRoot = [string]$env:PSH_GOAL5_REPORT_ROOT
@@ -1069,6 +1081,9 @@ catch {
             }
         }
         Assert-PshUninstallSafety $projectionMutexNamesEqual ("Projection mutex names differed: {0}" -f $projectionMutexDiagnosticText)
+        Assert-PshUninstallSafety $projectionMutexProbeExitCodeIsZero ("Projection mutex timeout probe returned a nonzero exit code: {0}" -f $projectionMutexDiagnosticText)
+        Assert-PshUninstallSafety $projectionMutexProbeStatusIsError ("Projection mutex timeout probe did not report error status: {0}" -f $projectionMutexDiagnosticText)
+        Assert-PshUninstallSafety $projectionMutexProbeMessageIsTimeout ("Projection mutex timeout probe did not report the expected timeout message: {0}" -f $projectionMutexDiagnosticText)
         Assert-PshUninstallSafety $projectionMutexTimedOut ("A canonical trailing-separator mutex probe did not observe the retained top-level projection lock: {0}" -f $projectionMutexDiagnosticText)
 
         $projectionMutexStandaloneProcess = Start-PshUninstallSafetyProcess -DriverPath $projectionMutexStandaloneDriver -ConfigPath $projectionMutexStandaloneConfig -StandardOutputPath (Join-Path $projectionMutexDirectory 'standalone.stdout') -StandardErrorPath (Join-Path $projectionMutexDirectory 'standalone.stderr')
@@ -1083,13 +1098,42 @@ catch {
         $projectionMutexParentDocument = [IO.File]::ReadAllText($projectionMutexParentResult, $script:Utf8) | ConvertFrom-Json
         $projectionMutexStandaloneDocument = [IO.File]::ReadAllText($projectionMutexStandaloneResult, $script:Utf8) | ConvertFrom-Json
         $projectionMutexStandaloneResults = @($projectionMutexStandaloneDocument.results)
-        Assert-PshUninstallSafety ($projectionMutexParentProcess.ExitCode -eq 0 -and [bool]$projectionMutexParentDocument.result.success -and [int]$projectionMutexParentDocument.result.code -eq 0) 'Top-level uninstall did not complete successfully after releasing its projection hold hook.'
-        Assert-PshUninstallSafety ($projectionMutexStandaloneProcess.ExitCode -eq 0 -and $projectionMutexStandaloneResults.Count -eq 1 -and [string]$projectionMutexStandaloneResults[0].Status -ceq 'NotInstalled' -and -not [bool]$projectionMutexStandaloneResults[0].Changed) 'Standalone projection uninstaller did not continue to a no-change NotInstalled result after mutex release.'
+        $projectionMutexReleasedParentExitCode = [int]$projectionMutexParentProcess.ExitCode
+        $projectionMutexReleasedParentSuccess = [bool]$projectionMutexParentDocument.result.success
+        $projectionMutexReleasedParentResultCode = [int]$projectionMutexParentDocument.result.code
+        $projectionMutexReleasedParentExitCodeIsZero = [bool]($projectionMutexReleasedParentExitCode -eq 0)
+        $projectionMutexReleasedParentSuccessIsTrue = [bool]($projectionMutexReleasedParentSuccess)
+        $projectionMutexReleasedParentResultCodeIsZero = [bool]($projectionMutexReleasedParentResultCode -eq 0)
+        $projectionMutexReleasedParentSucceeded = [bool]($projectionMutexReleasedParentExitCodeIsZero -and $projectionMutexReleasedParentSuccessIsTrue -and $projectionMutexReleasedParentResultCodeIsZero)
+        Assert-PshUninstallSafety $projectionMutexReleasedParentSucceeded 'Top-level uninstall did not complete successfully after releasing its projection hold hook.'
+
+        $projectionMutexStandaloneExitCode = [int]$projectionMutexStandaloneProcess.ExitCode
+        $projectionMutexStandaloneResultCount = [int]$projectionMutexStandaloneResults.Count
+        $projectionMutexStandaloneStatus = [string]::Empty
+        $projectionMutexStandaloneChanged = $true
+        $projectionMutexStandaloneExitCodeIsZero = [bool]($projectionMutexStandaloneExitCode -eq 0)
+        $projectionMutexStandaloneResultCountIsOne = [bool]($projectionMutexStandaloneResultCount -eq 1)
+        if ($projectionMutexStandaloneResultCountIsOne) {
+            $projectionMutexStandaloneStatus = [string]$projectionMutexStandaloneResults[0].Status
+            $projectionMutexStandaloneChanged = [bool]$projectionMutexStandaloneResults[0].Changed
+        }
+        $projectionMutexStandaloneStatusIsNotInstalled = [bool]($projectionMutexStandaloneStatus -ceq 'NotInstalled')
+        $projectionMutexStandaloneChangedIsFalse = [bool](-not $projectionMutexStandaloneChanged)
+        $projectionMutexStandaloneSucceeded = [bool]($projectionMutexStandaloneExitCodeIsZero -and $projectionMutexStandaloneResultCountIsOne -and $projectionMutexStandaloneStatusIsNotInstalled -and $projectionMutexStandaloneChangedIsFalse)
+        Assert-PshUninstallSafety $projectionMutexStandaloneSucceeded 'Standalone projection uninstaller did not continue to a no-change NotInstalled result after mutex release.'
 
         $projectionMutexAcquireProcess = Start-PshUninstallSafetyProcess -DriverPath $projectionMutexProbeDriver -ConfigPath $projectionMutexAcquireConfig -StandardOutputPath (Join-Path $projectionMutexDirectory 'acquire.stdout') -StandardErrorPath (Join-Path $projectionMutexDirectory 'acquire.stderr')
         if (-not $projectionMutexAcquireProcess.WaitForExit(5000)) { throw 'Projection mutex post-release acquire probe did not exit.' }
         $projectionMutexAcquireDocument = [IO.File]::ReadAllText($projectionMutexAcquireResult, $script:Utf8) | ConvertFrom-Json
-        Assert-PshUninstallSafety ($projectionMutexAcquireProcess.ExitCode -eq 0 -and [string]$projectionMutexAcquireDocument.status -ceq 'acquired' -and -not [IO.Directory]::Exists($projectionMutexModule) -and -not [IO.Directory]::Exists($projectionMutexStateRoot) -and -not [IO.File]::Exists((Join-Path $projectionMutexRoot 'current.json'))) 'Projection mutex leaked after completion or top-level cleanup left managed state.'
+        $projectionMutexAcquireExitCode = [int]$projectionMutexAcquireProcess.ExitCode
+        $projectionMutexAcquireStatus = [string]$projectionMutexAcquireDocument.status
+        $projectionMutexAcquireExitCodeIsZero = [bool]($projectionMutexAcquireExitCode -eq 0)
+        $projectionMutexAcquireStatusIsAcquired = [bool]($projectionMutexAcquireStatus -ceq 'acquired')
+        $projectionMutexModuleIsAbsent = [bool](-not [IO.Directory]::Exists($projectionMutexModule))
+        $projectionMutexStateRootIsAbsent = [bool](-not [IO.Directory]::Exists($projectionMutexStateRoot))
+        $projectionMutexCurrentIsAbsent = [bool](-not [IO.File]::Exists((Join-Path $projectionMutexRoot 'current.json')))
+        $projectionMutexAcquireSucceeded = [bool]($projectionMutexAcquireExitCodeIsZero -and $projectionMutexAcquireStatusIsAcquired -and $projectionMutexModuleIsAbsent -and $projectionMutexStateRootIsAbsent -and $projectionMutexCurrentIsAbsent)
+        Assert-PshUninstallSafety $projectionMutexAcquireSucceeded 'Projection mutex leaked after completion or top-level cleanup left managed state.'
     }
     finally {
         if (-not [IO.File]::Exists($projectionMutexRelease)) {
