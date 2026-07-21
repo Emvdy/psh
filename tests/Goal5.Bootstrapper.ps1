@@ -153,6 +153,19 @@ Assert-PshGoal5Bootstrapper ((Get-PshProjectProperty -Name 'PlatformTarget') -ce
 Assert-PshGoal5Bootstrapper ((Get-PshProjectProperty -Name 'Prefer32Bit') -ceq 'false') 'Bootstrapper project enables Prefer32Bit.'
 Assert-PshGoal5Bootstrapper ((Get-PshProjectProperty -Name 'Deterministic') -ceq 'true') 'Bootstrapper project is not deterministic.'
 Assert-PshGoal5Bootstrapper ((Get-PshProjectProperty -Name 'LangVersion') -ceq '5') 'Bootstrapper project does not enforce the Windows PowerShell 5.1-compatible C# 5 language level.'
+Assert-PshGoal5Bootstrapper ((Get-PshProjectProperty -Name 'TreatWarningsAsErrors') -ceq 'true') 'Bootstrapper project does not treat compiler warnings as errors.'
+$referenceNodes = @($projectXml.SelectNodes('//msb:Reference', $namespaceManager))
+$expectedReferences = @('System', 'System.Core', 'System.Runtime.Serialization', 'System.Xml')
+$referenceIncludes = @($referenceNodes | ForEach-Object { [string]$_.GetAttribute('Include') })
+Assert-PshGoal5Bootstrapper ($referenceIncludes.Count -eq $expectedReferences.Count) 'Bootstrapper project does not use the exact framework-reference allowlist.'
+foreach ($expectedReference in $expectedReferences) {
+    Assert-PshGoal5Bootstrapper (@($referenceIncludes | Where-Object { $_ -ceq $expectedReference }).Count -eq 1) ('Bootstrapper project must reference {0} exactly once.' -f $expectedReference)
+}
+Assert-PshGoal5Bootstrapper (@($referenceNodes | Where-Object {
+            [string]::IsNullOrWhiteSpace([string]$_.GetAttribute('Include')) -or
+            [string]$_.GetAttribute('Include') -match '[,*?]' -or
+            $null -ne $_.SelectSingleNode('msb:HintPath', $namespaceManager)
+        }).Count -eq 0) 'Bootstrapper project uses a broad, version-qualified, wildcard, or HintPath reference fallback.'
 Assert-PshGoal5Bootstrapper ($projectText -notmatch '(?i)PackageReference|packages\.config|NuGet') 'Bootstrapper project has a package-manager dependency.'
 Assert-PshGoal5Bootstrapper ($buildText -notmatch '(?i)PS2EXE|Invoke-PS2EXE|dotnet\s+restore|PackageReference|NuGet') 'Build script references a prohibited packaging dependency.'
 Assert-PshGoal5Bootstrapper ($buildText -match '(?s)GenerateHashSourceOnly.*Write-PshHashSource') 'Build script does not expose hash-source generation.'
