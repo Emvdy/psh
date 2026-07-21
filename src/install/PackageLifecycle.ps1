@@ -157,8 +157,8 @@ function Test-PshLifecycleHasProperty {
     )
 
     if ($null -eq $InputObject) { return $false }
-    foreach ($name in (Get-PshLifecyclePropertyNames -InputObject $InputObject)) {
-        if ($name -ceq $Name) { return $true }
+    foreach ($propertyName in (Get-PshLifecyclePropertyNames -InputObject $InputObject)) {
+        if ($propertyName -ceq $Name) { return $true }
     }
     return $false
 }
@@ -571,16 +571,36 @@ function Get-PshLifecyclePathEntry {
         [Parameter(Mandatory = $true)][string] $Description
     )
 
-    try {
-        $attributes = [IO.File]::GetAttributes($Path)
-    }
+    $attributes = $null
+    try { $attributes = [IO.File]::GetAttributes($Path) }
     catch {
         if (Test-PshLifecycleMissingPathException -Exception $_.Exception) {
-            return [pscustomobject][ordered]@{
-                Path = $Path; Exists = $false; IsDirectory = $false; IsReparsePoint = $false; IsRegularFile = $false
+            # File.GetAttributes reports a dangling symbolic link as missing on
+            # Unix.  Enumerating its parent still exposes the reparse entry.
+            try {
+                $fullPath = [IO.Path]::GetFullPath($Path)
+                $parent = [IO.Path]::GetDirectoryName($fullPath)
+                $leaf = [IO.Path]::GetFileName($fullPath)
+                if (-not [string]::IsNullOrEmpty($parent) -and -not [string]::IsNullOrEmpty($leaf)) {
+                    $directory = New-Object IO.DirectoryInfo($parent)
+                    foreach ($candidate in @($directory.GetFileSystemInfos())) {
+                        if ([string]::Equals([string]$candidate.Name, $leaf, (Get-PshLifecyclePathComparison))) {
+                            $attributes = $candidate.Attributes
+                            break
+                        }
+                    }
+                }
+            }
+            catch { }
+            if ($null -eq $attributes) {
+                return [pscustomobject][ordered]@{
+                    Path = $Path; Exists = $false; IsDirectory = $false; IsReparsePoint = $false; IsRegularFile = $false
+                }
             }
         }
-        Throw-PshLifecycleError -ExitCode 3 -Kind 'Io' -ErrorId 'PshPathInspectFailed' -Message "Unable to inspect ${Description}: $Path" -InnerException $_.Exception
+        else {
+            Throw-PshLifecycleError -ExitCode 3 -Kind 'Io' -ErrorId 'PshPathInspectFailed' -Message "Unable to inspect ${Description}: $Path" -InnerException $_.Exception
+        }
     }
     $isDirectory = (($attributes -band [IO.FileAttributes]::Directory) -ne 0)
     $isReparse = (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
@@ -591,6 +611,38 @@ function Get-PshLifecyclePathEntry {
         IsReparsePoint = $isReparse
         IsRegularFile = (-not $isDirectory -and -not $isReparse)
     }
+}
+
+function Assert-PshLifecycleNoReparseAncestors {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    try { $fullPath = [IO.Path]::GetFullPath($Path) }
+    catch {
+        Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshInvalidPath' -Message "$Description is not a valid filesystem path: $Path" -InnerException $_.Exception
+    }
+    $comparison = Get-PshLifecyclePathComparison
+    $probe = $fullPath
+    $isLeaf = $true
+    while ($true) {
+        $entry = Get-PshLifecyclePathEntry -Path $probe -Description "$Description component"
+        if ([bool]$entry.Exists) {
+            if ([bool]$entry.IsReparsePoint) {
+                Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshReparsePoint' -Message "$Description must not contain a reparse point: $probe"
+            }
+            if (-not $isLeaf -and -not [bool]$entry.IsDirectory) {
+                Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshPathAncestorNotDirectory' -Message "$Description has a non-directory ancestor: $probe"
+            }
+        }
+        $parent = [IO.Path]::GetDirectoryName($probe)
+        if ([string]::IsNullOrEmpty($parent) -or [string]::Equals($parent, $probe, $comparison)) { break }
+        $probe = $parent
+        $isLeaf = $false
+    }
+    return $fullPath
 }
 
 function Read-PshStrictJsonSnapshot {
@@ -628,11 +680,22 @@ function Read-PshStrictJsonSnapshot {
         if (Test-PshLifecycleExceptionMetadata $_) { throw }
         Throw-PshLifecycleError -ExitCode 3 -Kind 'Io' -ErrorId 'PshJsonReadFailed' -Message "Unable to read ${Description}: $Path" -InnerException $_.Exception
     }
-    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+    return New-PshStrictJsonSnapshotFromBytes -Path $Path -Bytes $bytes -Description $Description
+}
+
+function New-PshStrictJsonSnapshotFromBytes {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][byte[]] $Bytes,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
         Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshJsonBom' -Message "$Description must be UTF-8 without a BOM: $Path"
     }
     $encoding = New-Object System.Text.UTF8Encoding($false, $true)
-    try { $text = $encoding.GetString($bytes) }
+    try { $text = $encoding.GetString($Bytes) }
     catch { Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshJsonUtf8' -Message "$Description is not valid UTF-8: $Path" -InnerException $_.Exception }
     if ([string]::IsNullOrWhiteSpace($text)) {
         Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshJsonEmpty' -Message "$Description is empty: $Path"
@@ -642,9 +705,9 @@ function Read-PshStrictJsonSnapshot {
     catch { Throw-PshLifecycleError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshInvalidJson' -Message "$Description is not valid JSON: $Path" -InnerException $_.Exception }
     return [pscustomobject][ordered]@{
         Path = [IO.Path]::GetFullPath($Path)
-        Bytes = $bytes
-        Length = [int64]$bytes.Length
-        Sha256 = Get-PshLifecycleSha256Bytes -Bytes $bytes
+        Bytes = $Bytes
+        Length = [int64]$Bytes.Length
+        Sha256 = Get-PshLifecycleSha256Bytes -Bytes $Bytes
         Document = $document
     }
 }

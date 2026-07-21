@@ -232,6 +232,17 @@ try {
     $duplicateJson = '{"schemaVersion":1,"schemaVersion":1}'
     [IO.File]::WriteAllText($manifestPath, $duplicateJson, (New-Object Text.UTF8Encoding($false)))
     Assert-PshGoal5Failure -Action { Read-PshPackageManifest -Path $manifestPath } -ExitCode 5 -ErrorId PshDuplicateField -Label 'duplicate JSON key'
+    $caseDuplicateJson = '{"schemaVersion":1,"SchemaVersion":1}'
+    [IO.File]::WriteAllText($manifestPath, $caseDuplicateJson, (New-Object Text.UTF8Encoding($false)))
+    Assert-PshGoal5Failure -Action { Read-PshPackageManifest -Path $manifestPath } -ExitCode 5 -ErrorId PshDuplicateField -Label 'case-variant duplicate JSON key'
+    $missingProductManifest = Copy-PshGoal5JsonObject $manifest
+    $missingProductManifest.PSObject.Properties.Remove('product')
+    Write-PshCanonicalJsonAtomic -Path $manifestPath -InputObject $missingProductManifest | Out-Null
+    Assert-PshGoal5Failure -Action { Read-PshPackageManifest -Path $manifestPath } -ExitCode 5 -ErrorId PshMissingField -Label 'missing ordinary required manifest field'
+    $missingNullableManifest = Copy-PshGoal5JsonObject $manifest
+    $missingNullableManifest.PSObject.Properties.Remove('nativeToolsLockSha256')
+    Write-PshCanonicalJsonAtomic -Path $manifestPath -InputObject $missingNullableManifest | Out-Null
+    Assert-PshGoal5Failure -Action { Read-PshPackageManifest -Path $manifestPath } -ExitCode 5 -ErrorId PshMissingField -Label 'missing nullable required manifest field'
     $bom = New-Object Text.UTF8Encoding($true)
     [IO.File]::WriteAllText($manifestPath, (ConvertTo-PshCanonicalJson $manifest), $bom)
     Assert-PshGoal5Failure -Action { Read-PshPackageManifest -Path $manifestPath } -ExitCode 5 -ErrorId PshJsonBom -Label 'BOM package manifest'
@@ -255,6 +266,19 @@ try {
     if ($linkCreated) {
         Assert-PshGoal5Failure -Action { Get-PshPackageTreeEntries -PackageRoot $packageRoot } -ExitCode 5 -ErrorId PshReparsePoint -Label 'package reparse point'
         [IO.File]::Delete($linkPath)
+    }
+    $brokenLinkPath = Join-Path $packageRoot 'payload/broken-link.txt'
+    $brokenLinkCreated = $false
+    try {
+        New-Item -ItemType SymbolicLink -Path $brokenLinkPath -Target (Join-Path $temporaryRoot 'missing-link-target.txt') -ErrorAction Stop | Out-Null
+        $brokenLinkCreated = $true
+    }
+    catch { }
+    if ($brokenLinkCreated) {
+        $brokenEntry = Get-PshLifecyclePathEntry -Path $brokenLinkPath -Description 'broken symbolic link'
+        Assert-PshGoal5 ([bool]$brokenEntry.Exists -and [bool]$brokenEntry.IsReparsePoint) 'Dangling symbolic link was misclassified as a missing path.'
+        Assert-PshGoal5Failure -Action { Assert-PshLifecycleNoReparseAncestors -Path $brokenLinkPath -Description 'broken symbolic link' } -ExitCode 5 -ErrorId PshReparsePoint -Label 'dangling symbolic link'
+        [IO.File]::Delete($brokenLinkPath)
     }
 
     $installRoot = Join-Path $temporaryRoot 'install root'
