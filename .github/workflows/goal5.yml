@@ -1,0 +1,597 @@
+name: Goal 5 Windows x64 Lifecycle
+
+on:
+  push:
+    branches:
+      - main
+      - 'goal5/**'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: goal5-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-x64:
+    name: ${{ matrix.name }}
+    runs-on: windows-2022
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows PowerShell 5.1 x64
+            runtime: winps51
+            shell: powershell
+            expected_major: 5
+            expected_minor: 1
+            expected_edition: Desktop
+          - name: PowerShell 7 x64
+            runtime: pwsh7
+            shell: pwsh
+            expected_major: 7
+            expected_minor: 0
+            expected_edition: Core
+    env:
+      PSH_GOAL5_RUNTIME: ${{ matrix.runtime }}
+      PSH_GOAL5_EXPECTED_MAJOR: ${{ matrix.expected_major }}
+      PSH_GOAL5_EXPECTED_MINOR: ${{ matrix.expected_minor }}
+      PSH_GOAL5_EXPECTED_EDITION: ${{ matrix.expected_edition }}
+
+    steps:
+      - name: Initialize Goal 5 report root
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $reportRoot = Join-Path $env:RUNNER_TEMP ('goal5-' + $env:PSH_GOAL5_RUNTIME)
+          [void][IO.Directory]::CreateDirectory($reportRoot)
+          $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
+          [IO.File]::WriteAllText((Join-Path $reportRoot 'workflow-started.txt'), "Goal 5 workflow started.`n", $utf8)
+
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Verify Windows PowerShell 5.1 shell
+        if: ${{ matrix.shell == 'powershell' }}
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1 -or
+              [string]$PSVersionTable.PSEdition -cne 'Desktop') {
+              throw 'The powershell matrix shell is not Windows PowerShell 5.1 Desktop.'
+          }
+
+      - name: Verify PowerShell 7 shell
+        if: ${{ matrix.shell == 'pwsh' }}
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSVersion.Major -lt 7 -or [string]$PSVersionTable.PSEdition -cne 'Core') {
+              throw 'The pwsh matrix shell is not PowerShell 7 or later Core.'
+          }
+
+      - name: Validate runtime and fixed inputs
+        shell: powershell
+        run: |
+          if ($env:PSH_GOAL5_RUNTIME -ceq 'pwsh7' -and [string]$PSVersionTable.PSEdition -cne 'Core') {
+              $pwshPath = [string](Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction Stop).Source
+              & $pwshPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath
+              $childExitCode = [int]$LASTEXITCODE
+              $global:LASTEXITCODE = 0
+              exit $childExitCode
+          }
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version 2.0
+
+          $env:PSH_GOAL5_REPORT_ROOT = Join-Path $env:RUNNER_TEMP ('goal5-' + $env:PSH_GOAL5_RUNTIME)
+          $env:PSH_GOAL5_PRE_SIGN_ROOT = Join-Path $env:PSH_GOAL5_REPORT_ROOT 'pre-sign-build'
+
+          [void][IO.Directory]::CreateDirectory($env:PSH_GOAL5_REPORT_ROOT)
+          $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
+          $runtimeReportPath = Join-Path $env:PSH_GOAL5_REPORT_ROOT 'runtime-report.json'
+
+          if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+              throw 'Goal 5 must run on Windows.'
+          }
+          if (-not [Environment]::Is64BitProcess -or [string]$env:PROCESSOR_ARCHITECTURE -ine 'AMD64') {
+              throw 'Goal 5 requires an x64 PowerShell process on an AMD64 runner.'
+          }
+
+          $actualMajor = [int]$PSVersionTable.PSVersion.Major
+          $actualMinor = [int]$PSVersionTable.PSVersion.Minor
+          $actualEdition = [string]$PSVersionTable.PSEdition
+          $expectedMajor = [int]$env:PSH_GOAL5_EXPECTED_MAJOR
+          $expectedMinor = [int]$env:PSH_GOAL5_EXPECTED_MINOR
+          $expectedEdition = [string]$env:PSH_GOAL5_EXPECTED_EDITION
+          if ($env:PSH_GOAL5_RUNTIME -ceq 'winps51') {
+              if ($actualMajor -ne 5 -or $actualMinor -ne 1 -or $actualEdition -cne 'Desktop') {
+                  throw ('Windows PowerShell matrix entry requires 5.1 Desktop, found {0} {1}.' -f $PSVersionTable.PSVersion, $actualEdition)
+              }
+          }
+          elseif ($env:PSH_GOAL5_RUNTIME -ceq 'pwsh7') {
+              if ($actualMajor -lt 7 -or $actualEdition -cne 'Core') {
+                  throw ('PowerShell matrix entry requires 7 or later Core, found {0} {1}.' -f $PSVersionTable.PSVersion, $actualEdition)
+              }
+          }
+          else {
+              throw ('Unknown Goal 5 runtime identifier: {0}' -f $env:PSH_GOAL5_RUNTIME)
+          }
+          if ($actualMajor -lt $expectedMajor -or $actualEdition -cne $expectedEdition -or
+              ($env:PSH_GOAL5_RUNTIME -ceq 'winps51' -and $actualMinor -ne $expectedMinor)) {
+              throw 'The runtime does not satisfy its matrix contract.'
+          }
+
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          if ([string](Get-ExecutionPolicy -Scope Process) -cne 'Bypass') {
+              throw 'The test process execution policy was not set to Bypass.'
+          }
+
+          $tests = @(
+              [pscustomobject]@{ Name = 'goal1-acceptance'; RelativePath = 'tests/Goal1.Acceptance.ps1' },
+              [pscustomobject]@{ Name = 'goal5-workflow-contract'; RelativePath = 'tests/Goal5.WorkflowContract.ps1' },
+              [pscustomobject]@{ Name = 'goal5-package-lifecycle'; RelativePath = 'tests/Goal5.PackageLifecycle.ps1' },
+              [pscustomobject]@{ Name = 'goal5-lifecycle-acceptance'; RelativePath = 'tests/Goal5.LifecycleAcceptance.ps1' },
+              [pscustomobject]@{ Name = 'goal5-uninstall-safety'; RelativePath = 'tests/Goal5.UninstallSafety.ps1' },
+              [pscustomobject]@{ Name = 'goal5-bootstrapper'; RelativePath = 'tests/Goal5.Bootstrapper.ps1' },
+              [pscustomobject]@{ Name = 'goal5-release-trust'; RelativePath = 'tests/Goal5.ReleaseTrust.ps1' },
+              [pscustomobject]@{ Name = 'goal5-acquisition'; RelativePath = 'tests/Goal5.Acquisition.ps1' },
+              [pscustomobject]@{ Name = 'goal5-online-offline'; RelativePath = 'tests/Goal5.OnlineOffline.ps1' },
+              [pscustomobject]@{ Name = 'goal5-package-build'; RelativePath = 'tests/Goal5.PackageBuild.ps1' }
+          )
+          $requiredFiles = @(
+              'scripts/Build-PshBootstrapper.ps1',
+              'scripts/Build-PshPackages.ps1',
+              'scripts/Generate-PshReleaseIndex.ps1',
+              'scripts/Test-PshReleaseArtifacts.ps1',
+              'src/bootstrapper/Psh.Bootstrapper.csproj',
+              'src/install/Install-PshPackage.ps1',
+              'src/install/PackageAcquisition.ps1',
+              'src/install/PackageLifecycle.ps1',
+              'src/install/ReleaseTrust.ps1',
+              'src/install/Rollback-PshVersion.ps1',
+              'src/install/Set-PshCurrentVersion.ps1',
+              'src/install/bootstrap.ps1',
+              'src/install/install.ps1',
+              'src/install/install-offline.ps1',
+              'src/install/install.sh',
+              'src/install/Uninstall-Psh.ps1'
+          ) + @($tests | ForEach-Object { [string]$_.RelativePath })
+          foreach ($relativePath in $requiredFiles) {
+              $requiredPath = Join-Path $env:GITHUB_WORKSPACE $relativePath
+              if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+                  throw ('Required Goal 5 input is missing: {0}' -f $relativePath)
+              }
+              if ((Get-Item -LiteralPath $requiredPath -Force).Length -le 0) {
+                  throw ('Required Goal 5 input is empty: {0}' -f $relativePath)
+              }
+          }
+
+          $runtimeReport = [ordered]@{
+              schemaVersion = 1
+              runtime = $env:PSH_GOAL5_RUNTIME
+              version = [string]$PSVersionTable.PSVersion
+              edition = $actualEdition
+              is64BitProcess = [Environment]::Is64BitProcess
+              processorArchitecture = [string]$env:PROCESSOR_ARCHITECTURE
+              executionPolicy = [string](Get-ExecutionPolicy -Scope Process)
+              requiredTests = @($tests | ForEach-Object { [string]$_.RelativePath })
+          }
+          [IO.File]::WriteAllText($runtimeReportPath, (($runtimeReport | ConvertTo-Json -Depth 6) + "`n"), $utf8)
+
+      - name: Build and inspect unsigned AnyCPU bootstrapper
+        shell: powershell
+        run: |
+          if ($env:PSH_GOAL5_RUNTIME -ceq 'pwsh7' -and [string]$PSVersionTable.PSEdition -cne 'Core') {
+              $pwshPath = [string](Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction Stop).Source
+              & $pwshPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath
+              $childExitCode = [int]$LASTEXITCODE
+              $global:LASTEXITCODE = 0
+              exit $childExitCode
+          }
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version 2.0
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+
+          $env:PSH_GOAL5_REPORT_ROOT = Join-Path $env:RUNNER_TEMP ('goal5-' + $env:PSH_GOAL5_RUNTIME)
+          $env:PSH_GOAL5_PRE_SIGN_ROOT = Join-Path $env:PSH_GOAL5_REPORT_ROOT 'pre-sign-build'
+
+          function Resolve-PshGoal5Rva {
+              param(
+                  [Parameter(Mandatory = $true)][byte[]]$Bytes,
+                  [Parameter(Mandatory = $true)][int]$SectionTableOffset,
+                  [Parameter(Mandatory = $true)][int]$SectionCount,
+                  [Parameter(Mandatory = $true)][uint32]$Rva
+              )
+
+              for ($index = 0; $index -lt $SectionCount; $index++) {
+                  $sectionOffset = $SectionTableOffset + ($index * 40)
+                  if ($sectionOffset -lt 0 -or $sectionOffset + 40 -gt $Bytes.Length) {
+                      throw 'The PE section table is truncated.'
+                  }
+                  $virtualSize = [uint32][BitConverter]::ToUInt32($Bytes, $sectionOffset + 8)
+                  $virtualAddress = [uint32][BitConverter]::ToUInt32($Bytes, $sectionOffset + 12)
+                  $rawSize = [uint32][BitConverter]::ToUInt32($Bytes, $sectionOffset + 16)
+                  $rawOffset = [uint32][BitConverter]::ToUInt32($Bytes, $sectionOffset + 20)
+                  $span = [Math]::Max([int64]$virtualSize, [int64]$rawSize)
+                  if ([int64]$Rva -ge [int64]$virtualAddress -and [int64]$Rva -lt ([int64]$virtualAddress + $span)) {
+                      $fileOffset = [int64]$rawOffset + ([int64]$Rva - [int64]$virtualAddress)
+                      if ($fileOffset -lt 0 -or $fileOffset -ge $Bytes.Length) {
+                          throw 'The CLR header RVA resolves outside the PE file.'
+                      }
+                      return [int]$fileOffset
+                  }
+              }
+              throw 'The CLR header RVA does not map to a PE section.'
+          }
+
+          $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
+          $buildRoot = Join-Path $env:PSH_GOAL5_REPORT_ROOT 'bootstrapper-build'
+          [void][IO.Directory]::CreateDirectory($buildRoot)
+          $onlineTemplatePath = Join-Path $buildRoot 'install.ps1'
+          $offlineInstallerPath = Join-Path $env:GITHUB_WORKSPACE 'src/install/install-offline.ps1'
+          $bootstrapperPath = Join-Path $buildRoot 'psh-installer.exe'
+          $hashSourcePath = Join-Path $buildRoot 'EmbeddedScriptHashes.g.cs'
+          $buildLogPath = Join-Path $buildRoot 'build.log'
+          $buildReportPath = Join-Path $env:PSH_GOAL5_REPORT_ROOT 'bootstrapper-build-report.json'
+          $onlineTemplate = @'
+          [CmdletBinding()]
+          param(
+              [ValidateSet('Core', 'Full')][string]$Edition = 'Core',
+              [string]$Version = 'latest',
+              [switch]$NonInteractive
+          )
+          Write-Output ('Goal 5 bootstrapper build fixture: {0} {1} {2}' -f $Edition, $Version, [bool]$NonInteractive)
+          '@
+          [IO.File]::WriteAllText($onlineTemplatePath, ($onlineTemplate.Trim() + "`n"), $utf8)
+
+          $projectPath = Join-Path $env:GITHUB_WORKSPACE 'src/bootstrapper/Psh.Bootstrapper.csproj'
+          $projectText = [IO.File]::ReadAllText($projectPath)
+          foreach ($requiredProjectSetting in @(
+                  '<TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>',
+                  '<PlatformTarget>AnyCPU</PlatformTarget>',
+                  '<Prefer32Bit>false</Prefer32Bit>',
+                  '<TreatWarningsAsErrors>true</TreatWarningsAsErrors>'
+              )) {
+              if ($projectText.IndexOf($requiredProjectSetting, [StringComparison]::Ordinal) -lt 0) {
+                  throw ('The bootstrapper project is missing required setting: {0}' -f $requiredProjectSetting)
+              }
+          }
+
+          $buildLines = New-Object System.Collections.Generic.List[string]
+          try {
+              & (Join-Path $env:GITHUB_WORKSPACE 'scripts/Build-PshBootstrapper.ps1') `
+                  -OnlineScriptPath $onlineTemplatePath `
+                  -OfflineScriptPath $offlineInstallerPath `
+                  -OutputPath $bootstrapperPath `
+                  -HashSourcePath $hashSourcePath 2>&1 | ForEach-Object {
+                      $line = [string]$_
+                      [void]$buildLines.Add($line)
+                      Write-Output $line
+                  }
+          }
+          catch {
+              [void]$buildLines.Add([string]$_)
+              [IO.File]::WriteAllText($buildLogPath, (($buildLines.ToArray() -join "`n") + "`n"), $utf8)
+              throw
+          }
+          $buildExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+          $global:LASTEXITCODE = 0
+          [IO.File]::WriteAllText($buildLogPath, (($buildLines.ToArray() -join "`n") + "`n"), $utf8)
+          if ($buildExitCode -ne 0) {
+              throw ('Bootstrapper build exited {0}.' -f $buildExitCode)
+          }
+          if (-not (Test-Path -LiteralPath $bootstrapperPath -PathType Leaf) -or (Get-Item -LiteralPath $bootstrapperPath).Length -le 0) {
+              throw 'The bootstrapper build did not produce a non-empty executable.'
+          }
+
+          $signature = Get-AuthenticodeSignature -LiteralPath $bootstrapperPath -ErrorAction Stop
+          if ([string]$signature.Status -cne 'NotSigned') {
+              throw ('The CI bootstrapper must remain unsigned before external signing, found {0}.' -f $signature.Status)
+          }
+
+          $bytes = [IO.File]::ReadAllBytes($bootstrapperPath)
+          if ($bytes.Length -lt 0x100 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+              throw 'The bootstrapper is not a valid MZ/PE file.'
+          }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          if ($peOffset -lt 0 -or $peOffset + 24 -gt $bytes.Length -or
+              $bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or
+              $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
+              throw 'The bootstrapper PE header is invalid.'
+          }
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          $sectionCount = [int][BitConverter]::ToUInt16($bytes, $peOffset + 6)
+          $optionalHeaderSize = [int][BitConverter]::ToUInt16($bytes, $peOffset + 20)
+          $optionalHeaderOffset = $peOffset + 24
+          if ($sectionCount -le 0 -or $optionalHeaderSize -le 0 -or $optionalHeaderOffset + $optionalHeaderSize -gt $bytes.Length) {
+              throw 'The bootstrapper COFF or optional header is invalid.'
+          }
+          $optionalMagic = [BitConverter]::ToUInt16($bytes, $optionalHeaderOffset)
+          if ($machine -ne 0x014c -or $optionalMagic -ne 0x010b) {
+              throw ('AnyCPU bootstrapper requires I386/PE32 headers, found machine 0x{0:X4}, magic 0x{1:X4}.' -f $machine, $optionalMagic)
+          }
+          $cliDirectoryOffset = $optionalHeaderOffset + 96 + (14 * 8)
+          if ($cliDirectoryOffset + 8 -gt $optionalHeaderOffset + $optionalHeaderSize) {
+              throw 'The PE optional header has no CLR data directory.'
+          }
+          $cliRva = [BitConverter]::ToUInt32($bytes, $cliDirectoryOffset)
+          $cliSize = [BitConverter]::ToUInt32($bytes, $cliDirectoryOffset + 4)
+          if ($cliRva -eq 0 -or $cliSize -lt 72) {
+              throw 'The PE CLR data directory is missing or truncated.'
+          }
+          $sectionTableOffset = $optionalHeaderOffset + $optionalHeaderSize
+          $cliFileOffset = Resolve-PshGoal5Rva -Bytes $bytes -SectionTableOffset $sectionTableOffset -SectionCount $sectionCount -Rva $cliRva
+          if ($cliFileOffset + 20 -gt $bytes.Length -or [BitConverter]::ToUInt32($bytes, $cliFileOffset) -lt 72) {
+              throw 'The CLR header is truncated.'
+          }
+          $clrFlags = [BitConverter]::ToUInt32($bytes, $cliFileOffset + 16)
+          $comImageFlagsIlOnly = [uint32]0x00000001
+          $comImageFlags32BitRequired = [uint32]0x00000002
+          $comImageFlags32BitPreferred = [uint32]0x00020000
+          if (($clrFlags -band $comImageFlagsIlOnly) -eq 0) {
+              throw 'AnyCPU bootstrapper CLR flags do not include ILONLY.'
+          }
+          if (($clrFlags -band $comImageFlags32BitRequired) -ne 0) {
+              throw 'AnyCPU bootstrapper CLR flags unexpectedly include 32BITREQUIRED.'
+          }
+          if (($clrFlags -band $comImageFlags32BitPreferred) -ne 0) {
+              throw 'AnyCPU bootstrapper CLR flags unexpectedly include 32BITPREFERRED.'
+          }
+
+          $sha256 = [Security.Cryptography.SHA256]::Create()
+          try {
+              $bootstrapperSha256 = ([BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+          }
+          finally {
+              $sha256.Dispose()
+          }
+          $buildReport = [ordered]@{
+              schemaVersion = 1
+              phase = 'pre-sign-bootstrapper'
+              code = 4
+              path = $bootstrapperPath
+              length = [int64]$bytes.Length
+              sha256 = $bootstrapperSha256
+              authenticodeStatus = [string]$signature.Status
+              targetFramework = 'net472'
+              platformTarget = 'AnyCPU'
+              machine = ('0x{0:X4}' -f $machine)
+              optionalHeaderMagic = ('0x{0:X4}' -f $optionalMagic)
+              clrFlags = ('0x{0:X8}' -f $clrFlags)
+              ilOnly = $true
+              bit32Required = $false
+              bit32Preferred = $false
+          }
+          [IO.File]::WriteAllText($buildReportPath, (($buildReport | ConvertTo-Json -Depth 5) + "`n"), $utf8)
+
+      - name: Run fixed Goal 5 contract and acceptance tests
+        shell: powershell
+        run: |
+          if ($env:PSH_GOAL5_RUNTIME -ceq 'pwsh7' -and [string]$PSVersionTable.PSEdition -cne 'Core') {
+              $pwshPath = [string](Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction Stop).Source
+              & $pwshPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath
+              $childExitCode = [int]$LASTEXITCODE
+              $global:LASTEXITCODE = 0
+              exit $childExitCode
+          }
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version 2.0
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+
+          $env:PSH_GOAL5_REPORT_ROOT = Join-Path $env:RUNNER_TEMP ('goal5-' + $env:PSH_GOAL5_RUNTIME)
+          $env:PSH_GOAL5_PRE_SIGN_ROOT = Join-Path $env:PSH_GOAL5_REPORT_ROOT 'pre-sign-build'
+
+          $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
+          $logRoot = Join-Path $env:PSH_GOAL5_REPORT_ROOT 'test-logs'
+          [void][IO.Directory]::CreateDirectory($logRoot)
+          $tests = @(
+              [pscustomobject]@{ Name = 'goal1-acceptance'; RelativePath = 'tests/Goal1.Acceptance.ps1' },
+              [pscustomobject]@{ Name = 'goal5-workflow-contract'; RelativePath = 'tests/Goal5.WorkflowContract.ps1' },
+              [pscustomobject]@{ Name = 'goal5-package-lifecycle'; RelativePath = 'tests/Goal5.PackageLifecycle.ps1' },
+              [pscustomobject]@{ Name = 'goal5-lifecycle-acceptance'; RelativePath = 'tests/Goal5.LifecycleAcceptance.ps1' },
+              [pscustomobject]@{ Name = 'goal5-uninstall-safety'; RelativePath = 'tests/Goal5.UninstallSafety.ps1' },
+              [pscustomobject]@{ Name = 'goal5-bootstrapper'; RelativePath = 'tests/Goal5.Bootstrapper.ps1' },
+              [pscustomobject]@{ Name = 'goal5-release-trust'; RelativePath = 'tests/Goal5.ReleaseTrust.ps1' },
+              [pscustomobject]@{ Name = 'goal5-acquisition'; RelativePath = 'tests/Goal5.Acquisition.ps1' },
+              [pscustomobject]@{ Name = 'goal5-online-offline'; RelativePath = 'tests/Goal5.OnlineOffline.ps1' },
+              [pscustomobject]@{ Name = 'goal5-package-build'; RelativePath = 'tests/Goal5.PackageBuild.ps1' }
+          )
+          $enginePath = [string](Get-Process -Id $PID -ErrorAction Stop).Path
+          if ([string]::IsNullOrWhiteSpace($enginePath) -or -not [IO.File]::Exists($enginePath)) {
+              throw 'Unable to resolve the current PowerShell executable.'
+          }
+
+          $failures = New-Object System.Collections.Generic.List[string]
+          $results = New-Object System.Collections.Generic.List[object]
+          foreach ($test in $tests) {
+              $testPath = Join-Path $env:GITHUB_WORKSPACE ([string]$test.RelativePath)
+              if (-not (Test-Path -LiteralPath $testPath -PathType Leaf)) {
+                  throw ('Required Goal 5 test is missing: {0}' -f $test.RelativePath)
+              }
+              $logPath = Join-Path $logRoot (([string]$test.Name) + '.log')
+              $lines = New-Object System.Collections.Generic.List[string]
+              $testExitCode = 1
+              try {
+                  & $enginePath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $testPath 2>&1 | ForEach-Object {
+                      $line = [string]$_
+                      [void]$lines.Add($line)
+                      Write-Output ('[{0}] {1}' -f $test.Name, $line)
+                  }
+                  $testExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+              }
+              catch {
+                  [void]$lines.Add([string]$_)
+                  $testExitCode = 1
+              }
+              $global:LASTEXITCODE = 0
+              $logText = ($lines.ToArray() -join "`n") + "`n"
+              [IO.File]::WriteAllText($logPath, $logText, $utf8)
+              $containsDeferredOrSkipped = $logText -match '(?i)\b(?:deferred|skipped)\b'
+              if ($testExitCode -ne 0) {
+                  [void]$failures.Add(('{0} exited {1}' -f $test.RelativePath, $testExitCode))
+              }
+              if ($containsDeferredOrSkipped) {
+                  [void]$failures.Add(('{0} reported deferred or skipped coverage' -f $test.RelativePath))
+              }
+              [void]$results.Add([pscustomobject][ordered]@{
+                      name = [string]$test.Name
+                      path = [string]$test.RelativePath
+                      exitCode = $testExitCode
+                      deferredOrSkipped = $containsDeferredOrSkipped
+                      log = ('test-logs/{0}.log' -f $test.Name)
+                  })
+          }
+
+          $summary = [ordered]@{
+              schemaVersion = 1
+              runtime = $env:PSH_GOAL5_RUNTIME
+              tests = $results.ToArray()
+              failureCount = $failures.Count
+              failures = $failures.ToArray()
+          }
+          [IO.File]::WriteAllText((Join-Path $env:PSH_GOAL5_REPORT_ROOT 'test-summary.json'), (($summary | ConvertTo-Json -Depth 6) + "`n"), $utf8)
+          if ($failures.Count -ne 0) {
+              throw ('Goal 5 test failures: {0}' -f ($failures.ToArray() -join '; '))
+          }
+
+      - name: Validate retained pre-sign reports
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          if ($env:PSH_GOAL5_RUNTIME -ceq 'pwsh7' -and [string]$PSVersionTable.PSEdition -cne 'Core') {
+              $pwshPath = [string](Get-Command -Name 'pwsh.exe' -CommandType Application -ErrorAction Stop).Source
+              & $pwshPath -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $PSCommandPath
+              $childExitCode = [int]$LASTEXITCODE
+              $global:LASTEXITCODE = 0
+              exit $childExitCode
+          }
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version 2.0
+
+          $env:PSH_GOAL5_REPORT_ROOT = Join-Path $env:RUNNER_TEMP ('goal5-' + $env:PSH_GOAL5_RUNTIME)
+          $env:PSH_GOAL5_PRE_SIGN_ROOT = Join-Path $env:PSH_GOAL5_REPORT_ROOT 'pre-sign-build'
+
+          function Get-PshGoal5NonEmptyJson {
+              param([Parameter(Mandatory = $true)][string]$Path)
+              if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+                  throw ('Required Goal 5 report is missing: {0}' -f $Path)
+              }
+              if ((Get-Item -LiteralPath $Path -Force).Length -le 0) {
+                  throw ('Required Goal 5 report is empty: {0}' -f $Path)
+              }
+              return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+          }
+
+          if (-not (Test-Path -LiteralPath $env:PSH_GOAL5_REPORT_ROOT -PathType Container)) {
+              throw 'The Goal 5 report root is missing.'
+          }
+          $bootstrapperReport = Get-PshGoal5NonEmptyJson -Path (Join-Path $env:PSH_GOAL5_REPORT_ROOT 'bootstrapper-build-report.json')
+          $bootstrapperLogPath = Join-Path $env:PSH_GOAL5_REPORT_ROOT 'bootstrapper-build/build.log'
+          if (-not (Test-Path -LiteralPath $bootstrapperLogPath -PathType Leaf) -or (Get-Item -LiteralPath $bootstrapperLogPath).Length -le 0) {
+              throw 'The bootstrapper build log is missing or empty.'
+          }
+          if ([string]$bootstrapperReport.authenticodeStatus -cne 'NotSigned' -or
+              [string]$bootstrapperReport.platformTarget -cne 'AnyCPU' -or
+              -not [bool]$bootstrapperReport.ilOnly -or [bool]$bootstrapperReport.bit32Required -or [bool]$bootstrapperReport.bit32Preferred) {
+              throw 'The retained bootstrapper build report is not an unsigned AnyCPU IL-only build.'
+          }
+
+          $testSummary = Get-PshGoal5NonEmptyJson -Path (Join-Path $env:PSH_GOAL5_REPORT_ROOT 'test-summary.json')
+          if (@($testSummary.tests).Count -ne 10 -or [int]$testSummary.failureCount -ne 0) {
+              throw 'The retained test summary is incomplete or reports a failure.'
+          }
+          foreach ($testResult in @($testSummary.tests)) {
+              $logPath = Join-Path $env:PSH_GOAL5_REPORT_ROOT ([string]$testResult.log).Replace('/', [IO.Path]::DirectorySeparatorChar)
+              if (-not (Test-Path -LiteralPath $logPath -PathType Leaf) -or (Get-Item -LiteralPath $logPath).Length -le 0) {
+                  throw ('A Goal 5 test log is missing or empty: {0}' -f $testResult.log)
+              }
+              if ([int]$testResult.exitCode -ne 0 -or [bool]$testResult.deferredOrSkipped) {
+                  throw ('A Goal 5 test was not fully executed: {0}' -f $testResult.path)
+              }
+          }
+
+          $onlineOfflineReport = Get-PshGoal5NonEmptyJson -Path (Join-Path $env:PSH_GOAL5_REPORT_ROOT 'Goal5.OnlineOffline.summary.json')
+          if ([int]$onlineOfflineReport.assertions -le 0 -or @($onlineOfflineReport.offlineLog).Count -lt 3) {
+              throw 'The online/offline acceptance report is incomplete.'
+          }
+
+          if (-not (Test-Path -LiteralPath $env:PSH_GOAL5_PRE_SIGN_ROOT -PathType Container)) {
+              throw 'The Goal 5 pre-sign staging root is missing.'
+          }
+          $buildStatePath = Join-Path $env:PSH_GOAL5_PRE_SIGN_ROOT 'pre-sign-build.json'
+          $buildState = Get-PshGoal5NonEmptyJson -Path $buildStatePath
+          if ([string]$buildState.phase -cne 'pre-sign' -or [int]$buildState.code -ne 4) {
+              throw 'The package build state is not the expected pre-sign/code-4 handoff.'
+          }
+          $packageRecords = @($buildState.packages)
+          if ($packageRecords.Count -lt 3) {
+              throw 'The pre-sign build state contains fewer than three package records.'
+          }
+          foreach ($packageRecord in $packageRecords) {
+              if (-not [string]::IsNullOrWhiteSpace([string]$packageRecord.archiveRelativePath)) {
+                  throw ('Pre-sign package unexpectedly has an archive path: {0}' -f $packageRecord.name)
+              }
+              if ([string]$packageRecord.version -ceq '0.0.1-test' -and -not [bool]$packageRecord.testOnly) {
+                  throw ('Synthetic package is not marked testOnly: {0}' -f $packageRecord.name)
+              }
+          }
+          $publicRecords = @($packageRecords | Where-Object { -not [bool]$_.testOnly })
+          if ($publicRecords.Count -lt 3 -or @($publicRecords | Where-Object { [string]$_.version -ceq '0.0.1-test' }).Count -ne 0) {
+              throw 'The public pre-sign package set incorrectly exposes the synthetic fixture version.'
+          }
+
+          $manifestFiles = @(Get-ChildItem -LiteralPath $env:PSH_GOAL5_PRE_SIGN_ROOT -Recurse -Force -File -Filter 'package.manifest.json')
+          if ($manifestFiles.Count -lt 3) {
+              throw 'The pre-sign staging root contains fewer than three package manifests.'
+          }
+          foreach ($manifestFile in $manifestFiles) {
+              if ($manifestFile.Length -le 0) {
+                  throw ('A staged package manifest is empty: {0}' -f $manifestFile.FullName)
+              }
+              $manifest = Get-Content -LiteralPath $manifestFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+              if ([string]$manifest.version -ceq '0.0.1-test' -and -not [bool]$manifest.testOnly) {
+                  throw ('A synthetic staged manifest is not testOnly: {0}' -f $manifestFile.FullName)
+              }
+          }
+          $zipFiles = @(Get-ChildItem -LiteralPath $env:PSH_GOAL5_PRE_SIGN_ROOT -Recurse -Force -File | Where-Object { [string]$_.Extension -ieq '.zip' })
+          if ($zipFiles.Count -ne 0) {
+              throw 'Pre-sign staging unexpectedly contains ZIP archives.'
+          }
+          if (Test-Path -LiteralPath (Join-Path $env:PSH_GOAL5_PRE_SIGN_ROOT 'release-assets')) {
+              throw 'Pre-sign staging unexpectedly contains release-assets.'
+          }
+
+          $packageBuildReport = Get-PshGoal5NonEmptyJson -Path (Join-Path $env:PSH_GOAL5_REPORT_ROOT 'package-build-report.json')
+          if ([string]$packageBuildReport.product -cne 'Psh' -or [int]$packageBuildReport.assertions -le 0 -or
+              [string]$packageBuildReport.preSignRoot -cne [IO.Path]::GetFullPath($env:PSH_GOAL5_PRE_SIGN_ROOT) -or
+              [int]$packageBuildReport.deterministicPackages -ne 3 -or [int]$packageBuildReport.publicPackages -ne 3 -or
+              [string]$packageBuildReport.indexPhase -cne 'catalog-deferred' -or
+              [string]$packageBuildReport.artifactPhase -cne 'static-verified-signatures-deferred') {
+              throw 'The package build report does not match the retained pre-sign staging contract.'
+          }
+          $releaseArtifactsReport = Get-PshGoal5NonEmptyJson -Path (Join-Path $env:PSH_GOAL5_REPORT_ROOT 'release-artifacts-report.json')
+          if ([string]$releaseArtifactsReport.phase -cne 'static-verified-signatures-deferred' -or
+              [int]$releaseArtifactsReport.code -ne 4 -or [int]$releaseArtifactsReport.packageCount -ne 3) {
+              throw 'The release artifact report is not the expected build-stage/code-4 handoff.'
+          }
+          $validationReport = [ordered]@{
+              schemaVersion = 1
+              runtime = $env:PSH_GOAL5_RUNTIME
+              phase = 'pre-sign-validated'
+              code = 0
+              packageCount = $packageRecords.Count
+              manifestCount = $manifestFiles.Count
+              zipCount = $zipFiles.Count
+          }
+          $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
+          [IO.File]::WriteAllText((Join-Path $env:PSH_GOAL5_REPORT_ROOT 'workflow-validation-report.json'), (($validationReport | ConvertTo-Json -Depth 5) + "`n"), $utf8)
+
+      - name: Upload Goal 5 reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal5-${{ matrix.runtime }}
+          path: ${{ runner.temp }}\goal5-${{ matrix.runtime }}
+          if-no-files-found: error
+          retention-days: 30
