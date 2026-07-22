@@ -1,0 +1,805 @@
+name: Goal 6 Required CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'goal6/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: goal6-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PSH_GOAL6_VERSION: 0.1.0
+
+jobs:
+  gnu-goldens:
+    name: Ubuntu GNU goldens
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out full source history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate and verify Batch 1, 2, and 4 goldens
+        shell: bash
+        env:
+          PSH_GOLDEN_ROOT: ${{ runner.temp }}/goal6-gnu-goldens
+        run: |
+          set -euo pipefail
+          mkdir -p "$PSH_GOLDEN_ROOT"
+          bash ./scripts/goal3-batch1-goldens.sh "$PSH_GOLDEN_ROOT/batch1"
+          bash ./scripts/goal3-batch2-goldens.sh "$PSH_GOLDEN_ROOT/batch2"
+          bash ./scripts/goal3-batch4-goldens.sh "$PSH_GOLDEN_ROOT/batch4"
+          for batch in batch1 batch2 batch4; do
+            (cd "$PSH_GOLDEN_ROOT/$batch" && sha256sum -c SHA256SUMS)
+          done
+
+      - name: Upload GNU goldens
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal6-gnu-goldens
+          path: ${{ runner.temp }}/goal6-gnu-goldens
+          if-no-files-found: error
+          retention-days: 30
+
+  quality:
+    name: Quality, supply chain, and secret gates
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - name: Initialize quality evidence
+        shell: powershell
+        env:
+          PSH_REPORT_ROOT: ${{ runner.temp }}\goal6-quality-reports
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [void][IO.Directory]::CreateDirectory($env:PSH_REPORT_ROOT)
+          $utf8 = New-Object Text.UTF8Encoding($false, $true)
+          [IO.File]::WriteAllText((Join-Path $env:PSH_REPORT_ROOT 'workflow-started.txt'), "Goal 6 quality workflow started.`n", $utf8)
+
+      - name: Check out all source history and tags
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch exact origin heads and tags
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fetchFailure = $null
+          for ($attempt = 1; $attempt -le 4; $attempt++) {
+              $oldPreference = $ErrorActionPreference
+              $ErrorActionPreference = 'Continue'
+              try {
+                  $fetchOutput = @(& git fetch --force --prune --prune-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' 2>&1)
+                  $fetchExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+                  $global:LASTEXITCODE = 0
+              }
+              finally { $ErrorActionPreference = $oldPreference }
+              if ($fetchExitCode -eq 0) { $fetchFailure = $null; break }
+              $fetchFailure = @($fetchOutput | ForEach-Object { [string]$_ }) -join ' '
+              if ($attempt -lt 4) { Start-Sleep -Seconds 2 }
+          }
+          if ($null -ne $fetchFailure) { throw "Unable to fetch exact origin heads and tags after four attempts: $fetchFailure" }
+          $shallow = @(& git rev-parse --is-shallow-repository)
+          if ([int]$LASTEXITCODE -ne 0 -or (($shallow -join '').Trim()) -cne 'false') {
+              throw 'Goal 6 quality gates require a non-shallow checkout.'
+          }
+          $global:LASTEXITCODE = 0
+
+      - name: Run standalone workflow contract
+        shell: powershell
+        env:
+          PSH_REPORT_ROOT: ${{ runner.temp }}\goal6-quality-reports
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $utf8 = New-Object Text.UTF8Encoding($false, $true)
+          $logPath = Join-Path $env:PSH_REPORT_ROOT 'workflow-contract.log'
+          $summaryPath = Join-Path $env:PSH_REPORT_ROOT 'workflow-contract-summary.json'
+          $output = @()
+          $failure = $null
+          try { $output = @(& (Join-Path $env:GITHUB_WORKSPACE 'tests/Goal6.WorkflowContract.ps1') -RepositoryRoot $env:GITHUB_WORKSPACE 2>&1) }
+          catch { $failure = $_; $output += $_ }
+          [IO.File]::WriteAllText($logPath, ((@($output | ForEach-Object { [string]$_ }) -join "`n") + "`n"), $utf8)
+          $summary = [ordered]@{
+              schemaVersion = 1
+              gate = 'goal6-workflow-contract'
+              status = if ($null -eq $failure) { 'passed' } else { 'failed' }
+              independentFromPester = $true
+              log = 'workflow-contract.log'
+              error = if ($null -eq $failure) { $null } else { [string]$failure.Exception.Message }
+          }
+          [IO.File]::WriteAllText($summaryPath, (($summary | ConvertTo-Json -Depth 5) + "`n"), $utf8)
+          if ($null -ne $failure) { throw $failure }
+
+      - name: Install locked CI dependencies
+        shell: powershell
+        env:
+          PSH_DEPENDENCY_ROOT: ${{ runner.temp }}\goal6-quality-dependencies
+          PSH_REPORT_ROOT: ${{ runner.temp }}\goal6-quality-reports
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/goal6/Install-Goal6CiDependencies.ps1') `
+              -DestinationRoot $env:PSH_DEPENDENCY_ROOT `
+              -RepositoryRoot $env:GITHUB_WORKSPACE `
+              -DependencyId all `
+              -SummaryPath (Join-Path $env:PSH_REPORT_ROOT 'ci-dependencies-summary.json')
+
+      - name: Run quality-gate regressions
+        shell: powershell
+        env:
+          PSH_REPORT_ROOT: ${{ runner.temp }}\goal6-quality-reports
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $logPath = Join-Path $env:PSH_REPORT_ROOT 'quality-gate-regressions.log'
+          Start-Transcript -Path $logPath -Force
+          try { & (Join-Path $env:GITHUB_WORKSPACE 'tests/Goal6.QualityGates.ps1') -RepositoryRoot $env:GITHUB_WORKSPACE }
+          finally { Stop-Transcript }
+
+      - name: Run PSScriptAnalyzer 1.25.0 gate
+        shell: powershell
+        env:
+          PSH_DEPENDENCY_ROOT: ${{ runner.temp }}\goal6-quality-dependencies
+          PSH_REPORT_ROOT: ${{ runner.temp }}\goal6-quality-reports\psscriptanalyzer
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/goal6/Invoke-Goal6PSScriptAnalyzer.ps1') `
+              -DependencyRoot $env:PSH_DEPENDENCY_ROOT `
+              -ReportRoot $env:PSH_REPORT_ROOT `
+              -RepositoryRoot $env:GITHUB_WORKSPACE
+
+      - name: Run dependency, license, checksum, and SBOM gate
+        shell: powershell
+        env:
+          PSH_REPORT_ROOT: ${{ runner.temp }}\goal6-quality-reports\supply-chain
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/goal6/Test-Goal6SupplyChain.ps1') `
+              -ReportRoot $env:PSH_REPORT_ROOT `
+              -RepositoryRoot $env:GITHUB_WORKSPACE
+
+      - name: Run gitleaks 8.30.1 against all refs and worktree
+        shell: powershell
+        env:
+          PSH_DEPENDENCY_ROOT: ${{ runner.temp }}\goal6-quality-dependencies
+          PSH_REPORT_ROOT: ${{ runner.temp }}\goal6-quality-reports\gitleaks
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Item Env:GITLEAKS_CONFIG -ErrorAction SilentlyContinue
+          Remove-Item Env:GITLEAKS_CONFIG_TOML -ErrorAction SilentlyContinue
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/goal6/Invoke-Goal6SecretScan.ps1') `
+              -DependencyRoot $env:PSH_DEPENDENCY_ROOT `
+              -ReportRoot $env:PSH_REPORT_ROOT `
+              -RepositoryRoot $env:GITHUB_WORKSPACE
+
+      - name: Upload quality reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal6-quality-reports
+          path: ${{ runner.temp }}\goal6-quality-reports
+          if-no-files-found: error
+          retention-days: 30
+
+  windows-matrix:
+    name: ${{ matrix.name }}
+    needs: gnu-goldens
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: AMD64 Windows PowerShell 5.1
+            runtime_id: amd64-winps51
+            runner: windows-2022
+            shell: powershell
+            architecture: AMD64
+            expected_edition: Desktop
+            expected_major: 5
+            expected_minor: 1
+          - name: AMD64 PowerShell 7
+            runtime_id: amd64-pwsh7
+            runner: windows-2022
+            shell: pwsh
+            architecture: AMD64
+            expected_edition: Core
+            expected_major: 7
+            expected_minor: 0
+          - name: ARM64 Windows PowerShell 5.1
+            runtime_id: arm64-winps51
+            runner: windows-11-arm
+            shell: powershell
+            architecture: ARM64
+            expected_edition: Desktop
+            expected_major: 5
+            expected_minor: 1
+          - name: ARM64 PowerShell 7
+            runtime_id: arm64-pwsh7
+            runner: windows-11-arm
+            shell: pwsh
+            architecture: ARM64
+            expected_edition: Core
+            expected_major: 7
+            expected_minor: 0
+    env:
+      PSH_RUNTIME_ID: ${{ matrix.runtime_id }}
+      PSH_EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+      PSH_EXPECTED_EDITION: ${{ matrix.expected_edition }}
+      PSH_EXPECTED_MAJOR: ${{ matrix.expected_major }}
+      PSH_EXPECTED_MINOR: ${{ matrix.expected_minor }}
+
+    steps:
+      - name: Initialize runtime evidence
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $reportRoot = Join-Path $env:RUNNER_TEMP ('goal6-runtime-' + $env:PSH_RUNTIME_ID)
+          [void][IO.Directory]::CreateDirectory($reportRoot)
+          $utf8 = New-Object Text.UTF8Encoding($false, $true)
+          [IO.File]::WriteAllText((Join-Path $reportRoot 'workflow-started.txt'), "Goal 6 runtime workflow started.`n", $utf8)
+
+      - name: Check out full source history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download GNU goldens
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal6-gnu-goldens
+          path: ${{ runner.temp }}\goal6-gnu-goldens
+
+      - name: Install hash-verified Pester 5.9.0
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dependencyRoot = Join-Path $env:RUNNER_TEMP ('goal6-pester-' + $env:PSH_RUNTIME_ID)
+          $reportRoot = Join-Path $env:RUNNER_TEMP ('goal6-runtime-' + $env:PSH_RUNTIME_ID)
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/goal6/Install-Goal6CiDependencies.ps1') `
+              -DestinationRoot $dependencyRoot `
+              -RepositoryRoot $env:GITHUB_WORKSPACE `
+              -DependencyId pester `
+              -SummaryPath (Join-Path $reportRoot 'pester-install-summary.json')
+
+      - name: Run exactly 27 Pester 5.9.0 cases in Windows PowerShell 5.1
+        if: ${{ matrix.expected_edition == 'Desktop' }}
+        shell: powershell
+        env:
+          PSH_GOLDEN_ROOT: ${{ runner.temp }}\goal6-gnu-goldens
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dependencyRoot = Join-Path $env:RUNNER_TEMP ('goal6-pester-' + $env:PSH_RUNTIME_ID)
+          $pesterManifest = Join-Path $dependencyRoot 'Pester\5.9.0\Pester.psd1'
+          $reportRoot = Join-Path $env:RUNNER_TEMP ('goal6-runtime-' + $env:PSH_RUNTIME_ID)
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/Invoke-Goal6Pester.ps1') `
+              -PesterVersion '5.9.0' `
+              -PesterModulePath $pesterManifest `
+              -RepositoryRoot $env:GITHUB_WORKSPACE `
+              -GoldenRoot $env:PSH_GOLDEN_ROOT `
+              -ReportRoot $reportRoot `
+              -ExpectedArchitecture $env:PSH_EXPECTED_ARCHITECTURE
+
+      - name: Run exactly 27 Pester 5.9.0 cases in PowerShell 7
+        if: ${{ matrix.expected_edition == 'Core' }}
+        shell: pwsh
+        env:
+          PSH_GOLDEN_ROOT: ${{ runner.temp }}\goal6-gnu-goldens
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dependencyRoot = Join-Path $env:RUNNER_TEMP ('goal6-pester-' + $env:PSH_RUNTIME_ID)
+          $pesterManifest = Join-Path $dependencyRoot 'Pester\5.9.0\Pester.psd1'
+          $reportRoot = Join-Path $env:RUNNER_TEMP ('goal6-runtime-' + $env:PSH_RUNTIME_ID)
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/Invoke-Goal6Pester.ps1') `
+              -PesterVersion '5.9.0' `
+              -PesterModulePath $pesterManifest `
+              -RepositoryRoot $env:GITHUB_WORKSPACE `
+              -GoldenRoot $env:PSH_GOLDEN_ROOT `
+              -ReportRoot $reportRoot `
+              -ExpectedArchitecture $env:PSH_EXPECTED_ARCHITECTURE
+
+      - name: Validate exact runtime summary
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $reportRoot = Join-Path $env:RUNNER_TEMP ('goal6-runtime-' + $env:PSH_RUNTIME_ID)
+          $summaryPath = Join-Path $reportRoot 'goal6-pester-summary.json'
+          $summary = Get-Content -LiteralPath $summaryPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+          if ([string]$summary.pesterVersion -cne '5.9.0' -or [string]$summary.result -cne 'Passed' -or
+              [int]$summary.totalCount -ne 27 -or [int]$summary.passedCount -ne 27 -or
+              [int]$summary.failedCount -ne 0 -or [int]$summary.skippedCount -ne 0 -or [int]$summary.notRunCount -ne 0) {
+              throw 'The runtime did not report exactly 27 passed Pester 5.9.0 cases with zero failed, skipped, or not-run cases.'
+          }
+          if (-not [bool]$summary.runtime.is64BitProcess -or
+              [string]$summary.runtime.expectedArchitecture -cne $env:PSH_EXPECTED_ARCHITECTURE -or
+              [string]$summary.runtime.processArchitecture -cne $env:PSH_EXPECTED_ARCHITECTURE -or
+              [string]$summary.runtime.osArchitecture -cne $env:PSH_EXPECTED_ARCHITECTURE) {
+              throw 'The runtime summary does not prove a native 64-bit process for the matrix architecture.'
+          }
+          if ([string]$summary.runtime.edition -cne $env:PSH_EXPECTED_EDITION) {
+              throw 'The runtime summary has the wrong PowerShell edition.'
+          }
+          $runtimeVersion = [Version]$summary.runtime.version
+          if ($env:PSH_EXPECTED_EDITION -ceq 'Desktop') {
+              if ($runtimeVersion.Major -ne 5 -or $runtimeVersion.Minor -ne 1) { throw 'The Desktop matrix entry is not Windows PowerShell 5.1.' }
+          }
+          elseif ($runtimeVersion.Major -lt [int]$env:PSH_EXPECTED_MAJOR) {
+              throw 'The Core matrix entry is older than PowerShell 7.'
+          }
+
+      - name: Upload runtime reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal6-runtime-${{ matrix.runtime_id }}
+          path: ${{ runner.temp }}\goal6-runtime-${{ matrix.runtime_id }}
+          if-no-files-found: error
+          retention-days: 30
+
+  candidate:
+    name: Canonical candidate and reproducibility
+    runs-on: windows-2022
+    timeout-minutes: 180
+    env:
+      PSH_SOURCE_COMMIT: ${{ github.sha }}
+
+    steps:
+      - name: Initialize candidate evidence
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $reportRoot = Join-Path $env:RUNNER_TEMP 'goal6-candidate-reports'
+          [void][IO.Directory]::CreateDirectory($reportRoot)
+          [void][IO.Directory]::CreateDirectory((Join-Path $env:RUNNER_TEMP 'goal6-bootstrapper'))
+          $utf8 = New-Object Text.UTF8Encoding($false, $true)
+          [IO.File]::WriteAllText((Join-Path $reportRoot 'workflow-started.txt'), "Goal 6 candidate workflow started.`n", $utf8)
+
+      - name: Check out full source history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build real deterministic bootstrapper
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $utf8 = New-Object Text.UTF8Encoding($false, $true)
+          $bootstrapperRoot = Join-Path $env:RUNNER_TEMP 'goal6-bootstrapper'
+          $bootstrapperPath = Join-Path $bootstrapperRoot 'psh-installer.exe'
+          $hashSourcePath = Join-Path $bootstrapperRoot 'EmbeddedScriptHashes.g.cs'
+          $buildOutput = @(& (Join-Path $env:GITHUB_WORKSPACE 'scripts/Build-PshBootstrapper.ps1') `
+                  -OnlineScriptPath (Join-Path $env:GITHUB_WORKSPACE 'src/install/install.ps1') `
+                  -OfflineScriptPath (Join-Path $env:GITHUB_WORKSPACE 'src/install/install-offline.ps1') `
+                  -OutputPath $bootstrapperPath `
+                  -HashSourcePath $hashSourcePath 2>&1)
+          [IO.File]::WriteAllText((Join-Path (Join-Path $env:RUNNER_TEMP 'goal6-candidate-reports') 'bootstrapper-build.log'), ((@($buildOutput | ForEach-Object { [string]$_ }) -join "`n") + "`n"), $utf8)
+          if (-not [IO.File]::Exists($bootstrapperPath) -or (Get-Item -LiteralPath $bootstrapperPath).Length -le 0) {
+              throw 'The real AnyCPU bootstrapper build produced no executable.'
+          }
+
+      - name: Build and verify the canonical 13-file candidate once
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidateRoot = Join-Path $env:RUNNER_TEMP 'goal6-candidate'
+          $reportRoot = Join-Path $env:RUNNER_TEMP 'goal6-candidate-reports'
+          $candidateReportPath = Join-Path $reportRoot 'candidate-report.json'
+          $candidateWorkingRoot = Join-Path $env:RUNNER_TEMP 'goal6-candidate-working'
+          $bootstrapperPath = Join-Path (Join-Path $env:RUNNER_TEMP 'goal6-bootstrapper') 'psh-installer.exe'
+          $candidateOutput = @(& (Join-Path $env:GITHUB_WORKSPACE 'scripts/goal6/New-Goal6Candidate.ps1') `
+                  -CandidateRoot $candidateRoot `
+                  -ReportPath $candidateReportPath `
+                  -Version $env:PSH_GOAL6_VERSION `
+                  -SourceCommit $env:PSH_SOURCE_COMMIT `
+                  -BootstrapperPath $bootstrapperPath `
+                  -ReleaseNotesPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.md') `
+                  -ReleaseNotesZhCnPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.zh-CN.md') `
+                  -RepositoryRoot $env:GITHUB_WORKSPACE `
+                  -WorkingRoot $candidateWorkingRoot)
+          $candidateResults = @($candidateOutput | Where-Object { $null -ne $_.PSObject.Properties['phase'] -and [string]$_.phase -ceq 'candidate-verified' })
+          if ($candidateResults.Count -ne 1 -or [int]$candidateResults[0].code -ne 0 -or
+              [int]$candidateResults[0].assetCount -ne 13 -or -not [bool]$candidateResults[0].catalogMembershipVerified) {
+              throw 'The canonical candidate driver did not return one candidate-verified exact-13 result.'
+          }
+
+          $candidateReport = Get-Content -LiteralPath $candidateReportPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+          if ([string]$candidateReport.phase -cne 'candidate-verified' -or [int]$candidateReport.code -ne 0 -or
+              [string]$candidateReport.version -cne $env:PSH_GOAL6_VERSION -or [string]$candidateReport.sourceCommit -cne $env:PSH_SOURCE_COMMIT -or
+              [string]$candidateReport.assetContract -cne 'exact-13-public-assets-before-provenance-attestation' -or
+              [string]$candidateReport.provenanceAttestation -cne 'external-workflow-gate' -or
+              [int]$candidateReport.assetCount -ne 13 -or [int]$candidateReport.packageCount -ne 3 -or
+              -not [bool]$candidateReport.catalogMembershipVerified -or @($candidateReport.assets).Count -ne 13) {
+              throw 'The canonical candidate report failed its phase, source, asset, catalog, or provenance contract.'
+          }
+          $expectedNames = @(
+              'install.ps1',
+              'install.sh',
+              'psh-installer.exe',
+              "psh-$($env:PSH_GOAL6_VERSION)-core.zip",
+              "psh-$($env:PSH_GOAL6_VERSION)-full-win-x64.zip",
+              "psh-$($env:PSH_GOAL6_VERSION)-full-win-arm64.zip",
+              'sbom.spdx.json',
+              'THIRD_PARTY_NOTICES.md',
+              'RELEASE_NOTES.md',
+              'RELEASE_NOTES.zh-CN.md',
+              "psh-release-$($env:PSH_GOAL6_VERSION).json",
+              'SHA256SUMS',
+              "psh-release-$($env:PSH_GOAL6_VERSION).cat"
+          )
+          $entries = @(Get-ChildItem -LiteralPath $candidateRoot -Force)
+          $unsafeEntries = @($entries | Where-Object {
+                  $_.PSIsContainer -or
+                  (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+                  ($null -ne $_.PSObject.Properties['LinkType'] -and -not [string]::IsNullOrWhiteSpace([string]$_.LinkType))
+              })
+          if ($entries.Count -ne 13 -or $unsafeEntries.Count -ne 0) {
+              throw 'The canonical candidate root does not contain exactly 13 regular non-reparse files.'
+          }
+          foreach ($expectedName in $expectedNames) {
+              $entry = @($entries | Where-Object { [string]$_.Name -ceq $expectedName })
+              $record = @($candidateReport.assets | Where-Object { [string]$_.name -ceq $expectedName })
+              if ($entry.Count -ne 1 -or $record.Count -ne 1 -or [int64]$entry[0].Length -ne [int64]$record[0].length -or
+                  ([string](Get-FileHash -LiteralPath $entry[0].FullName -Algorithm SHA256).Hash).ToLowerInvariant() -cne [string]$record[0].sha256) {
+                  throw "Canonical candidate bytes do not match the verified report for $expectedName."
+              }
+          }
+          if ([IO.File]::Exists($candidateWorkingRoot) -or [IO.Directory]::Exists($candidateWorkingRoot)) {
+              throw 'The canonical candidate retained its controlled working root.'
+          }
+
+      - name: Run candidate and catalog contract regressions
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $contractRoot = Join-Path $env:RUNNER_TEMP 'goal6-candidate-contract'
+          & (Join-Path $env:GITHUB_WORKSPACE 'tests/Goal6.CandidateArtifacts.ps1') `
+              -RepositoryRoot $env:GITHUB_WORKSPACE `
+              -ReportRoot $contractRoot
+          $retainedRoot = Join-Path (Join-Path $env:RUNNER_TEMP 'goal6-candidate-reports') 'candidate-contract'
+          [void][IO.Directory]::CreateDirectory($retainedRoot)
+          foreach ($relativePath in @('Goal6.CandidateArtifacts.summary.json', 'candidate-report.json')) {
+              $sourcePath = Join-Path $contractRoot $relativePath
+              if (-not [IO.File]::Exists($sourcePath)) { throw "Candidate contract report is missing: $relativePath" }
+              [IO.File]::Copy($sourcePath, (Join-Path $retainedRoot $relativePath), $false)
+          }
+
+      - name: Scan canonical candidate with Defender or mandatory SHA inventory
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/goal6/Invoke-Goal6DefenderScan.ps1') `
+              -CandidateAssetsRoot (Join-Path $env:RUNNER_TEMP 'goal6-candidate') `
+              -ReportRoot (Join-Path (Join-Path $env:RUNNER_TEMP 'goal6-candidate-reports') 'defender')
+
+      - name: Build two independent real candidates for reproducibility
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $reproRoot = Join-Path $env:RUNNER_TEMP 'goal6-reproducibility-work'
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/goal6/Test-Goal6Reproducibility.ps1') `
+              -OutputRoot $reproRoot `
+              -Version $env:PSH_GOAL6_VERSION `
+              -SourceCommit $env:PSH_SOURCE_COMMIT `
+              -ReleaseNotesPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.md') `
+              -ReleaseNotesZhCnPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.zh-CN.md') `
+              -RepositoryRoot $env:GITHUB_WORKSPACE
+          $retainedRoot = Join-Path (Join-Path $env:RUNNER_TEMP 'goal6-candidate-reports') 'reproducibility'
+          [void][IO.Directory]::CreateDirectory($retainedRoot)
+          foreach ($relativePath in @(
+                  'build-1.manifest.json',
+                  'build-2.manifest.json',
+                  'reproducibility-diff.json',
+                  'reproducibility-summary.json',
+                  'run-1/bootstrapper-build.log',
+                  'run-1/candidate-build.log',
+                  'run-1/candidate-report.json',
+                  'run-2/bootstrapper-build.log',
+                  'run-2/candidate-build.log',
+                  'run-2/candidate-report.json')) {
+              $sourcePath = Join-Path $reproRoot $relativePath
+              if (-not [IO.File]::Exists($sourcePath)) { throw "Reproducibility report is missing: $relativePath" }
+              $destinationPath = Join-Path $retainedRoot $relativePath
+              [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destinationPath))
+              [IO.File]::Copy($sourcePath, $destinationPath, $false)
+          }
+
+      - name: Upload canonical candidate bytes
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal6-candidate-exact-13
+          path: ${{ runner.temp }}\goal6-candidate
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload candidate reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal6-candidate-reports
+          path: ${{ runner.temp }}\goal6-candidate-reports
+          if-no-files-found: error
+          retention-days: 30
+
+  attest:
+    name: GitHub provenance for verified candidate bytes
+    needs:
+      - gnu-goldens
+      - quality
+      - windows-matrix
+      - candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Initialize provenance evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $reportRoot = Join-Path $env:RUNNER_TEMP 'goal6-attestation-reports'
+          [void][IO.Directory]::CreateDirectory($reportRoot)
+          $utf8 = [Text.UTF8Encoding]::new($false, $true)
+          [IO.File]::WriteAllText((Join-Path $reportRoot 'workflow-started.txt'), "Goal 6 provenance workflow started.`n", $utf8)
+
+      - name: Download canonical candidate bytes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal6-candidate-exact-13
+          path: ${{ runner.temp }}/goal6-attest/candidate
+
+      - name: Download canonical candidate report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal6-candidate-reports
+          path: ${{ runner.temp }}/goal6-attest/reports
+
+      - name: Verify the exact 13 attestation subjects
+        shell: pwsh
+        env:
+          PSH_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidateRoot = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'goal6-attest/candidate'))
+          $candidateReportPath = Join-Path $env:RUNNER_TEMP 'goal6-attest/reports/candidate-report.json'
+          $candidateReport = Get-Content -LiteralPath $candidateReportPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+          if ([string]$candidateReport.phase -cne 'candidate-verified' -or [int]$candidateReport.code -ne 0 -or
+              [string]$candidateReport.sourceCommit -cne $env:PSH_SOURCE_COMMIT -or
+              [string]$candidateReport.assetContract -cne 'exact-13-public-assets-before-provenance-attestation' -or
+              [string]$candidateReport.provenanceAttestation -cne 'external-workflow-gate' -or
+              [int]$candidateReport.assetCount -ne 13 -or @($candidateReport.assets).Count -ne 13 -or
+              -not [bool]$candidateReport.catalogMembershipVerified) {
+              throw 'The downloaded candidate report is not the verified exact-13 source-commit report.'
+          }
+          $entries = @(Get-ChildItem -LiteralPath $candidateRoot -Force)
+          $unsafeEntries = @($entries | Where-Object {
+                  $_.PSIsContainer -or
+                  (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+                  ($null -ne $_.PSObject.Properties['LinkType'] -and -not [string]::IsNullOrWhiteSpace([string]$_.LinkType))
+              })
+          if ($entries.Count -ne 13 -or $unsafeEntries.Count -ne 0) {
+              throw 'The downloaded candidate does not contain exactly 13 regular non-reparse files.'
+          }
+          $checksums = New-Object Collections.Generic.List[string]
+          foreach ($record in @($candidateReport.assets)) {
+              $matches = @($entries | Where-Object { [string]$_.Name -ceq [string]$record.name })
+              if ($matches.Count -ne 1 -or [int64]$matches[0].Length -ne [int64]$record.length) {
+                  throw "Attestation subject size mismatch: $($record.name)"
+              }
+              $sha256 = ([string](Get-FileHash -LiteralPath $matches[0].FullName -Algorithm SHA256).Hash).ToLowerInvariant()
+              if ($sha256 -cne [string]$record.sha256) { throw "Attestation subject SHA256 mismatch: $($record.name)" }
+              [void]$checksums.Add("$sha256  $($record.name)")
+          }
+          if (@($candidateReport.assets.name | Sort-Object -Unique).Count -ne 13) {
+              throw 'The candidate report does not contain 13 unique attestation subject names.'
+          }
+          $utf8 = [Text.UTF8Encoding]::new($false, $true)
+          [IO.File]::WriteAllText((Join-Path (Join-Path $env:RUNNER_TEMP 'goal6-attestation-reports') 'verified-subjects.sha256'), (($checksums.ToArray() -join "`n") + "`n"), $utf8)
+
+      - name: Attest all 13 verified candidate files
+        id: provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1; official refs/tags/v4 annotated tag peels to this commit
+        with:
+          subject-path: ${{ runner.temp }}/goal6-attest/candidate/*
+
+      - name: Record external provenance evidence
+        shell: pwsh
+        env:
+          PSH_ATTESTATION_ID: ${{ steps.provenance.outputs.attestation-id }}
+          PSH_ATTESTATION_URL: ${{ steps.provenance.outputs.attestation-url }}
+          PSH_ATTESTATION_BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+          PSH_ATTESTATION_STORAGE_RECORD_IDS: ${{ steps.provenance.outputs.storage-record-ids }}
+          PSH_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:PSH_ATTESTATION_ID) -or [string]::IsNullOrWhiteSpace($env:PSH_ATTESTATION_URL)) {
+              throw 'The provenance action returned no attestation ID or URL.'
+          }
+          $candidateRoot = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'goal6-attest/candidate')).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+          $reportRoot = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'goal6-attestation-reports'))
+          $candidateReportPath = Join-Path $env:RUNNER_TEMP 'goal6-attest/reports/candidate-report.json'
+          $candidateReport = Get-Content -LiteralPath $candidateReportPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+          $retainedBundle = $null
+          $originalBundlePath = $null
+          if (-not [string]::IsNullOrWhiteSpace($env:PSH_ATTESTATION_BUNDLE_PATH)) {
+              $originalBundlePath = [IO.Path]::GetFullPath($env:PSH_ATTESTATION_BUNDLE_PATH)
+              if (-not [IO.File]::Exists($originalBundlePath)) { throw 'The provenance action bundle path does not exist.' }
+              if ($originalBundlePath.StartsWith($candidateRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::Ordinal)) {
+                  throw 'The provenance action wrote its bundle into the canonical candidate root.'
+              }
+              $retainedBundle = 'attestation-bundle.jsonl'
+              [IO.File]::Copy($originalBundlePath, (Join-Path $reportRoot $retainedBundle), $false)
+          }
+          $subjects = @($candidateReport.assets | ForEach-Object {
+                  [ordered]@{ name = [string]$_.name; length = [int64]$_.length; sha256 = [string]$_.sha256 }
+              })
+          $report = [ordered]@{
+              schemaVersion = 1
+              gate = 'github-build-provenance'
+              status = 'passed'
+              sourceCommit = $env:PSH_SOURCE_COMMIT
+              candidateAssetContract = 'exact-13-public-assets-before-provenance-attestation'
+              subjectCount = 13
+              subjects = $subjects
+              attestationId = $env:PSH_ATTESTATION_ID
+              attestationUrl = $env:PSH_ATTESTATION_URL
+              storageRecordIds = $env:PSH_ATTESTATION_STORAGE_RECORD_IDS
+              actionBundlePath = $originalBundlePath
+              retainedBundle = $retainedBundle
+              evidenceLocation = 'external-to-candidate-root'
+          }
+          $utf8 = [Text.UTF8Encoding]::new($false, $true)
+          [IO.File]::WriteAllText((Join-Path $reportRoot 'provenance-summary.json'), (($report | ConvertTo-Json -Depth 8) + "`n"), $utf8)
+          $candidateEntries = @(Get-ChildItem -LiteralPath $candidateRoot -Force)
+          $unsafeCandidateEntries = @($candidateEntries | Where-Object {
+                  $_.PSIsContainer -or
+                  (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+                  ($null -ne $_.PSObject.Properties['LinkType'] -and -not [string]::IsNullOrWhiteSpace([string]$_.LinkType))
+              })
+          if ($candidateEntries.Count -ne 13 -or $unsafeCandidateEntries.Count -ne 0) {
+              throw 'External provenance evidence changed the canonical candidate root.'
+          }
+
+      - name: Upload provenance reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal6-provenance-reports
+          path: ${{ runner.temp }}/goal6-attestation-reports
+          if-no-files-found: error
+          retention-days: 30
+
+  evidence:
+    name: Retained Goal 6 evidence
+    needs:
+      - gnu-goldens
+      - quality
+      - windows-matrix
+      - candidate
+      - attest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out full source history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download GNU golden evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal6-gnu-goldens
+          path: ${{ runner.temp }}/goal6-evidence/gnu-goldens
+
+      - name: Download quality reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal6-quality-reports
+          path: ${{ runner.temp }}/goal6-evidence/reports/quality
+
+      - name: Download AMD64 Windows PowerShell 5.1 reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal6-runtime-amd64-winps51
+          path: ${{ runner.temp }}/goal6-evidence/reports/runtime/amd64-winps51
+
+      - name: Download AMD64 PowerShell 7 reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal6-runtime-amd64-pwsh7
+          path: ${{ runner.temp }}/goal6-evidence/reports/runtime/amd64-pwsh7
+
+      - name: Download ARM64 Windows PowerShell 5.1 reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal6-runtime-arm64-winps51
+          path: ${{ runner.temp }}/goal6-evidence/reports/runtime/arm64-winps51
+
+      - name: Download ARM64 PowerShell 7 reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal6-runtime-arm64-pwsh7
+          path: ${{ runner.temp }}/goal6-evidence/reports/runtime/arm64-pwsh7
+
+      - name: Download candidate reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal6-candidate-reports
+          path: ${{ runner.temp }}/goal6-evidence/reports/candidate
+
+      - name: Download provenance reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: goal6-provenance-reports
+          path: ${{ runner.temp }}/goal6-evidence/reports/provenance
+
+      - name: Retain compatibility specification and verify report set
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP 'goal6-evidence'
+          $specificationRoot = Join-Path $evidenceRoot 'specification'
+          [void][IO.Directory]::CreateDirectory((Join-Path $specificationRoot 'docs'))
+          [void][IO.Directory]::CreateDirectory((Join-Path $specificationRoot 'generated'))
+          [IO.File]::Copy((Join-Path $env:GITHUB_WORKSPACE 'docs/compatibility.md'), (Join-Path $specificationRoot 'docs/compatibility.md'), $false)
+          [IO.File]::Copy((Join-Path $env:GITHUB_WORKSPACE 'generated/commands.json'), (Join-Path $specificationRoot 'generated/commands.json'), $false)
+          $requiredPaths = @(
+              'specification/docs/compatibility.md',
+              'specification/generated/commands.json',
+              'reports/runtime/amd64-winps51/goal6-pester-summary.json',
+              'reports/runtime/amd64-pwsh7/goal6-pester-summary.json',
+              'reports/runtime/arm64-winps51/goal6-pester-summary.json',
+              'reports/runtime/arm64-pwsh7/goal6-pester-summary.json',
+              'reports/quality/workflow-contract-summary.json',
+              'reports/quality/psscriptanalyzer/psscriptanalyzer-summary.json',
+              'reports/quality/supply-chain/dependency-license-sbom-summary.json',
+              'reports/quality/gitleaks/gitleaks-summary.json',
+              'reports/candidate/candidate-report.json',
+              'reports/candidate/candidate-contract/Goal6.CandidateArtifacts.summary.json',
+              'reports/candidate/defender/defender-summary.json',
+              'reports/candidate/defender/defender-asset-inventory.json',
+              'reports/candidate/reproducibility/reproducibility-summary.json',
+              'reports/provenance/provenance-summary.json'
+          )
+          foreach ($relativePath in $requiredPaths) {
+              $path = Join-Path $evidenceRoot $relativePath
+              if (-not [IO.File]::Exists($path) -or (Get-Item -LiteralPath $path).Length -le 0) {
+                  throw "Required Goal 6 retained evidence is missing or empty: $relativePath"
+              }
+          }
+          $workflowContractSummary = Get-Content -LiteralPath (Join-Path $evidenceRoot 'reports/quality/workflow-contract-summary.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+          if ([string]$workflowContractSummary.status -cne 'passed' -or -not [bool]$workflowContractSummary.independentFromPester) {
+              throw 'The retained workflow contract summary did not pass independently from Pester.'
+          }
+          $candidateContractSummary = Get-Content -LiteralPath (Join-Path $evidenceRoot 'reports/candidate/candidate-contract/Goal6.CandidateArtifacts.summary.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+          if ([string]$candidateContractSummary.status -cne 'passed' -or [string]$candidateContractSummary.platform -cne 'windows' -or
+              [int]$candidateContractSummary.assetCount -ne 13 -or -not [bool]$candidateContractSummary.catalogMembershipVerified -or
+              [string]$candidateContractSummary.provenanceAttestation -cne 'not-created-by-this-gate') {
+              throw 'The retained candidate catalog contract summary did not pass its exact-13 external-provenance contract.'
+          }
+
+      - name: Upload complete Goal 6 evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: goal6-complete-evidence
+          path: ${{ runner.temp }}/goal6-evidence
+          if-no-files-found: error
+          retention-days: 30
