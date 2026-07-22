@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "manifest": {
+    "created": "2026-07-22T00:00:00Z",
+    "namespaceSeed": "goal6-ci-quality-dependencies-v1"
+  },
+  "dependencies": [
+    {
+      "id": "gitleaks",
+      "displayName": "gitleaks",
+      "version": "8.30.1",
+      "usage": "ci-only-secret-scanner",
+      "platform": "windows-x64",
+      "source": {
+        "repository": "https://github.com/gitleaks/gitleaks",
+        "tag": "v8.30.1",
+        "commit": "83d9cd684c87d95d656c1458ef04895a7f1cbd8e",
+        "releaseUrl": "https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1"
+      },
+      "package": {
+        "url": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_windows_x64.zip",
+        "fileName": "gitleaks_8.30.1_windows_x64.zip",
+        "archiveType": "zip",
+        "sha256": "d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e",
+        "size": 8438883,
+        "checksumsUrl": "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_checksums.txt",
+        "checksumsSha256": "061476c21adaf5441516f96f185c1a4706a83cd6329b9b38762271b3d4a52fae",
+        "checksumsSize": 999,
+        "executableArchivePath": "gitleaks.exe",
+        "installedRelativePath": "gitleaks/8.30.1/win-x64/gitleaks.exe",
+        "installedSha256": "17157e2ee8b76fc8b1d8bee607a250e34b8a8023c8bc81822d4b5ee4d78fcb7c",
+        "installedSize": 22575104,
+        "peMachine": "0x8664"
+      },
+      "license": {
+        "spdxId": "MIT",
+        "archivePath": "LICENSE",
+        "sourceUrl": "https://raw.githubusercontent.com/gitleaks/gitleaks/83d9cd684c87d95d656c1458ef04895a7f1cbd8e/LICENSE",
+        "retainedPath": "scripts/goal6/licenses/gitleaks-8.30.1/LICENSE",
+        "sha256": "e3884b252b3bfc045e55be43a34d1e80da070bc6f804ac95bf4660e97d62ebc6",
+        "size": 1069
+      },
+      "provenance": {
+        "retainedPath": "scripts/goal6/licenses/gitleaks-8.30.1/PROVENANCE.md",
+        "sha256": "af11ff5e137d13b7e59eccd2d4810aaec09a05c0b5210332b7d56add4d970ec1"
+      }
+    },
+    {
+      "id": "psscriptanalyzer",
+      "displayName": "PSScriptAnalyzer",
+      "version": "1.25.0",
+      "usage": "ci-only-powershell-static-analysis",
+      "platform": "any",
+      "source": {
+        "repository": "https://github.com/PowerShell/PSScriptAnalyzer",
+        "tag": "1.25.0",
+        "commit": "f05704df81b2aca17dc027ee39b3fce106d418fc",
+        "galleryMetadataUrl": "https://www.powershellgallery.com/api/v2/Packages(Id='PSScriptAnalyzer',Version='1.25.0')"
+      },
+      "package": {
+        "url": "https://www.powershellgallery.com/api/v2/package/PSScriptAnalyzer/1.25.0",
+        "fileName": "PSScriptAnalyzer.1.25.0.nupkg",
+        "archiveType": "zip",
+        "sha256": "14e634c828eb98efb9f40b2918ba90f139ed5eccdf663a2a747736d996995d60",
+        "galleryHashAlgorithm": "SHA512",
+        "gallerySha512Base64": "5/tXMmLmBLqymRSuYpIdJLl8L4i1GbQSd7QD72zhY/FLfRs23HNEmmjlrlqNlQKJGxDCZBMf0YE63ym/ExwWYw==",
+        "size": 14658674,
+        "moduleManifestArchivePath": "PSScriptAnalyzer.psd1",
+        "installedRelativePath": "PSScriptAnalyzer/1.25.0/PSScriptAnalyzer.psd1",
+        "installedSha256": "2b219f688bcdd67101040f845e530b22907d39bbf49089b4b5b2afaba7996791",
+        "installedSize": 17822
+      },
+      "license": {
+        "spdxId": "MIT",
+        "archivePath": "LICENSE",
+        "sourceUrl": "https://raw.githubusercontent.com/PowerShell/PSScriptAnalyzer/f05704df81b2aca17dc027ee39b3fce106d418fc/LICENSE",
+        "retainedPath": "scripts/goal6/licenses/PSScriptAnalyzer-1.25.0/LICENSE",
+        "sha256": "646f8936b8ddcd14e13e578ff6857e368780b0d1a4f6066bee89211923a373e2",
+        "size": 1073
+      },
+      "provenance": {
+        "retainedPath": "scripts/goal6/licenses/PSScriptAnalyzer-1.25.0/PROVENANCE.md",
+        "sha256": "edb48eeaf6649bede632b4c4c5e98f4b755b90fdc9fb8909e6dfc51ddf1a06f0"
+      }
+    }
+  ]
+}

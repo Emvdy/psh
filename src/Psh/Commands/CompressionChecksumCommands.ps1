@@ -248,7 +248,7 @@ function Split-PshChecksumRecords {
         if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
         $reader = New-Object IO.StringReader($text)
         try {
-            while (($line = $reader.ReadLine()) -ne $null) { $records.Add([string]$line) }
+            while ($null -ne ($line = $reader.ReadLine())) { $records.Add([string]$line) }
         }
         finally { $reader.Dispose() }
         return $records.ToArray()

@@ -283,12 +283,7 @@ function Get-PshProcessCommandLine {
         try {
             $query = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = {0}' -f $Process.Id) -ErrorAction Stop
         }
-        catch {
-            try {
-                $query = Get-WmiObject -Class Win32_Process -Filter ('ProcessId = {0}' -f $Process.Id) -ErrorAction Stop
-            }
-            catch { $query = $null }
-        }
+        catch { $query = $null }
     }
     if ($null -ne $query) {
         try {
@@ -355,12 +350,7 @@ function Get-PshProcessParentId {
         try {
             $query = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = {0}' -f $ProcessId) -ErrorAction Stop
         }
-        catch {
-            try {
-                $query = Get-WmiObject -Class Win32_Process -Filter ('ProcessId = {0}' -f $ProcessId) -ErrorAction Stop
-            }
-            catch { $query = $null }
-        }
+        catch { $query = $null }
     }
     if ($null -ne $query) {
         try { return [int]$query.ParentProcessId } catch { }

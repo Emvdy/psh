@@ -1,0 +1,282 @@
+# Copyright (C) 2026 Emvdy
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+#Requires -Version 5.1
+
+Set-StrictMode -Version 2.0
+
+function Assert-PshGoal6Condition {
+    param(
+        [Parameter(Mandatory = $true)][bool]$Condition,
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+
+    if (-not $Condition) { throw $Message }
+}
+
+function Get-PshGoal6Utf8Encoding {
+    return (New-Object Text.UTF8Encoding -ArgumentList @($false, $true))
+}
+
+function Get-PshGoal6StrictText {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    Assert-PshGoal6Condition ([IO.File]::Exists($Path)) "Required file is missing: $Path"
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    Assert-PshGoal6Condition (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) "File must be UTF-8 without a BOM: $Path"
+    try { return (Get-PshGoal6Utf8Encoding).GetString($bytes) }
+    catch { throw "File is not valid UTF-8: $Path" }
+}
+
+function Write-PshGoal6Text {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $parent = [IO.Path]::GetDirectoryName($fullPath)
+    if (-not [string]::IsNullOrWhiteSpace($parent)) { [void][IO.Directory]::CreateDirectory($parent) }
+    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
+    [IO.File]::WriteAllText($fullPath, $normalized, (Get-PshGoal6Utf8Encoding))
+}
+
+function Write-PshGoal6Json {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowNull()][object]$InputObject,
+        [int]$Depth = 30
+    )
+
+    $json = if ($null -eq $InputObject) { 'null' } else { [string](ConvertTo-Json -InputObject $InputObject -Depth $Depth) }
+    Write-PshGoal6Text -Path $Path -Text ($json + "`n")
+}
+
+function Get-PshGoal6Sha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    Assert-PshGoal6Condition ([IO.File]::Exists($Path)) "File to hash is missing: $Path"
+    $stream = [IO.File]::OpenRead($Path)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+    finally { $algorithm.Dispose(); $stream.Dispose() }
+}
+
+function Get-PshGoal6Sha512Base64 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    Assert-PshGoal6Condition ([IO.File]::Exists($Path)) "File to hash is missing: $Path"
+    $stream = [IO.File]::OpenRead($Path)
+    $algorithm = [Security.Cryptography.SHA512]::Create()
+    try { return [Convert]::ToBase64String($algorithm.ComputeHash($stream)) }
+    finally { $algorithm.Dispose(); $stream.Dispose() }
+}
+
+function Get-PshGoal6Property {
+    param(
+        [AllowNull()][object]$InputObject,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($null -eq $InputObject) { return $null }
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Get-PshGoal6PropertyName {
+    param([Parameter(Mandatory = $true)][object]$InputObject)
+    return @($InputObject.PSObject.Properties | ForEach-Object { [string]$_.Name })
+}
+
+function Assert-PshGoal6Property {
+    param(
+        [Parameter(Mandatory = $true)][object]$InputObject,
+        [Parameter(Mandatory = $true)][string[]]$Required,
+        [Parameter(Mandatory = $true)][string[]]$Allowed,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $names = @(Get-PshGoal6PropertyName -InputObject $InputObject)
+    foreach ($name in $Required) {
+        Assert-PshGoal6Condition ($names -ccontains $name) "$Description is missing property '$name'."
+    }
+    foreach ($name in $names) {
+        Assert-PshGoal6Condition ($Allowed -ccontains $name) "$Description contains unsupported property '$name'."
+    }
+}
+
+function Assert-PshGoal6Sha256Value {
+    param(
+        [Parameter(Mandatory = $true)][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-PshGoal6Condition ($Value -match '\A[0-9a-f]{64}\z' -and $Value -notmatch '\A0{64}\z') "$Description is not a lowercase SHA256 value."
+}
+
+function Assert-PshGoal6PinnedUrl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-PshGoal6Condition ($Url -match '\Ahttps://') "$Description must use HTTPS."
+    Assert-PshGoal6Condition ($Url -notmatch '(?i)(^|[/=])latest([/?#.]|$)') "$Description contains a floating latest reference."
+    Assert-PshGoal6Condition ($Url -notmatch '(?i)/(main|master)([/?.#]|$)') "$Description contains a floating branch reference."
+}
+
+function Resolve-PshGoal6RelativePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$RelativePath,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    Assert-PshGoal6Condition (-not [string]::IsNullOrWhiteSpace($RelativePath)) "$Description is empty."
+    Assert-PshGoal6Condition (-not [IO.Path]::IsPathRooted($RelativePath)) "$Description is rooted."
+    Assert-PshGoal6Condition ($RelativePath -notmatch '\\') "$Description must use forward slashes."
+    $segments = @($RelativePath.Split('/'))
+    Assert-PshGoal6Condition (@($segments | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -eq 0) "$Description contains an empty segment."
+    Assert-PshGoal6Condition ($segments -notcontains '.' -and $segments -notcontains '..') "$Description contains a traversal segment."
+    Assert-PshGoal6Condition ($RelativePath -notmatch '[:*?"<>|]') "$Description contains an invalid path character."
+
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $candidate = [IO.Path]::GetFullPath((Join-Path $fullRoot $RelativePath.Replace('/', [IO.Path]::DirectorySeparatorChar)))
+    $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    Assert-PshGoal6Condition ($candidate.StartsWith($fullRoot + [IO.Path]::DirectorySeparatorChar, $comparison)) "$Description escapes its root."
+    return $candidate
+}
+
+function ConvertTo-PshGoal6UtcTimestamp {
+    param([AllowNull()][object]$Value)
+
+    if ($Value -is [DateTimeOffset]) { return $Value.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) }
+    if ($Value -is [DateTime]) { return $Value.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture) }
+    return [string]$Value
+}
+
+function Get-PshGoal6TrustedDependencyData {
+    return [ordered]@{
+        gitleaks = [ordered]@{
+            Version = '8.30.1'
+            Commit = '83d9cd684c87d95d656c1458ef04895a7f1cbd8e'
+            PackageSha256 = 'd29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e'
+            ChecksumsSha256 = '061476c21adaf5441516f96f185c1a4706a83cd6329b9b38762271b3d4a52fae'
+            InstalledSha256 = '17157e2ee8b76fc8b1d8bee607a250e34b8a8023c8bc81822d4b5ee4d78fcb7c'
+            LicenseSha256 = 'e3884b252b3bfc045e55be43a34d1e80da070bc6f804ac95bf4660e97d62ebc6'
+            ProvenanceSha256 = 'af11ff5e137d13b7e59eccd2d4810aaec09a05c0b5210332b7d56add4d970ec1'
+        }
+        psscriptanalyzer = [ordered]@{
+            Version = '1.25.0'
+            Commit = 'f05704df81b2aca17dc027ee39b3fce106d418fc'
+            PackageSha256 = '14e634c828eb98efb9f40b2918ba90f139ed5eccdf663a2a747736d996995d60'
+            GallerySha512Base64 = '5/tXMmLmBLqymRSuYpIdJLl8L4i1GbQSd7QD72zhY/FLfRs23HNEmmjlrlqNlQKJGxDCZBMf0YE63ym/ExwWYw=='
+            InstalledSha256 = '2b219f688bcdd67101040f845e530b22907d39bbf49089b4b5b2afaba7996791'
+            LicenseSha256 = '646f8936b8ddcd14e13e578ff6857e368780b0d1a4f6066bee89211923a373e2'
+            ProvenanceSha256 = 'edb48eeaf6649bede632b4c4c5e98f4b755b90fdc9fb8909e6dfc51ddf1a06f0'
+        }
+    }
+}
+
+function Read-PshGoal6DependencyLock {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$LockPath
+    )
+
+    $repositoryRootPath = [IO.Path]::GetFullPath($RepositoryRoot)
+    $lockText = Get-PshGoal6StrictText -Path ([IO.Path]::GetFullPath($LockPath))
+    try { $lock = $lockText | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw "Goal 6 dependency lock is invalid JSON: $($_.Exception.Message)" }
+
+    Assert-PshGoal6Property -InputObject $lock -Required @('schemaVersion', 'manifest', 'dependencies') -Allowed @('schemaVersion', 'manifest', 'dependencies') -Description 'Goal 6 dependency lock'
+    Assert-PshGoal6Condition ([int]$lock.schemaVersion -eq 1) 'Goal 6 dependency lock schemaVersion must be 1.'
+    Assert-PshGoal6Property -InputObject $lock.manifest -Required @('created', 'namespaceSeed') -Allowed @('created', 'namespaceSeed') -Description 'Goal 6 dependency lock manifest'
+    Assert-PshGoal6Condition ((ConvertTo-PshGoal6UtcTimestamp $lock.manifest.created) -ceq '2026-07-22T00:00:00Z') 'Goal 6 dependency lock created timestamp changed.'
+    Assert-PshGoal6Condition ([string]$lock.manifest.namespaceSeed -ceq 'goal6-ci-quality-dependencies-v1') 'Goal 6 dependency lock namespace seed changed.'
+
+    $dependencies = @($lock.dependencies)
+    Assert-PshGoal6Condition ($dependencies.Count -eq 2) 'Goal 6 dependency lock must contain exactly two CI dependencies.'
+    $ids = @($dependencies | ForEach-Object { [string]$_.id })
+    Assert-PshGoal6Condition (($ids -join '|') -ceq 'gitleaks|psscriptanalyzer') 'Goal 6 dependencies must be ordered gitleaks, psscriptanalyzer.'
+    $trusted = Get-PshGoal6TrustedDependencyData
+
+    foreach ($dependency in $dependencies) {
+        Assert-PshGoal6Property -InputObject $dependency -Required @('id', 'displayName', 'version', 'usage', 'platform', 'source', 'package', 'license', 'provenance') -Allowed @('id', 'displayName', 'version', 'usage', 'platform', 'source', 'package', 'license', 'provenance') -Description 'Goal 6 dependency'
+        $id = [string]$dependency.id
+        Assert-PshGoal6Condition ($trusted.Contains($id)) "Untrusted Goal 6 dependency: $id"
+        $pin = $trusted[$id]
+        Assert-PshGoal6Condition ([string]$dependency.version -ceq [string]$pin.Version) "$id version changed."
+
+        Assert-PshGoal6Property -InputObject $dependency.source -Required @('repository', 'tag', 'commit') -Allowed @('repository', 'tag', 'commit', 'releaseUrl', 'galleryMetadataUrl') -Description "$id source"
+        Assert-PshGoal6PinnedUrl -Url ([string]$dependency.source.repository) -Description "$id source repository"
+        Assert-PshGoal6Condition ([string]$dependency.source.commit -ceq [string]$pin.Commit) "$id source commit changed."
+        foreach ($urlName in @('releaseUrl', 'galleryMetadataUrl')) {
+            $url = [string](Get-PshGoal6Property -InputObject $dependency.source -Name $urlName)
+            if (-not [string]::IsNullOrWhiteSpace($url)) { Assert-PshGoal6PinnedUrl -Url $url -Description "$id source $urlName" }
+        }
+
+        Assert-PshGoal6Property -InputObject $dependency.package -Required @('url', 'fileName', 'archiveType', 'sha256', 'size', 'installedRelativePath', 'installedSha256', 'installedSize') -Allowed @('url', 'fileName', 'archiveType', 'sha256', 'size', 'checksumsUrl', 'checksumsSha256', 'checksumsSize', 'executableArchivePath', 'moduleManifestArchivePath', 'installedRelativePath', 'installedSha256', 'installedSize', 'peMachine', 'galleryHashAlgorithm', 'gallerySha512Base64') -Description "$id package"
+        Assert-PshGoal6PinnedUrl -Url ([string]$dependency.package.url) -Description "$id package URL"
+        Assert-PshGoal6Condition ([string]$dependency.package.archiveType -ceq 'zip') "$id archive type must be zip."
+        Assert-PshGoal6Sha256Value -Value ([string]$dependency.package.sha256) -Description "$id package SHA256"
+        Assert-PshGoal6Condition ([string]$dependency.package.sha256 -ceq [string]$pin.PackageSha256) "$id package SHA256 changed."
+        Assert-PshGoal6Condition ([int64]$dependency.package.size -gt 0 -and [int64]$dependency.package.installedSize -gt 0) "$id package sizes must be positive."
+        Assert-PshGoal6Sha256Value -Value ([string]$dependency.package.installedSha256) -Description "$id installed SHA256"
+        Assert-PshGoal6Condition ([string]$dependency.package.installedSha256 -ceq [string]$pin.InstalledSha256) "$id installed SHA256 changed."
+        [void](Resolve-PshGoal6RelativePath -Root $repositoryRootPath -RelativePath ([string]$dependency.package.installedRelativePath) -Description "$id installed relative path")
+
+        if ($id -ceq 'gitleaks') {
+            Assert-PshGoal6PinnedUrl -Url ([string]$dependency.package.checksumsUrl) -Description 'gitleaks checksums URL'
+            Assert-PshGoal6Sha256Value -Value ([string]$dependency.package.checksumsSha256) -Description 'gitleaks checksums SHA256'
+            Assert-PshGoal6Condition ([string]$dependency.package.checksumsSha256 -ceq [string]$pin.ChecksumsSha256) 'gitleaks checksums SHA256 changed.'
+            Assert-PshGoal6Condition ([string]$dependency.package.peMachine -ceq '0x8664') 'gitleaks PE machine must be x64.'
+        }
+        else {
+            Assert-PshGoal6Condition ([string]$dependency.package.galleryHashAlgorithm -ceq 'SHA512') 'PSScriptAnalyzer Gallery hash algorithm must be SHA512.'
+            Assert-PshGoal6Condition ([string]$dependency.package.gallerySha512Base64 -ceq [string]$pin.GallerySha512Base64) 'PSScriptAnalyzer Gallery SHA512 changed.'
+        }
+
+        Assert-PshGoal6Property -InputObject $dependency.license -Required @('spdxId', 'archivePath', 'sourceUrl', 'retainedPath', 'sha256', 'size') -Allowed @('spdxId', 'archivePath', 'sourceUrl', 'retainedPath', 'sha256', 'size') -Description "$id license"
+        Assert-PshGoal6Condition ([string]$dependency.license.spdxId -ceq 'MIT') "$id license must be MIT."
+        Assert-PshGoal6PinnedUrl -Url ([string]$dependency.license.sourceUrl) -Description "$id license source URL"
+        Assert-PshGoal6Sha256Value -Value ([string]$dependency.license.sha256) -Description "$id license SHA256"
+        Assert-PshGoal6Condition ([string]$dependency.license.sha256 -ceq [string]$pin.LicenseSha256) "$id license SHA256 changed."
+        $licensePath = Resolve-PshGoal6RelativePath -Root $repositoryRootPath -RelativePath ([string]$dependency.license.retainedPath) -Description "$id retained license path"
+        Assert-PshGoal6Condition ([IO.File]::Exists($licensePath)) "$id retained license is missing."
+        Assert-PshGoal6Condition ((Get-PshGoal6Sha256 -Path $licensePath) -ceq [string]$dependency.license.sha256) "$id retained license SHA256 mismatches."
+        Assert-PshGoal6Condition ([int64](Get-Item -LiteralPath $licensePath).Length -eq [int64]$dependency.license.size) "$id retained license size mismatches."
+
+        Assert-PshGoal6Property -InputObject $dependency.provenance -Required @('retainedPath', 'sha256') -Allowed @('retainedPath', 'sha256') -Description "$id provenance"
+        Assert-PshGoal6Sha256Value -Value ([string]$dependency.provenance.sha256) -Description "$id provenance SHA256"
+        Assert-PshGoal6Condition ([string]$dependency.provenance.sha256 -ceq [string]$pin.ProvenanceSha256) "$id provenance SHA256 changed."
+        $provenancePath = Resolve-PshGoal6RelativePath -Root $repositoryRootPath -RelativePath ([string]$dependency.provenance.retainedPath) -Description "$id retained provenance path"
+        Assert-PshGoal6Condition ([IO.File]::Exists($provenancePath)) "$id retained provenance is missing."
+        Assert-PshGoal6Condition ((Get-PshGoal6Sha256 -Path $provenancePath) -ceq [string]$dependency.provenance.sha256) "$id retained provenance SHA256 mismatches."
+    }
+
+    return $lock
+}
+
+function Get-PshGoal6Dependency {
+    param(
+        [Parameter(Mandatory = $true)][object]$Lock,
+        [Parameter(Mandatory = $true)][string]$Id
+    )
+
+    $dependencyMatches = @($Lock.dependencies | Where-Object { [string]$_.id -ceq $Id })
+    Assert-PshGoal6Condition ($dependencyMatches.Count -eq 1) "Goal 6 dependency '$Id' is missing or duplicated."
+    return $dependencyMatches[0]
+}
+
+function Get-PshGoal6PeMachine {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    Assert-PshGoal6Condition ($bytes.Length -ge 64 -and $bytes[0] -eq 0x4D -and $bytes[1] -eq 0x5A) "File is not a PE image: $Path"
+    $offset = [BitConverter]::ToInt32($bytes, 0x3C)
+    Assert-PshGoal6Condition ($offset -ge 0 -and $offset + 6 -le $bytes.Length) "PE offset is invalid: $Path"
+    Assert-PshGoal6Condition ($bytes[$offset] -eq 0x50 -and $bytes[$offset + 1] -eq 0x45 -and $bytes[$offset + 2] -eq 0 -and $bytes[$offset + 3] -eq 0) "PE signature is invalid: $Path"
+    return ('0x{0:X4}' -f [BitConverter]::ToUInt16($bytes, $offset + 4))
+}
