@@ -13,8 +13,8 @@ condition has direct evidence.
 | Goal 2 | COMPLETE | `20a4e59` | Amendment 1 closeout merged to `main`; final branch and main CI green |
 | Goal 3 | COMPLETE | `9254f3b` | Merged to `main` at `71fbda8`; final branch and `main` CI green |
 | Goal 4 | COMPLETE | `3289786` | Merged to `main`; Goal 4 `main` CI run `29758890021` and both x64 jobs green |
-| Goal 5 | COMPLETE | `22de234` | Final push CI run `29817760525` passed the PS5.1/PS7 x64 lifecycle matrix |
-| Goal 6 | PENDING | - | Goal 5 complete; waiting for Goal 5 merge and green `main` CI before start |
+| Goal 5 | COMPLETE | `50c7d3d` | Code accepted at `22de234`; fast-forward merged to `main` at `50c7d3d`; final branch and all seven `main` workflows green |
+| Goal 6 | IN_PROGRESS | `50c7d3d` | Started from the green Goal 5 `main` closeout |
 | Goal 7 | PENDING | - | Blocked on Goal 6 DoneWhen |
 | Goal 8 | PENDING | - | Blocked on Goal 7 DoneWhen |
 
@@ -776,9 +776,9 @@ Completed: 2026-07-22 (Asia/Shanghai)
   (`test: stabilize Full lifecycle assertions`). The final change decomposes
   compound PowerShell boolean expressions without weakening any assertion.
 
-### Final CI Evidence
+### Code-Acceptance CI Evidence
 
-- Final branch workflow: [Goal 5 Windows x64 Lifecycle run
+- Code-acceptance branch workflow: [Goal 5 Windows x64 Lifecycle run
   `29817760525`](https://github.com/Emvdy/psh/actions/runs/29817760525),
   attempt `1`, event `push`, head
   `22de234e01c6666c430fe5e5a054a58d4a573e78`, conclusion `success`.
@@ -917,8 +917,114 @@ No Goal 5 StopIf condition was hit.
 
 ### Remaining Work
 
-None within Goal 5. Goal 5 is complete at CI-accepted head
-`22de234e01c6666c430fe5e5a054a58d4a573e78`. Goal 6 remains `PENDING`; its
-signatures, finalized archives, checksum/release report matrix, secret and
-license gates, provenance attestation, and ARM runner evaluation are not
-completed or claimed by this record.
+None within Goal 5. Goal 5 code is accepted at
+`22de234e01c6666c430fe5e5a054a58d4a573e78`. Its documentation closeout and
+`main` merge are recorded below. Goal 6 begins `IN_PROGRESS`; its signatures,
+finalized archives, checksum/release report matrix, secret and license gates,
+provenance attestation, and ARM runner evaluation are not completed or claimed
+by the Goal 5 record.
+
+### Main Merge Closure
+
+- The Goal 5 implementation and x64 lifecycle matrix were accepted at code SHA
+  `22de234e01c6666c430fe5e5a054a58d4a573e78`. Documentation commits
+  `6296f0626c799bee80e8b23760959642ccb373ce` and
+  `50c7d3dafacacd53fa214a95ccedeb0715e9c99b` close the execution record without
+  changing the accepted implementation.
+- The post-documentation [final Goal 5 branch run
+  `29881587912`](https://github.com/Emvdy/psh/actions/runs/29881587912)
+  concluded `success`; both Windows PowerShell 5.1 x64 and PowerShell 7 x64
+  jobs were green.
+- The Goal 5 branch was fast-forward merged to `main` at
+  `50c7d3dafacacd53fa214a95ccedeb0715e9c99b`. The resulting `main` push ran all
+  seven workflows, each with conclusion `success`:
+
+| Workflow | `main` run | Conclusion |
+| --- | --- | --- |
+| Core validation | [`29891267426`](https://github.com/Emvdy/psh/actions/runs/29891267426) | `success` |
+| Goal 3 Batch 1 | [`29891267419`](https://github.com/Emvdy/psh/actions/runs/29891267419) | `success` |
+| Goal 3 Batch 2 | [`29891267442`](https://github.com/Emvdy/psh/actions/runs/29891267442) | `success` |
+| Goal 3 Batch 3 | [`29891267422`](https://github.com/Emvdy/psh/actions/runs/29891267422) | `success` |
+| Goal 3 Batch 4 | [`29891267399`](https://github.com/Emvdy/psh/actions/runs/29891267399) | `success` |
+| Goal 4 Full Tools And Supply Chain | [`29891267433`](https://github.com/Emvdy/psh/actions/runs/29891267433) | `success` |
+| Goal 5 Windows x64 Lifecycle | [`29891267402`](https://github.com/Emvdy/psh/actions/runs/29891267402) | `success` |
+
+- In the Goal 5 `main` run, [PowerShell 7 x64 job
+  `88832021814`](https://github.com/Emvdy/psh/actions/runs/29891267402/job/88832021814)
+  and [Windows PowerShell 5.1 x64 job
+  `88832021823`](https://github.com/Emvdy/psh/actions/runs/29891267402/job/88832021823)
+  both concluded `success`. The retained workflow artifacts are
+  [`8518363581`](https://github.com/Emvdy/psh/actions/runs/29891267402/artifacts/8518363581)
+  and
+  [`8518460535`](https://github.com/Emvdy/psh/actions/runs/29891267402/artifacts/8518460535).
+
+Goal 5 is complete at the `main` merge head
+`50c7d3dafacacd53fa214a95ccedeb0715e9c99b`, with its accepted code boundary
+preserved at `22de234e01c6666c430fe5e5a054a58d4a573e78`.
+
+## Goal 6: Tests And CI
+
+Started: 2026-07-22 (Asia/Shanghai)
+
+### Prerequisite
+
+- [x] Goal 5 DoneWhen is satisfied: Core and Full pass online/offline install,
+  upgrade, rollback, repeat-install, and uninstall tests on x64 CI, with the
+  original profile restored after uninstall.
+- [x] Goal 5 is fast-forward merged to `main` at
+  `50c7d3dafacacd53fa214a95ccedeb0715e9c99b`; final branch run `29881587912`
+  and all seven resulting `main` workflow runs concluded `success`.
+
+### Initial Status
+
+Goal 6 starts from the accepted Goal 5 code and green `main` closeout above.
+No Goal 6 implementation, test expansion, runner evaluation, release gate, or
+artifact-retention requirement is marked complete by this start record.
+
+The Goals 3-6 VM prohibition remains in force: during Goal 6 the Parallels VM
+must not be started, resumed, or queried. PS5.1 and PS7 verification remains on
+Windows x64 GitHub CI; ARM64 automation moves to GitHub `windows-11-arm`
+runners only if the evaluation below confirms they are usable.
+
+### Authoritative Scope
+
+- Use table-driven Pester tests. Windows x64 CI runs PS5.1 and PS7.
+- Evaluate GitHub `windows-11-arm` public runners. If usable, run the PS7 (and, if available, PS5.1) automated matrix there so Goal 7 needs no automated-matrix work; record the evaluation outcome either way.
+- Ubuntu CI generates GNU golden output for Tier 1 text commands. Comparison uses shared normalization helpers (`\`→`/` path separators, CRLF→LF, `LC_ALL=C` collation). Platform-shaped commands (`ls du df stat ps` and similar) use structural assertions, not golden bytes.
+- Installer tests cover non-admin use, non-ASCII user paths, spaces, corrupted downloads, wrong architectures, Core without tools, missing Full tools, and profile conflicts.
+- Actions run PSScriptAnalyzer, dependency and license checks, secret scanning, checksums, SBOM generation, and build provenance attestation. Defender scanning of release assets is best-effort (`MpCmdRun -Scan` where available; otherwise record hash-based lookup) and its unavailability is not a failure.
+- Reproducibility gate: two builds must produce identical file manifests and per-file SHA256 values; archive-container metadata (timestamps) is excluded.
+
+### StopIf / DoneWhen
+
+- **StopIf:** Any supported matrix fails, a secret is present, or a license file is missing.
+- **DoneWhen:** All automated checks pass and the reports plus command compatibility matrix are retained as workflow artifacts.
+
+### Execution Checklist
+
+- [ ] Preserve the Goals 3-6 VM prohibition throughout Goal 6: do not start,
+  resume, or query the Parallels VM.
+- [ ] Convert or extend applicable Pester coverage into table-driven tests and
+  run the supported Windows x64 matrix under Windows PowerShell 5.1 and
+  PowerShell 7.
+- [ ] Evaluate public GitHub `windows-11-arm` runner usability, record the
+  result, and, when usable, add the available PS7 and PS5.1 ARM64 matrix.
+- [ ] Generate GNU Tier 1 golden output on Ubuntu and compare through shared
+  path, line-ending, and `LC_ALL=C` normalization helpers; retain structural
+  assertions for platform-shaped commands.
+- [ ] Cover non-admin installation, non-ASCII user paths, paths with spaces,
+  corrupted downloads, wrong architectures, Core without tools, missing Full
+  tools, and profile conflicts.
+- [ ] Gate Actions with PSScriptAnalyzer, dependency and license checks, secret
+  scanning, checksums, SBOM generation, and build provenance attestation.
+- [ ] Run best-effort Defender scanning of release assets with `MpCmdRun -Scan`
+  where available; otherwise record the hash-based lookup without failing only
+  because Defender is unavailable.
+- [ ] Build twice and compare identical file manifests plus per-file SHA256
+  values while excluding archive-container timestamp metadata.
+- [ ] Retain every automated report and the command compatibility matrix as
+  workflow artifacts.
+- [ ] Audit the Goal 6 StopIf conditions and stop immediately if any supported
+  matrix fails, a secret is present, or a license file is missing.
+- [ ] Record direct CI and artifact evidence for every DoneWhen item before
+  marking Goal 6 complete or starting Goal 7.
