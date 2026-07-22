@@ -23,6 +23,7 @@ tools/win-arm64/**/*.exe binary
 
 # Vendored dependency and license bytes are verified against immutable package
 # hashes. Keep their upstream line endings unchanged on every checkout.
+scripts/goal6/licenses/** binary
 src/Psh/Dependencies/PSReadLine/2.4.5/** binary
 licenses/PSReadLine-2.4.5/LICENSE.txt binary
 licenses/bat-0.26.1/LICENSE-APACHE binary

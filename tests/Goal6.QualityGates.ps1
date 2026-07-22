@@ -255,6 +255,33 @@ try {
     Assert-PshGoal6Quality ([string]$pester.version -ceq '5.9.0' -and [string]$pester.license.spdxId -ceq 'Apache-2.0' -and -not [bool]$pester.license.packageContainsLicense) 'The pinned Pester package/license contract changed.'
     Assert-PshGoal6Quality ($null -eq $pester.license.archivePath -and [string]$pester.package.galleryHashAlgorithm -ceq 'SHA512') 'The Pester source-license or Gallery-hash policy changed.'
 
+    $attributesText = Get-PshGoal6StrictText -Path (Join-Path $repositoryRootPath '.gitattributes')
+    Assert-PshGoal6Quality ([regex]::Matches($attributesText, '(?m)^scripts/goal6/licenses/\*\* binary\r?$').Count -eq 1) 'Goal 6 retained licenses are not covered by exactly one binary Git attribute rule.'
+    $gitCommand = @(Get-Command -Name git -CommandType Application -ErrorAction Stop)[0]
+    foreach ($dependency in @($lock.dependencies)) {
+        $licenseRelativePath = [string]$dependency.license.retainedPath
+        $attributeOutput = @(& $gitCommand.Source -C $repositoryRootPath check-attr text binary -- $licenseRelativePath 2>&1)
+        $attributeExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+        $global:LASTEXITCODE = 0
+        $attributeLines = @($attributeOutput | ForEach-Object { [string]$_ })
+        Assert-PshGoal6Quality ($attributeExitCode -eq 0) "Git attribute inspection failed for $licenseRelativePath."
+        Assert-PshGoal6Quality ($attributeLines -ccontains ('{0}: text: unset' -f $licenseRelativePath)) "$licenseRelativePath is still eligible for checkout line-ending conversion."
+        Assert-PshGoal6Quality ($attributeLines -ccontains ('{0}: binary: set' -f $licenseRelativePath)) "$licenseRelativePath is not marked binary."
+
+        $workingTreeHashOutput = @(& $gitCommand.Source -C $repositoryRootPath hash-object --no-filters -- $licenseRelativePath 2>&1)
+        $workingTreeHashExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+        $global:LASTEXITCODE = 0
+        $workingTreeHashLines = @($workingTreeHashOutput | ForEach-Object { [string]$_ })
+        Assert-PshGoal6Quality ($workingTreeHashExitCode -eq 0 -and $workingTreeHashLines.Count -eq 1 -and $workingTreeHashLines[0] -match '\A[0-9a-f]{40}\z') "Raw working-tree blob hashing failed for $licenseRelativePath."
+
+        $committedHashOutput = @(& $gitCommand.Source -C $repositoryRootPath rev-parse ("HEAD:$licenseRelativePath") 2>&1)
+        $committedHashExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+        $global:LASTEXITCODE = 0
+        $committedHashLines = @($committedHashOutput | ForEach-Object { [string]$_ })
+        Assert-PshGoal6Quality ($committedHashExitCode -eq 0 -and $committedHashLines.Count -eq 1 -and $committedHashLines[0] -match '\A[0-9a-f]{40}\z') "Committed blob lookup failed for $licenseRelativePath."
+        Assert-PshGoal6Quality ($workingTreeHashLines[0] -ceq $committedHashLines[0]) "$licenseRelativePath working-tree bytes differ from the committed blob."
+    }
+
     $analyzerGateText = Get-PshGoal6StrictText -Path (Join-Path $repositoryRootPath 'scripts/goal6/Invoke-Goal6PSScriptAnalyzer.ps1')
     Assert-PshGoal6Quality ($analyzerGateText -match '\bIncludeSuppressed\b' -and $analyzerGateText -match '\bIsSuppressed\b' -and $analyzerGateText -match '\bSuppressMessage(Attribute)?\b') 'The analyzer gate no longer includes and audits suppressed diagnostics and attributes.'
     $secretGateText = Get-PshGoal6StrictText -Path (Join-Path $repositoryRootPath 'scripts/goal6/Invoke-Goal6SecretScan.ps1')
