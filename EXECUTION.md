@@ -13,7 +13,7 @@ condition has direct evidence.
 | Goal 2 | COMPLETE | `20a4e59` | Amendment 1 closeout merged to `main`; final branch and main CI green |
 | Goal 3 | COMPLETE | `9254f3b` | Merged to `main` at `71fbda8`; final branch and `main` CI green |
 | Goal 4 | COMPLETE | `3289786` | Merged to `main`; Goal 4 `main` CI run `29758890021` and both x64 jobs green |
-| Goal 5 | IN_PROGRESS | - | Goal 4 prerequisite met; installer lifecycle started |
+| Goal 5 | COMPLETE | `22de234` | Final push CI run `29817760525` passed the PS5.1/PS7 x64 lifecycle matrix |
 | Goal 6 | PENDING | - | Blocked on Goal 5 DoneWhen |
 | Goal 7 | PENDING | - | Blocked on Goal 6 DoneWhen |
 | Goal 8 | PENDING | - | Blocked on Goal 7 DoneWhen |
@@ -731,21 +731,193 @@ uninstaller, or AnyCPU bootstrapper has yet been implemented for Goal 5.
 - **StopIf:** Profiles cannot be updated losslessly, the installer changes GPO, execution policy, or system `PATH`, or uninstall would remove pre-existing user content.
 - **DoneWhen:** Core and Full pass online/offline install, upgrade, rollback, repeat-install, and uninstall tests on x64 CI, with the original profile restored after uninstall.
 
-### Next Work
+Completed: 2026-07-22 (Asia/Shanghai)
 
-- [ ] Online installation downloads versioned scripts, manifests, and packages,
-  verifies SHA256, then executes. Do not recommend `irm | iex`.
-- [ ] Offline ZIP files include modules, dependencies, licenses, manifests,
-  installers, uninstallers, and the same EXE. Offline mode must not make
-  network requests.
-- [ ] Install through staging, integrity verification, and atomic version
-  switching. Reinstallation is idempotent. Upgrade and rollback are exercised
-  against a synthetic `0.0.1-test` package because `v0.1.0` is the first real
-  release.
-- [ ] When execution policy forbids running the installer, the installer does
-  not bypass anything: it emits a structured diagnostic pointing the user at
-  `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` and exits with code `4`.
-  This behavior is tested.
-- [ ] Build a small GPL C# AnyCPU bootstrapper in Actions instead of using
-  license-incompatible PS2EXE. The EXE must respect, not bypass, PowerShell
-  execution policy.
+### Implementation Checklist
+
+- [x] Online installation resolves a fixed version, downloads versioned release
+  metadata and packages, verifies SHA256 and trust metadata, and never recommends
+  or implements `irm | iex`.
+- [x] Offline package layouts contain the module, dependencies, licenses,
+  manifests, installer entrypoints, uninstaller, SBOM, notices, and the same
+  bootstrapper bytes. Offline execution makes no transport call.
+- [x] Installation uses verified staging, transactional state, and atomic
+  `current.json` switching. Repeat install is idempotent, and synthetic versions
+  exercise upgrade and rollback before the first public release.
+- [x] Execution-policy denial is a structured exit-code `4` diagnostic with the
+  remediation `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`; production
+  entrypoints and the bootstrapper do not bypass the configured policy.
+- [x] Actions builds the GPL C# `net472` AnyCPU bootstrapper without PS2EXE or a
+  package restore dependency.
+
+### Implementation And Stabilization
+
+- Goal 5 started in `f4a7b045918b7449f3fc22207e8e6553641603db`
+  (`docs: close Goal 4 and start Goal 5`). The main implementation commits are:
+  `aba781a765da3ebf611d5ede89b319e75a315dd5` (`feat: add package lifecycle
+  and bootstrapper`), `1324e04bb1a2760d7cf5ea68bb05baab68b9f601`
+  (`feat: add transactional uninstall`),
+  `f32f2c0b5aa91f680cfef40217857e81fe3cda12` (`feat: add trusted package
+  acquisition`), and `4273ad4d6861e88ce98a13c6bf1f6ba1d827ffae`
+  (`feat: add release installers and goal5 CI`).
+- Windows CI and retained-diagnostic stabilization commits are
+  `7d4cf31ca05112768fd9ea5018935010ee3d1c91`,
+  `890372c80e7bb7a163bfd9f0f6947035c5a7e846`,
+  `99095e73e8a9741e02da2254676e73661f0e8baa`,
+  `0b4ea9611ec56b56daff05e551e661206e02c2b2`,
+  `4c3535481f6e4335efa46216dc4b828f44187a17`,
+  `38ded00a155bf39d82661a8208248d773bc86829`, and
+  `0699f3959a8932144b915d3c0253c4dbebc1d0cd`.
+- The final acceptance fixes are
+  `85bd63b05de5fbe89fda0f8ba65b83dd510c400a` (`test: stabilize Goal 5
+  mutex assertions on Windows PowerShell`),
+  `c7a33bb6135b0760ba7292964224f55a296d26a8` (`test: cover Full package
+  lifecycle`), and `22de234e01c6666c430fe5e5a054a58d4a573e78`
+  (`test: stabilize Full lifecycle assertions`). The final change decomposes
+  compound PowerShell boolean expressions without weakening any assertion.
+
+### Final CI Evidence
+
+- Final branch workflow: [Goal 5 Windows x64 Lifecycle run
+  `29817760525`](https://github.com/Emvdy/psh/actions/runs/29817760525),
+  attempt `1`, event `push`, head
+  `22de234e01c6666c430fe5e5a054a58d4a573e78`, conclusion `success`.
+- [Windows PowerShell 5.1 x64 job
+  `88592997544`](https://github.com/Emvdy/psh/actions/runs/29817760525/job/88592997544)
+  ran Windows PowerShell `5.1.20348.4294` Desktop in a 64-bit AMD64 process.
+  It concluded `success` in 10 minutes 7 seconds; its fixed ten-test step ran
+  from `2026-07-21T09:19:17Z` through `09:28:49Z`.
+- [PowerShell 7 x64 job
+  `88592997555`](https://github.com/Emvdy/psh/actions/runs/29817760525/job/88592997555)
+  ran PowerShell `7.6.3` Core in a 64-bit AMD64 process. It concluded `success`
+  in 5 minutes 2 seconds; its fixed ten-test step ran from
+  `2026-07-21T09:20:34Z` through `09:23:53Z`.
+- Both structured `test-summary.json` reports contain exactly ten fixed tests,
+  `failureCount: 0`, no failures, and for every test `exitCode: 0` plus
+  `deferredOrSkipped: false`. Reported results were:
+
+| Fixed test | Windows PowerShell 5.1 x64 | PowerShell 7 x64 |
+| --- | ---: | ---: |
+| Goal 1 acceptance | PASS; no numeric counter emitted | PASS; no numeric counter emitted |
+| Goal 5 workflow contract | 229 assertions | 229 assertions |
+| Goal 5 package lifecycle | 247 assertions | 251 assertions |
+| Goal 5 lifecycle acceptance | 54 assertions | 54 assertions |
+| Goal 5 uninstall safety | 114 assertions | 114 assertions |
+| Goal 5 bootstrapper acceptance | 233 assertions | 233 assertions |
+| Goal 5 release trust | 172 assertions | 172 assertions |
+| Goal 5 acquisition | 183 assertions | 183 assertions |
+| Goal 5 online/offline acceptance | 38 assertions | 38 assertions |
+| Goal 5 package build | 54 assertions | 54 assertions |
+
+- Retained artifact [goal5-winps51, ID
+  `8490309912`](https://github.com/Emvdy/psh/actions/runs/29817760525/artifacts/8490309912)
+  is 16,486,993 bytes. It was independently extracted under
+  `/private/tmp/goal5-run-29817760525-winps51.NRp1z7` for this audit.
+- Retained artifact [goal5-pwsh7, ID
+  `8490180209`](https://github.com/Emvdy/psh/actions/runs/29817760525/artifacts/8490180209)
+  is 16,486,951 bytes. It was independently extracted under
+  `/private/tmp/goal5-run-29817760525-pwsh7.aelLa6` for this audit.
+
+### Core And Full Lifecycle Evidence
+
+- The 38-assertion online/offline suite validates the public entrypoint layer.
+  With deterministic transport fixtures, online Core defaults to `latest`,
+  resolves the fixed `1.2.3` tag, retries one synthetic `502`, and verifies the
+  package before execution. Online Full selects the fixed `full-win-x64` asset.
+  Corrupt content, tag drift, and redirect drift fail closed.
+- The same suite runs the real offline Core entry from a Unicode and space path,
+  proves that neither online nor acquisition transport is called, and records
+  the sequence `0.0.1-test`, `0.0.2-test`, `0.0.1-test` for repeat, upgrade,
+  and rollback entry routing. It also verifies the Git Bash/`sh` offline wrapper
+  and rejects an edition mismatch.
+- The shared production lifecycle engine supplies the remaining operation proof.
+  In both runtimes the 54-assertion lifecycle test passes Core staging,
+  integrity checks, atomic switching, repeat install, upgrade, rollback, locked
+  uninstall handling, successful uninstall, and exact restoration of the
+  original profile bytes.
+- The Full section of those same 54 assertions validates distinct Full x64
+  package manifests and the production native-tools lock, installs synthetic
+  Full `0.0.1-test` offline, verifies every pinned x64 tool hash and absence of
+  ARM64 tools, repeats without changing lifecycle/profile/tool bytes, upgrades
+  to Full `0.1.0` while retaining both versions, rolls back to Full
+  `0.0.1-test`, then uninstalls. The uninstall restores the original Full
+  profile byte-for-byte, removes all owned version/current/ownership state, and
+  preserves pre-existing user content byte-for-byte.
+- The 114-assertion uninstall suite independently covers transactional rollback,
+  ownership boundaries, profile and PSReadLine projection restoration, file
+  locks, recovery journals, concurrent replacement/CAS behavior, reparse-point
+  boundaries, and production mutex serialization. The final Windows PowerShell
+  mutex fix retained a diagnostic artifact rather than weakening the lock gate.
+
+### StopIf Audit
+
+- **Lossless profiles - NOT_HIT.** Core and Full lifecycle tests restore their
+  original profile bytes exactly. Uninstall safety also validates exact profile
+  restoration and preserves concurrent or conflicting bytes with recovery
+  evidence instead of overwriting them.
+- **GPO and execution policy - NOT_HIT.** Production entrypoints and the
+  bootstrapper only inspect effective, MachinePolicy, and UserPolicy state.
+  Restricted, AllSigned, RemoteSigned/MOTW, malformed-zone, and non-interactive
+  denial paths return structured code `4` diagnostics with the documented
+  CurrentUser remediation. No production path invokes `Set-ExecutionPolicy` or
+  passes `-ExecutionPolicy Bypass`; the workflow's Process-scope Bypass is
+  confined to isolated CI test processes.
+- **System `PATH` - NOT_HIT.** Production installer/bootstrapper sources contain
+  no persistent `PATH` mutation API. The shell-wrapper acceptance temporarily
+  prepends a fixture directory to the CI process `PATH` and restores the exact
+  prior value in `finally`.
+- **Pre-existing user content - NOT_HIT.** Full uninstall retains a sentinel
+  file and its original bytes. The broader uninstall matrix rejects or
+  quarantines ownership conflicts and never treats unrelated content as owned.
+- **Bootstrapper and entrypoint safety - NOT_HIT.** Both jobs built the same
+  36,864-byte `net472` AnyCPU IL-only bootstrapper with SHA256
+  `fe64cc816e382100d3e67d1021ffe4483de83fa508a6884642e8fce65c58edaa`;
+  `32BITREQUIRED` and `32BITPREFERRED` are false. Static and runtime gates reject
+  PS2EXE, `Invoke-Expression`, shell escape hatches, `irm | iex`, policy bypass,
+  and embedded-script tampering.
+- **VM discipline - SATISFIED.** Goal 5 ran only on the GitHub Windows x64
+  matrix. The 229-assertion workflow contract rejects VM/hypervisor tooling,
+  and no Parallels VM was started, resumed, or queried.
+
+No Goal 5 StopIf condition was hit.
+
+### Pre-Sign Boundary And Operational Notes
+
+- Goal 5 intentionally retains pre-sign evidence rather than claiming Goal 6
+  release finalization. In both artifacts the bootstrapper is `NotSigned` with
+  phase `pre-sign-bootstrapper` and code `4`; package build state is phase
+  `pre-sign` and code `4`; release-artifact state is
+  `static-verified-signatures-deferred` and code `4`.
+- Both `workflow-validation-report.json` files are
+  `pre-sign-validated` / code `0`, with three package records, three manifests,
+  and `zipCount: 0`. The staged layouts prove package contents and lifecycle
+  behavior, but Authenticode/catalog signing, finalized release ZIPs, release
+  checksums, and build provenance remain Goal 6 work. Nothing here claims those
+  gates are complete.
+- The only workflow annotation was the pinned `actions/upload-artifact` action's
+  Node.js 20 deprecation notice; the runner forced Node.js 24 and both uploads
+  succeeded. One API EOF and one monitoring connection interruption occurred
+  after/during observation; queries and downloads succeeded after retry, the
+  workflow itself was not rerun, and its conclusion remained `success`.
+
+### DoneWhen Audit
+
+- [x] Core and Full online/offline paths are covered by the public entrypoint,
+  acquisition, package-layout, and shared lifecycle layers on Windows x64 CI.
+- [x] Core and Full pass staging, integrity verification, repeat install,
+  upgrade, rollback, and uninstall in both Windows PowerShell 5.1 and
+  PowerShell 7.
+- [x] Synthetic packages exercise pre-release upgrade and rollback without
+  exposing `0.0.1-test` as a public package version.
+- [x] Original Core and Full profile bytes are restored after uninstall, and
+  pre-existing user content remains unchanged.
+- [x] Policy denial, offline no-network behavior, AnyCPU bootstrapper behavior,
+  and the Goal 5 StopIf boundaries pass in both supported x64 runtimes.
+
+### Remaining Work
+
+None within Goal 5. Goal 5 is complete at CI-accepted head
+`22de234e01c6666c430fe5e5a054a58d4a573e78`. Goal 6 remains `PENDING`; its
+signatures, finalized archives, checksum/release report matrix, secret and
+license gates, provenance attestation, and ARM runner evaluation are not
+completed or claimed by this record.
