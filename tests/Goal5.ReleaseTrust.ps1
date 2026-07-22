@@ -372,10 +372,13 @@ try {
     Write-PshGoal5ReleaseJson -Path $policyPath -Value $fixture.Policy
     Assert-PshGoal5ReleaseTrust ([string](Read-PshPublisherPolicy -Path $policyPath).publisher -ceq 'Emvdy Software') 'Publisher policy file did not parse.'
     $productionPolicy = Get-PshProductionPublisherPolicy
-    Assert-PshGoal5ReleaseTrust ([int]$productionPolicy.schemaVersion -eq 1 -and [string]$productionPolicy.policyVersion -ceq '2026-07-22.2' -and
+    Assert-PshGoal5ReleaseTrust ([int]$productionPolicy.schemaVersion -eq 1 -and [string]$productionPolicy.policyVersion -ceq '2026-07-22.3' -and
         [string]$productionPolicy.onlineTrustMode -ceq 'github-release-asset-digest' -and [string]$productionPolicy.offlineTrustMode -ceq 'offline-external-archive-sha256+package-catalog-sha256' -and
         -not [bool]$productionPolicy.signatureRequired -and [bool]$productionPolicy.catalogMembershipRequired -and [bool]$productionPolicy.archiveBindingRequired -and
-        [string]$productionPolicy.runtimeAttestationVerification -ceq 'external-release-gate') 'Production hash trust policy is not the fixed versioned archive-binding policy.'
+        [bool]$productionPolicy.attestationRequiredAtPublish -and [string]$productionPolicy.runtimeAttestationVerification -ceq 'not-verified-at-runtime') 'Production hash trust policy is not the fixed versioned archive-binding policy.'
+    $runtimeAttestationReport = New-PshProductionTrustReport -TrustMode 'offline-external-archive-sha256+package-catalog-sha256' -Checksum 'archive-binding-required' -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'required-at-entry' -AttestationVerification 'not-verified-at-runtime'
+    Assert-PshGoal5ReleaseTrust ([bool]$runtimeAttestationReport.attestationRequiredAtPublish -and
+        [string]$runtimeAttestationReport.attestationVerification -ceq 'not-verified-at-runtime') 'Runtime trust report does not distinguish publish attestation policy from runtime verification.'
 
     $archiveBindingRoot = Join-Path $testRoot 'archive-binding-package'
     [void][IO.Directory]::CreateDirectory((Join-Path $archiveBindingRoot 'sub'))

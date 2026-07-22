@@ -80,6 +80,35 @@ function ConvertTo-PshGoal5BashPath {
     return ([string]$converted[0]).TrimEnd("`r", "`n")
 }
 
+function Get-PshGoal5EmbeddedShellScript {
+    param(
+        [Parameter(Mandatory = $true)][string] $Text,
+        [Parameter(Mandatory = $true)][string] $Marker,
+        [Parameter(Mandatory = $true)][string] $EndText
+    )
+
+    $markerText = '$flowMarker = "' + $Marker + '"'
+    $markerOffset = $Text.IndexOf($markerText, [StringComparison]::Ordinal)
+    if ($markerOffset -lt 0 -or $Text.IndexOf($markerText, $markerOffset + $markerText.Length, [StringComparison]::Ordinal) -ge 0) {
+        throw "Embedded shell PowerShell marker is missing or duplicated: $Marker"
+    }
+    $startText = '$ErrorActionPreference = "Stop"'
+    $startOffset = $Text.LastIndexOf($startText, $markerOffset, [StringComparison]::Ordinal)
+    $endOffset = $Text.IndexOf($EndText, $markerOffset, [StringComparison]::Ordinal)
+    if ($startOffset -lt 0 -or $endOffset -lt $markerOffset) { throw "Embedded shell PowerShell script boundary is invalid: $Marker" }
+    return $Text.Substring($startOffset, ($endOffset + $EndText.Length) - $startOffset)
+}
+
+function Assert-PshGoal5PowerShellParses {
+    param([Parameter(Mandatory = $true)][string] $Text, [Parameter(Mandatory = $true)][string] $Label)
+
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    Assert-PshGoal5Entry ($errors.Count -eq 0) "$Label contains PowerShell parser errors."
+    return $ast
+}
+
 function Get-PshGoal5HashBytes {
     param([Parameter(Mandatory = $true)][byte[]] $Bytes)
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -470,6 +499,33 @@ Assert-PshGoal5Entry ($offlineText -notmatch '(?i)Invoke-WebRequest|HttpWebReque
 Assert-PshGoal5Entry ($shellText -match 'api\.github\.com/repos/Emvdy/psh/releases/(latest|tags/)' -and $shellText -match 'digest' -and
     $shellText -match 'browser_download_url' -and $shellText -match 'PshShellEntryDigest') 'Shell online entry is not rooted in exact GitHub release asset metadata and a local digest check.'
 Assert-PshGoal5Entry ($shellText -match '--archive-path' -and $shellText -match '--archive-sha256' -and $shellText -notmatch 'PshEntrySignature') 'Shell archive evidence or non-blocking Authenticode policy contract is missing.'
+$tempScript = Get-PshGoal5EmbeddedShellScript -Text $shellText -Marker 'PshShellTempRoot' -EndText ("    throw`n}")
+$cleanupScript = Get-PshGoal5EmbeddedShellScript -Text $shellText -Marker 'PshShellCleanupRoot' -EndText 'catch { exit 1 }'
+$lockedParentScript = Get-PshGoal5EmbeddedShellScript -Text $shellText -Marker 'PshShellLockedParent' -EndText 'exit $exitCode'
+[void](Assert-PshGoal5PowerShellParses -Text $tempScript -Label 'Shell Windows TEMP creator')
+[void](Assert-PshGoal5PowerShellParses -Text $cleanupScript -Label 'Shell Windows TEMP cleanup')
+$lockedParentAst = Assert-PshGoal5PowerShellParses -Text $lockedParentScript -Label 'Shell locked parent'
+Assert-PshGoal5Entry (@([regex]::Matches($shellText, 'PshShellLockedParent')).Count -eq 1) 'Shell entry does not contain exactly one locked parent flow.'
+Assert-PshGoal5Entry ($lockedParentScript -match '\[IO\.FileAccess\]::Read' -and $lockedParentScript -match '\[IO\.FileShare\]::Read' -and
+    @([regex]::Matches($lockedParentScript, 'ComputeHash\(')).Count -eq 2) 'Shell locked parent does not retain one read/share-read entry handle across both authenticated hashes.'
+Assert-PshGoal5Entry ($lockedParentScript -match 'Get-ExecutionPolicy\s+-ErrorAction\s+Stop' -and $lockedParentScript -match 'Stream\s+-ieq\s+"Zone\.Identifier"' -and
+    $lockedParentScript.IndexOf('$requiresSignature', [StringComparison]::Ordinal) -lt $lockedParentScript.IndexOf('Get-AuthenticodeSignature', [StringComparison]::Ordinal)) 'Shell locked parent does not evaluate actual policy/MOTW before conditional Authenticode.'
+Assert-PshGoal5Entry ($lockedParentScript -match 'Diagnostics\.ProcessStartInfo' -and $lockedParentScript -match '\$child\.WaitForExit\(\)' -and
+    $lockedParentScript.IndexOf('$child.WaitForExit()', [StringComparison]::Ordinal) -lt $lockedParentScript.LastIndexOf('$entryStream.Dispose()', [StringComparison]::Ordinal)) 'Shell locked parent does not retain the entry lock through child completion.'
+Assert-PshGoal5Entry ($lockedParentScript -match 'Append\(\[char\]92,\s*\[int\]' -and $lockedParentScript -notmatch '\(\[string\]\[char\]92\)\s*\*') 'Shell Win32 argument quoting does not use the explicit StringBuilder character repeat overload.'
+Assert-PshGoal5Entry ($shellText -match 'PshShellTempRoot' -and $shellText -match '\[IO\.Path\]::GetTempPath\(\)' -and $shellText -match 'to_shell_path' -and
+    $shellText -match 'PSH_SHELL_RELEASE_METADATA_PATH="\$release_metadata_windows_path"' -and $shellText -match 'PSH_SHELL_ENTRY_PATH="\$entry_windows_path"') 'Shell online flow does not create in Windows TEMP and reuse exact Win32 paths for verification and execution.'
+Assert-PshGoal5Entry ($cleanupScript -match 'PshShellCleanupRoot' -and $cleanupScript -match '\[IO\.File\]::Delete\(' -and
+    $cleanupScript -match '\[IO\.Directory\]::Delete\(\$root,\s*\$false\)' -and $shellText -notmatch '\bmktemp\b') 'Shell online TEMP cleanup is not exact and non-recursive.'
+Assert-PshGoal5Entry ($shellText -notmatch '(?i)Unblock-File|Invoke-Expression|-ExecutionPolicy\s+(Bypass|Unrestricted)|PSExecutionPolicyPreference' -and
+    $shellText -notmatch '(?im)^\s*Set-ExecutionPolicy\b' -and $shellText -notmatch '(?im)^\s*(Set|Add)-Content\b[^\r\n]*Zone\.Identifier') 'Shell entry contains a forbidden execution-policy bypass, policy mutation, memory execution, or synthesized MOTW.'
+Assert-PshGoal5Entry ($shellText -notmatch '(?m)^\s*(digest_status|preflight_status)=' -and $shellText -match 'higher ancestor rename remains the narrow limitation of path-based -File') 'Shell entry retains split preflight processes or omits the path-based ancestor-rename limitation.'
+$argumentFunction = @($lockedParentAst.FindAll({
+            param($node)
+            return ($node -is [Management.Automation.Language.FunctionDefinitionAst] -and [string]$node.Name -ceq 'ConvertTo-PshShellProcessArgument')
+        }, $true))
+Assert-PshGoal5Entry ($argumentFunction.Count -eq 1) 'Shell locked parent argument encoder is missing or duplicated.'
+. ([scriptblock]::Create([string]$argumentFunction[0].Extent.Text))
 $onlineManifestTrustOffset = $onlineText.IndexOf('$trustedPackage = Confirm-PshPackageManifestTrust', [StringComparison]::Ordinal)
 $onlineArchiveBindingOffset = $onlineText.IndexOf('$archiveBinding = Confirm-PshPackageArchiveBinding', [StringComparison]::Ordinal)
 $offlineManifestTrustOffset = $offlineText.IndexOf('$trustedPackage = Confirm-PshPackageManifestTrust', [StringComparison]::Ordinal)
@@ -493,6 +549,8 @@ $script:Goal5OnlineMap = @{}
 $script:Goal5AcquisitionMap = @{}
 $oldArchitecture = $null
 $oldPath = $null
+$oldTemp = $null
+$oldTmp = $null
 
 try {
     $bashSelectionRegression = Select-PshGoal5ShellApplicationPath -Name bash -CandidatePaths @(
@@ -523,7 +581,8 @@ try {
         [string]$coreResult.trust.checksum -ceq 'release-asset-archive-manifest-tree-sha256-verified' -and
         [string]$coreResult.trust.catalogMembership -ceq 'verified' -and [bool]$coreResult.trust.signatureNotRequired -and
         [string]$coreResult.trust.archiveBinding -ceq 'verified' -and [string]$coreResult.trust.archiveSha256 -ceq [string]$coreResult.archiveSha256 -and
-        [string]$coreResult.trust.attestationVerification -ceq 'external-release-gate') 'Online installation did not report the production archive/hash/catalog trust mode honestly.'
+        [bool]$coreResult.trust.attestationRequiredAtPublish -and
+        [string]$coreResult.trust.attestationVerification -ceq 'not-verified-at-runtime') 'Online installation did not report the production archive/hash/catalog trust mode honestly.'
     Assert-PshGoal5Entry (@($script:Goal5OnlineSeen | Where-Object { $_ -match '/v1\.2\.3/' }).Count -ge 3) 'Online release assets were not pinned to the fixed tag.'
     Assert-PshGoal5Entry (@($script:Goal5OnlineSeen | Where-Object { $_ -match '/latest' }).Count -eq 2) 'Online latest resolution did not retry the GitHub API route exactly once after the 502 fixture.'
     Assert-PshGoal5Entry (@($script:Goal5AcquisitionSeen | Where-Object { $_ -match '/v1\.2\.3/' }).Count -ge 1) 'Package acquisition did not use a fixed-tag URI.'
@@ -563,7 +622,8 @@ try {
         [string]$offlineResult.trust.checksum -ceq 'external-archive-manifest-tree-sha256-verified' -and
         [string]$offlineResult.trust.catalogMembership -ceq 'verified' -and [bool]$offlineResult.trust.signatureNotRequired -and
         [string]$offlineResult.trust.archiveBinding -ceq 'verified' -and [string]$offlineResult.trust.archiveSha256 -ceq [string]$offlinePackage.ArchiveSha256 -and
-        [string]$offlineResult.trust.attestationVerification -ceq 'external-release-gate') 'Offline installation did not report the external archive/hash/catalog trust mode honestly.'
+        [bool]$offlineResult.trust.attestationRequiredAtPublish -and
+        [string]$offlineResult.trust.attestationVerification -ceq 'not-verified-at-runtime') 'Offline installation did not report the external archive/hash/catalog trust mode honestly.'
     Assert-PshGoal5Entry ($script:Goal5OnlineSeen.Count -eq 0 -and $script:Goal5AcquisitionSeen.Count -eq 0) 'Offline installation touched a transport.'
     $offlineLog = @(Get-Content -LiteralPath $logPath | ForEach-Object { $_ | ConvertFrom-Json })
     Assert-PshGoal5Entry ($offlineLog.Count -ge 1 -and -not [bool]$offlineLog[-1].catalogPresent) 'The package manifest catalog sidecar entered the lifecycle PackageRoot.'
@@ -641,27 +701,72 @@ try {
 
     $shellFixture = Join-Path $script:TestRoot ($unicodeChinese + ' ' + $unicodeSpace + '/shell')
     [IO.Directory]::CreateDirectory($shellFixture) | Out-Null
-    Copy-Item -LiteralPath $shellPath -Destination (Join-Path $shellFixture 'install.sh')
-    Copy-Item -LiteralPath $offlinePath -Destination (Join-Path $shellFixture 'install-offline.ps1')
+    $shellScriptPath = Join-Path $shellFixture 'install.sh'
+    $shellOfflineFixturePath = Join-Path $shellFixture 'install-offline.ps1'
+    Copy-Item -LiteralPath $shellPath -Destination $shellScriptPath
+    Write-PshGoal5Text -Path $shellOfflineFixturePath -Text @'
+[CmdletBinding()]
+param([string]$Edition = 'Core', [string]$Version = 'latest', [switch]$NonInteractive, [string]$ArchivePath, [string]$ArchiveSha256)
+$entryPath = [IO.Path]::GetFullPath([string]$MyInvocation.MyCommand.Path)
+$writeDenied = $false
+$writeProbe = $null
+try { $writeProbe = New-Object IO.FileStream($entryPath, ([IO.FileMode]::Open), ([IO.FileAccess]::Write), ([IO.FileShare]::ReadWrite)) }
+catch { $writeDenied = $true }
+finally { if ($null -ne $writeProbe) { $writeProbe.Dispose() } }
+$record = [ordered]@{ edition = $Edition; version = $Version; nonInteractive = [bool]$NonInteractive; archivePath = $ArchivePath; archiveSha256 = $ArchiveSha256; entryPath = $entryPath; writeDenied = $writeDenied }
+[IO.File]::AppendAllText([string]$env:PSH_SHELL_TEST_CHILD_LOG, (($record | ConvertTo-Json -Compress) + "`n"), (New-Object Text.UTF8Encoding($false)))
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and -not $writeDenied) { exit 91 }
+exit 7
+'@
     $bashPath = Get-PshGoal5ShellApplication -Name bash
     $shPath = Get-PshGoal5ShellApplication -Name sh
     Assert-PshGoal5Entry (-not [string]::IsNullOrWhiteSpace($bashPath) -and -not [string]::IsNullOrWhiteSpace($shPath)) 'bash and sh are required dependencies for the shell entry contract.'
-    & $bashPath -n (Join-Path $shellFixture 'install.sh')
+    & $bashPath -n $shellScriptPath
     Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 0) 'bash -n rejected install.sh.'
-    & $shPath -n (Join-Path $shellFixture 'install.sh')
+    & $shPath -n $shellScriptPath
     Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 0) 'sh -n rejected install.sh.'
+
+    $quoteCharacter = [string][char]34
+    $slashCharacter = [string][char]92
+    $argumentValues = @(
+        'plain',
+        ('space ' + $unicodeChinese),
+        ('embedded' + $quoteCharacter + 'quote'),
+        ('C:' + $slashCharacter + 'space path' + $slashCharacter)
+    )
+    $argumentRecorderPath = Join-Path $shellFixture 'argument recorder.ps1'
+    $argumentRecordPath = Join-Path $shellFixture 'argument record.json'
+    Write-PshGoal5Text -Path $argumentRecorderPath -Text @'
+[CmdletBinding()]
+param([string]$One, [string]$Two, [string]$Three, [string]$Four, [string]$OutputPath)
+$record = [ordered]@{ values = @($One, $Two, $Three, $Four) }
+[IO.File]::WriteAllText($OutputPath, (($record | ConvertTo-Json -Compress) + "`n"), (New-Object Text.UTF8Encoding($false)))
+'@
+    $argumentProcessValues = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $argumentRecorderPath) + $argumentValues + @($argumentRecordPath)
+    $argumentStartInfo = New-Object Diagnostics.ProcessStartInfo
+    $argumentStartInfo.FileName = [string](Get-Process -Id $PID).Path
+    $argumentStartInfo.Arguments = [string]::Join(' ', @($argumentProcessValues | ForEach-Object { ConvertTo-PshShellProcessArgument -Value ([string]$_) }))
+    $argumentStartInfo.UseShellExecute = $false
+    $argumentProcess = New-Object Diagnostics.Process
+    $argumentProcess.StartInfo = $argumentStartInfo
+    try {
+        Assert-PshGoal5Entry ([bool]$argumentProcess.Start()) 'Unable to start the shell Win32 argument quoting probe.'
+        $argumentProcess.WaitForExit()
+        Assert-PshGoal5Entry ([int]$argumentProcess.ExitCode -eq 0) 'Shell Win32 argument quoting probe returned a nonzero exit code.'
+    }
+    finally { $argumentProcess.Dispose() }
+    $argumentRecord = [IO.File]::ReadAllText($argumentRecordPath, $script:Utf8) | ConvertFrom-Json
+    Assert-PshGoal5Entry (@($argumentRecord.values).Count -eq $argumentValues.Count -and
+        [string]$argumentRecord.values[0] -ceq $argumentValues[0] -and [string]$argumentRecord.values[1] -ceq $argumentValues[1] -and
+        [string]$argumentRecord.values[2] -ceq $argumentValues[2] -and [string]$argumentRecord.values[3] -ceq $argumentValues[3]) 'Shell Win32 argument quoting changed a plain, Unicode/space, quoted, or trailing-backslash value.'
+
+    $windowsPowerShellPath = [string](Get-Command -Name powershell.exe -CommandType Application -ErrorAction Stop).Source
+    $windowsPowerShellBashPath = ConvertTo-PshGoal5BashPath -BashPath $bashPath -Path $windowsPowerShellPath
+    $realCygpath = @(& $bashPath -c 'command -v cygpath')
+    Assert-PshGoal5Entry ($realCygpath.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace([string]$realCygpath[0])) 'Git Bash cygpath is required for the Win32 shell path contract.'
+    $realCygpathBashPath = ([string]$realCygpath[0]).TrimEnd("`r", "`n")
     $fakeBin = Join-Path $script:TestRoot 'fake-bin'
     [IO.Directory]::CreateDirectory($fakeBin) | Out-Null
-    $fakePowerShell = Join-Path $fakeBin 'powershell.exe'
-    Write-PshGoal5Text -Path $fakePowerShell -Text @'
-#!/usr/bin/env bash
-printf '<%s>\n' "$@" >> "$PSH_FAKE_LOG"
-case "$*" in
-  *ConvertFrom-Json*|*ComputeHash*) exec "$PSH_FAKE_REAL_POWERSHELL" "$@" ;;
-  *Get-ExecutionPolicy*) exit "${PSH_FAKE_PREFLIGHT_EXIT:-0}" ;;
-  *) exit "${PSH_FAKE_FILE_EXIT:-7}" ;;
-esac
-'@
     $fakeCurl = Join-Path $fakeBin 'curl'
     Write-PshGoal5Text -Path $fakeCurl -Text @'
 #!/usr/bin/env bash
@@ -694,32 +799,39 @@ case "$url" in
   *) exit 22 ;;
 esac
 '@
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-        & $bashPath -c 'chmod +x "$1"' _ $fakePowerShell
-        Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 0) 'Unable to mark the non-Windows fake powershell.exe executable.'
-        & $bashPath -c 'chmod +x "$1"' _ $fakeCurl
-        Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 0) 'Unable to mark the non-Windows fake curl executable.'
-    }
     $oldPath = $env:PATH
     $env:PATH = "$fakeBin$([IO.Path]::PathSeparator)$oldPath"
-    $shellLogPath = Join-Path $script:TestRoot 'shell.log'
+    $oldTemp = $env:TEMP
+    $oldTmp = $env:TMP
+    $shellWindowsTemp = Join-Path $script:TestRoot ($unicodeChinese + ' ' + $unicodeSpace + ' windows-temp')
+    [IO.Directory]::CreateDirectory($shellWindowsTemp) | Out-Null
+    $env:TEMP = $shellWindowsTemp
+    $env:TMP = $shellWindowsTemp
+    $shellChildLogPath = Join-Path $script:TestRoot 'shell-child.log'
     $shellCurlLogPath = Join-Path $script:TestRoot 'shell-curl.log'
-    $env:PSH_FAKE_LOG = ConvertTo-PshGoal5BashPath -BashPath $bashPath -Path $shellLogPath
+    [IO.File]::WriteAllText($shellChildLogPath, '', $script:Utf8)
+    [IO.File]::WriteAllText($shellCurlLogPath, '', $script:Utf8)
+    $env:PSH_SHELL_TEST_CHILD_LOG = $shellChildLogPath
     $env:PSH_FAKE_CURL_LOG = ConvertTo-PshGoal5BashPath -BashPath $bashPath -Path $shellCurlLogPath
-    $realPowerShellPath = [string](Get-Process -Id $PID).Path
-    $env:PSH_FAKE_REAL_POWERSHELL = ConvertTo-PshGoal5BashPath -BashPath $bashPath -Path $realPowerShellPath
-    $env:PSH_FAKE_FILE_EXIT = '7'
-    $env:PSH_FAKE_PREFLIGHT_EXIT = '0'
-    $shellScriptPath = Join-Path $shellFixture 'install.sh'
+
+    function Assert-PshGoal5NoShellTempRoot {
+        param([Parameter(Mandatory = $true)][string] $Label)
+        $roots = @(Get-ChildItem -LiteralPath $shellWindowsTemp -Force -ErrorAction Stop | Where-Object { $_.Name -cmatch '\Apsh-install-[0-9a-f]{32}\z' })
+        Assert-PshGoal5Entry ($roots.Count -eq 0) "$Label left a controlled psh-install Windows TEMP root behind."
+    }
+
     $shellArchiveArgument = ConvertTo-PshGoal5BashPath -BashPath $bashPath -Path $offlinePackage.ArchivePath
     $shellArchiveShaUpper = ([string]$offlinePackage.ArchiveSha256).ToUpperInvariant()
     & $bashPath $shellScriptPath --offline --edition Full --version '1.2.3' --archive-path $shellArchiveArgument --archive-sha256 $shellArchiveShaUpper --non-interactive
     $shellExit = [int]$LASTEXITCODE
-    Assert-PshGoal5Entry ($shellExit -eq 7) 'Shell wrapper did not forward the PowerShell exit code.'
-    $shellLog = [IO.File]::ReadAllText($shellLogPath, $script:Utf8)
-    Assert-PshGoal5Entry ($shellLog.Contains("<-Edition>`n<Full>") -and $shellLog.Contains("<-Version>`n<1.2.3>") -and $shellLog.Contains('<-NonInteractive>')) 'Shell wrapper did not preserve named argument quoting.'
-    Assert-PshGoal5Entry ($shellLog.Contains("<-ArchivePath>`n") -and $shellLog.Contains("<-ArchiveSha256>`n<$($offlinePackage.ArchiveSha256)>") -and
-        @([regex]::Split($shellLog, '\r?\n') | Where-Object { $_.Contains($unicodeChinese) -and $_.Contains('.zip') }).Count -eq 1) 'Shell wrapper split the Unicode/space archive path or failed to normalize its SHA256.'
+    Assert-PshGoal5Entry ($shellExit -eq 7) 'Shell locked parent did not preserve the offline child exit code.'
+    $shellChildRecords = @([IO.File]::ReadAllLines($shellChildLogPath, $script:Utf8) | ForEach-Object { $_ | ConvertFrom-Json })
+    $offlineShellChild = $shellChildRecords[-1]
+    Assert-PshGoal5Entry ([bool]$offlineShellChild.writeDenied -and [string]$offlineShellChild.edition -ceq 'Full' -and
+        [string]$offlineShellChild.version -ceq '1.2.3' -and [bool]$offlineShellChild.nonInteractive) 'Shell locked parent did not keep the offline entry write-denied or preserve its named arguments.'
+    Assert-PshGoal5Entry ([string]$offlineShellChild.archivePath -ieq [IO.Path]::GetFullPath($offlinePackage.ArchivePath) -and
+        [string]$offlineShellChild.archiveSha256 -ceq [string]$offlinePackage.ArchiveSha256) 'Shell locked parent split the Unicode/space archive path or failed to normalize its SHA256.'
+    Assert-PshGoal5NoShellTempRoot -Label 'Offline shell success'
     & $bashPath $shellScriptPath --help | Out-Null
     Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 0) 'Shell help did not return zero.'
 
@@ -741,12 +853,10 @@ esac
             Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 2) ("Shell {0} did not return structured usage code 2." -f $shellUsageCase.Label)
         }
     }
-    finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
+    finally { $ErrorActionPreference = $previousErrorActionPreference }
 
     $shellEntrySource = Join-Path $script:TestRoot 'shell-online-entry.ps1'
-    Write-PshGoal5Text -Path $shellEntrySource -Text "[CmdletBinding()]`nparam([string]`$Edition,[string]`$Version,[switch]`$NonInteractive)`n"
+    Copy-Item -LiteralPath $shellOfflineFixturePath -Destination $shellEntrySource
     $shellEntrySha = Get-PshGoal5HashFile -Path $shellEntrySource
     $shellEntryLength = [int64]([IO.FileInfo]$shellEntrySource).Length
     $shellEntryUrl = 'https://github.com/Emvdy/psh/releases/download/v1.2.3/install.ps1'
@@ -755,24 +865,28 @@ esac
     Write-PshGoal5Json -Path $shellReleaseMetadataPath -Value ([ordered]@{ tag_name = 'v1.2.3'; draft = $false; prerelease = $false; assets = @($shellAsset) })
     $env:PSH_FAKE_RELEASE_METADATA = ConvertTo-PshGoal5BashPath -BashPath $bashPath -Path $shellReleaseMetadataPath
     $env:PSH_FAKE_ENTRY_SOURCE = ConvertTo-PshGoal5BashPath -BashPath $bashPath -Path $shellEntrySource
-    [IO.File]::WriteAllText($shellLogPath, '', $script:Utf8)
     [IO.File]::WriteAllText($shellCurlLogPath, '', $script:Utf8)
 
     & $bashPath $shellScriptPath --edition Core --version '1.2.3' --non-interactive
-    Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 7) 'Shell fixed-version online entry did not reach the verified installer.'
+    Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 7) 'Shell fixed-version online entry did not preserve the verified child exit code.'
     $shellCurlLog = @([IO.File]::ReadAllLines($shellCurlLogPath, $script:Utf8))
     Assert-PshGoal5Entry (@($shellCurlLog | Where-Object { $_ -ceq 'https://api.github.com/repos/Emvdy/psh/releases/tags/v1.2.3' }).Count -eq 1 -and
         @($shellCurlLog | Where-Object { $_ -ceq $shellEntryUrl }).Count -eq 1) 'Shell fixed-version flow did not use the exact API and fixed-tag asset URLs.'
-    $shellOnlinePowerShellLog = [IO.File]::ReadAllText($shellLogPath, $script:Utf8)
-    Assert-PshGoal5Entry ($shellOnlinePowerShellLog.Contains('ConvertFrom-Json') -and $shellOnlinePowerShellLog.Contains('ComputeHash') -and
-        -not $shellOnlinePowerShellLog.Contains('<-ArchivePath>')) 'Shell online flow skipped release metadata/hash verification or forwarded offline-only evidence.'
+    $shellChildRecords = @([IO.File]::ReadAllLines($shellChildLogPath, $script:Utf8) | ForEach-Object { $_ | ConvertFrom-Json })
+    $onlineShellChild = $shellChildRecords[-1]
+    Assert-PshGoal5Entry ([bool]$onlineShellChild.writeDenied -and [string]$onlineShellChild.edition -ceq 'Core' -and
+        [string]$onlineShellChild.version -ceq '1.2.3' -and [string]::IsNullOrEmpty([string]$onlineShellChild.archivePath)) 'Shell online child was not write-denied or received offline-only evidence.'
+    Assert-PshGoal5Entry (([string]$onlineShellChild.entryPath).StartsWith($shellWindowsTemp, [StringComparison]::OrdinalIgnoreCase) -and
+        [string]$onlineShellChild.entryPath -match '(?i)[\\/]psh-install-[0-9a-f]{32}[\\/]install\.ps1\z') 'Shell online entry was not executed from the controlled Unicode/space Windows TEMP path.'
+    Assert-PshGoal5NoShellTempRoot -Label 'Fixed-version online shell success'
 
     [IO.File]::WriteAllText($shellCurlLogPath, '', $script:Utf8)
     & $bashPath $shellScriptPath --version latest
-    Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 7) 'Shell latest online entry did not reach the fixed verified installer.'
+    Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 7) 'Shell latest online entry did not preserve the verified child exit code.'
     $shellLatestCurlLog = @([IO.File]::ReadAllLines($shellCurlLogPath, $script:Utf8))
     Assert-PshGoal5Entry (@($shellLatestCurlLog | Where-Object { $_ -ceq 'https://api.github.com/repos/Emvdy/psh/releases/latest' }).Count -eq 1 -and
         @($shellLatestCurlLog | Where-Object { $_ -ceq $shellEntryUrl }).Count -eq 1) 'Shell latest flow did not resolve metadata first and then download the fixed-tag asset.'
+    Assert-PshGoal5NoShellTempRoot -Label 'Latest online shell success'
 
     $shellTamperedEntry = Join-Path $script:TestRoot 'shell-online-entry-tampered.ps1'
     Write-PshGoal5Text -Path $shellTamperedEntry -Text "# tampered`n"
@@ -784,6 +898,7 @@ esac
     }
     finally { $ErrorActionPreference = $previousErrorActionPreference }
     Assert-PshGoal5Entry ($shellDigestExit -eq 5) 'Shell online entry did not reject downloaded bytes that disagreed with the authenticated asset digest.'
+    Assert-PshGoal5NoShellTempRoot -Label 'Tampered online shell failure'
 
     $shellDuplicateMetadataPath = Join-Path $script:TestRoot 'shell-release-duplicate.json'
     Write-PshGoal5Json -Path $shellDuplicateMetadataPath -Value ([ordered]@{ tag_name = 'v1.2.3'; draft = $false; prerelease = $false; assets = @($shellAsset, $shellAsset) })
@@ -796,6 +911,42 @@ esac
     }
     finally { $ErrorActionPreference = $previousErrorActionPreference }
     Assert-PshGoal5Entry ($shellDuplicateAssetExit -eq 5) 'Shell online entry did not reject duplicate install.ps1 assets in GitHub release metadata.'
+    Assert-PshGoal5NoShellTempRoot -Label 'Duplicate-metadata shell failure'
+
+    $env:PSH_FAKE_RELEASE_METADATA = ConvertTo-PshGoal5BashPath -BashPath $bashPath -Path $shellReleaseMetadataPath
+    $fakePowerShell = Join-Path $fakeBin 'powershell.exe'
+    Write-PshGoal5Text -Path $fakePowerShell -Text @'
+#!/usr/bin/env bash
+exec "$PSH_FAKE_REAL_POWERSHELL" "$@"
+'@
+    $env:PSH_FAKE_REAL_POWERSHELL = $windowsPowerShellBashPath
+    $shellChildStartError = Join-Path $script:TestRoot 'shell-child-start-error.log'
+    try {
+        $ErrorActionPreference = 'SilentlyContinue'
+        & $bashPath $shellScriptPath --version '1.2.3' 2>$shellChildStartError | Out-Null
+        $shellChildStartExit = [int]$LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previousErrorActionPreference }
+    Assert-PshGoal5Entry ($shellChildStartExit -eq 3 -and [IO.File]::ReadAllText($shellChildStartError, $script:Utf8) -match 'PshShellChildStart') 'Shell child-start failure did not return structured IO exit code 3.'
+    Assert-PshGoal5NoShellTempRoot -Label 'Child-start shell failure'
+    [IO.File]::Delete($fakePowerShell)
+
+    $fakeCygpath = Join-Path $fakeBin 'cygpath'
+    Write-PshGoal5Text -Path $fakeCygpath -Text @'
+#!/usr/bin/env bash
+if [[ "$1" == '-u' ]]; then exit 37; fi
+exec "$PSH_FAKE_REAL_CYGPATH" "$@"
+'@
+    $env:PSH_FAKE_REAL_CYGPATH = $realCygpathBashPath
+    $shellMappingError = Join-Path $script:TestRoot 'shell-mapping-error.log'
+    try {
+        $ErrorActionPreference = 'SilentlyContinue'
+        & $bashPath $shellScriptPath --version '1.2.3' 2>$shellMappingError | Out-Null
+        $shellMappingExit = [int]$LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previousErrorActionPreference }
+    Assert-PshGoal5Entry ($shellMappingExit -eq 3 -and [IO.File]::ReadAllText($shellMappingError, $script:Utf8) -match 'PshShellPath') 'Shell Win32-to-Bash mapping failure did not return structured path exit code 3.'
+    Assert-PshGoal5NoShellTempRoot -Label 'Win32 path-mapping shell failure'
 
     $report = [pscustomobject][ordered]@{ schemaVersion = 1; assertions = $script:Assertions; onlineUris = @($script:Goal5OnlineSeen); acquisitionUris = @($script:Goal5AcquisitionSeen); offlineLog = $sequence }
     Write-PshGoal5Json -Path (Join-Path $reportRoot 'Goal5.OnlineOffline.summary.json') -Value $report
@@ -804,12 +955,13 @@ esac
 finally {
     if ($null -ne $oldArchitecture) { $env:PROCESSOR_ARCHITECTURE = $oldArchitecture } else { Remove-Item Env:PROCESSOR_ARCHITECTURE -ErrorAction SilentlyContinue }
     if ($null -ne $oldPath) { $env:PATH = $oldPath }
+    if ($null -ne $oldTemp) { $env:TEMP = $oldTemp } else { Remove-Item Env:TEMP -ErrorAction SilentlyContinue }
+    if ($null -ne $oldTmp) { $env:TMP = $oldTmp } else { Remove-Item Env:TMP -ErrorAction SilentlyContinue }
     Remove-Item Env:PSH_GOAL5_ENTRY_LOG -ErrorAction SilentlyContinue
-    Remove-Item Env:PSH_FAKE_LOG -ErrorAction SilentlyContinue
-    Remove-Item Env:PSH_FAKE_FILE_EXIT -ErrorAction SilentlyContinue
-    Remove-Item Env:PSH_FAKE_PREFLIGHT_EXIT -ErrorAction SilentlyContinue
+    Remove-Item Env:PSH_SHELL_TEST_CHILD_LOG -ErrorAction SilentlyContinue
     Remove-Item Env:PSH_FAKE_CURL_LOG -ErrorAction SilentlyContinue
     Remove-Item Env:PSH_FAKE_REAL_POWERSHELL -ErrorAction SilentlyContinue
+    Remove-Item Env:PSH_FAKE_REAL_CYGPATH -ErrorAction SilentlyContinue
     Remove-Item Env:PSH_FAKE_RELEASE_METADATA -ErrorAction SilentlyContinue
     Remove-Item Env:PSH_FAKE_ENTRY_SOURCE -ErrorAction SilentlyContinue
     Set-Item -Path Function:\Invoke-PshOnlineHttpRequest -Value $onlineTransportOriginal -ErrorAction SilentlyContinue

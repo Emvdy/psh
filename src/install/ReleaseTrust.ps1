@@ -26,7 +26,7 @@ if ($null -eq (Get-Command -Name Read-PshStrictJsonSnapshot -CommandType Functio
 
 $script:PshReleaseRepository = 'https://github.com/Emvdy/psh'
 $script:PshReleaseApiRoot = 'https://api.github.com/repos/Emvdy/psh/releases'
-$script:PshProductionTrustPolicyVersion = '2026-07-22.2'
+$script:PshProductionTrustPolicyVersion = '2026-07-22.3'
 $script:PshReleaseIndexKeys = @('schemaVersion', 'product', 'repository', 'version', 'tag', 'sourceCommit', 'assets')
 $script:PshReleaseAssetKeys = @('name', 'role', 'url', 'length', 'sha256', 'package')
 $script:PshReleasePackageKeys = @('version', 'edition', 'architecture', 'packageManifestSha256', 'treeSha256', 'testOnly')
@@ -83,8 +83,8 @@ function Get-PshProductionTrustPolicy {
         catalogMembershipRequired = $true
         archiveBindingRequired = $true
         signatureRequired = $false
-        provenanceAttestationRequiredAtPublish = $true
-        runtimeAttestationVerification = 'external-release-gate'
+        attestationRequiredAtPublish = $true
+        runtimeAttestationVerification = 'not-verified-at-runtime'
     }
 }
 
@@ -110,6 +110,7 @@ function New-PshProductionTrustReport {
         signatureNotRequired = $SignatureNotRequired
         archiveBinding = $ArchiveBinding
         archiveSha256 = $ArchiveSha256
+        attestationRequiredAtPublish = [bool]$policy.attestationRequiredAtPublish
         attestationVerification = $AttestationVerification
     }
 }
@@ -1569,7 +1570,7 @@ function Complete-PshProductionArchiveTrustReport {
     if ($ArchiveSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $ArchiveSha256 -ceq ('0' * 64)) {
         Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveSha256' -Message 'Completed archive trust requires a non-zero lowercase SHA256 value.'
     }
-    return New-PshProductionTrustReport -TrustMode $TrustMode -Checksum $Checksum -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'verified' -ArchiveSha256 $ArchiveSha256 -AttestationVerification 'external-release-gate'
+    return New-PshProductionTrustReport -TrustMode $TrustMode -Checksum $Checksum -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'verified' -ArchiveSha256 $ArchiveSha256 -AttestationVerification 'not-verified-at-runtime'
 }
 
 function Get-PshTrustedReleaseRecord {
@@ -1629,7 +1630,7 @@ function Invoke-PshReleaseTrustBundleCore {
             [void](Assert-PshReleaseMetadataFileState -Metadata $metadata -Source $checksumSource)
             [void](Assert-PshReleaseMetadataFileState -Metadata $metadata -Source $catalogSource)
             $trust = Invoke-PshProductionCatalogMembershipVerifier -Context $context
-            $trustReport = New-PshProductionTrustReport -TrustMode 'github-release-asset-digest' -Checksum 'github-release-sha256-verified' -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'not-applicable' -AttestationVerification 'external-release-gate'
+            $trustReport = New-PshProductionTrustReport -TrustMode 'github-release-asset-digest' -Checksum 'github-release-sha256-verified' -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'not-applicable' -AttestationVerification 'not-verified-at-runtime'
             $publisher = $null
         }
         else {
@@ -1795,10 +1796,10 @@ function Invoke-PshPackageManifestTrustCore {
         if ($useHashPolicy) {
             $trust = Invoke-PshProductionCatalogMembershipVerifier -Context $context
             if ([bool]$Offline) {
-                $trustReport = New-PshProductionTrustReport -TrustMode 'offline-external-archive-sha256+package-catalog-sha256' -Checksum 'archive-binding-required' -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'required-at-entry' -AttestationVerification 'external-release-gate'
+                $trustReport = New-PshProductionTrustReport -TrustMode 'offline-external-archive-sha256+package-catalog-sha256' -Checksum 'archive-binding-required' -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'required-at-entry' -AttestationVerification 'not-verified-at-runtime'
             }
             else {
-                $trustReport = New-PshProductionTrustReport -TrustMode 'github-release-asset-digest+archive-binding+package-catalog-sha256' -Checksum 'archive-binding-required' -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'required-at-entry' -AttestationVerification 'external-release-gate'
+                $trustReport = New-PshProductionTrustReport -TrustMode 'github-release-asset-digest+archive-binding+package-catalog-sha256' -Checksum 'archive-binding-required' -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'required-at-entry' -AttestationVerification 'not-verified-at-runtime'
             }
             $publisher = $null
         }
