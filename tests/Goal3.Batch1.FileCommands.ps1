@@ -1,4 +1,4 @@
-# Copyright (C) 2026 Emvdy
+﻿# Copyright (C) 2026 Emvdy
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 param(
@@ -19,6 +19,8 @@ $crossVolumeRoot = $null
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
 $covered = @{}
 $assertionCount = 0
+
+. (Join-Path -Path $PSScriptRoot -ChildPath 'TestHelpers/GoldenNormalization.ps1')
 
 function Assert-PshBatch1 {
     param(
@@ -94,30 +96,6 @@ function ConvertTo-PshBatch1ExpectedSymbolicLinkTarget {
     return $Target
 }
 
-function Normalize-PshGoldenText {
-    param(
-        [AllowNull()]
-        [string]$Text,
-
-        [Parameter(Mandatory = $true)]
-        [string]$CaseRoot,
-
-        [switch]$Mktemp
-    )
-
-    if ($null -eq $Text) { $Text = '' }
-    $normalized = $Text.Replace("`r`n", "`n").Replace("`r", "`n").Replace('\', '/')
-    $normalizedRoot = [IO.Path]::GetFullPath($CaseRoot).Replace('\', '/').TrimEnd('/')
-    $normalized = $normalized.Replace($normalizedRoot, '<ROOT>')
-    if ($Mktemp) {
-        $normalized = [Text.RegularExpressions.Regex]::Replace($normalized, '(?m)(?:<ROOT>/mktemp/)?item\.[A-Za-z0-9]+$', '<TEMP_NAME>')
-    }
-    if ($normalized.EndsWith("`n")) {
-        $normalized = $normalized.Substring(0, $normalized.Length - 1)
-    }
-    return $normalized
-}
-
 function Compare-PshGoldenCase {
     param(
         [Parameter(Mandatory = $true)]
@@ -126,7 +104,7 @@ function Compare-PshGoldenCase {
         [Parameter(Mandatory = $true)]
         [AllowNull()]
         [AllowEmptyCollection()]
-        [string[]]$ActualLines = @(),
+        [string[]]$ActualLines,
 
         [Parameter(Mandatory = $true)]
         [string]$CaseRoot,
@@ -136,10 +114,14 @@ function Compare-PshGoldenCase {
 
     $expectedPath = Join-Path -Path $GoldenRoot -ChildPath ($Id + '.txt')
     Assert-PshBatch1 ([IO.File]::Exists($expectedPath)) ('GNU golden file is missing: {0}' -f $expectedPath)
-    $expected = Normalize-PshGoldenText -Text ([IO.File]::ReadAllText($expectedPath, $utf8NoBom)) -CaseRoot $CaseRoot -Mktemp:$Mktemp
+    $expected = ConvertTo-PshGoldenNormalizedText -Text ([IO.File]::ReadAllText($expectedPath, $utf8NoBom)) -PathRoot $CaseRoot
     if ($null -eq $ActualLines) { $ActualLines = @() }
-    $actual = Normalize-PshGoldenText -Text ($ActualLines -join "`n") -CaseRoot $CaseRoot -Mktemp:$Mktemp
-    Assert-PshBatch1 ([string]::Equals($actual, $expected, [StringComparison]::Ordinal)) ('GNU golden mismatch for {0}. Expected <{1}>, actual <{2}>.' -f $Id, $expected, $actual)
+    $actual = ConvertTo-PshGoldenNormalizedText -Text ($ActualLines -join "`n") -PathRoot $CaseRoot
+    if ($Mktemp) {
+        $expected = [Text.RegularExpressions.Regex]::Replace($expected, '(?m)(?:<ROOT>/mktemp/)?item\.[A-Za-z0-9]+$', '<TEMP_NAME>')
+        $actual = [Text.RegularExpressions.Regex]::Replace($actual, '(?m)(?:<ROOT>/mktemp/)?item\.[A-Za-z0-9]+$', '<TEMP_NAME>')
+    }
+    Assert-PshBatch1 (Test-PshGoldenOrdinalEqual -Left $actual -Right $expected) ('GNU golden mismatch for {0}. Expected <{1}>, actual <{2}>.' -f $Id, $expected, $actual)
 }
 
 try {
@@ -371,8 +353,7 @@ try {
                 $crossVolumeRoot = $candidateRoot
                 break
             }
-            catch {
-            }
+            catch { [void]$_.Exception.Message }
         }
         if (-not [string]::IsNullOrWhiteSpace($crossVolumeRoot)) {
             $crossVolumeSource = Join-Path $copyDirectory 'cross-volume-source.txt'
@@ -383,11 +364,11 @@ try {
             Assert-PshBatch1 ($crossVolumeMove.ExitCode -eq 0 -and -not [IO.File]::Exists($crossVolumeSource) -and [IO.File]::ReadAllText($crossVolumeTarget, $utf8NoBom) -ceq 'cross-volume-new') 'mv did not replace an existing file across writable Windows volumes.'
         }
         else {
-            Write-Output 'SKIP: real cross-volume mv requires a second writable Windows volume; forced transaction coverage executed.'
+            Write-Output 'INFO: real cross-volume mv requires a second writable Windows volume; forced transaction coverage executed.'
         }
     }
     else {
-        Write-Output 'SKIP: real cross-volume mv is conditional on a second writable Windows volume; forced transaction coverage executed.'
+        Write-Output 'INFO: real cross-volume mv is conditional on a second writable Windows volume; forced transaction coverage executed.'
     }
 
     # Exercise the destination-side copy/commit/delete path even on a single-volume host.

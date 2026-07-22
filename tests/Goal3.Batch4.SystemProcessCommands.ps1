@@ -31,6 +31,8 @@ $aliasNames = @('ps', 'kill', 'sleep', 'clear')
 $aliasBaseline = [ordered]@{}
 $environmentNames = New-Object Collections.ArrayList
 
+. (Join-Path -Path $PSScriptRoot -ChildPath 'TestHelpers/GoldenNormalization.ps1')
+
 function Assert-PshBatch4 {
     param(
         [Parameter(Mandatory = $true)][bool]$Condition,
@@ -115,15 +117,6 @@ function Invoke-PshBatch4Command {
     }
 }
 
-function Normalize-PshBatch4Text {
-    param([AllowNull()][string]$Text)
-
-    if ($null -eq $Text) { return '' }
-    $value = $Text.Replace("`r`n", "`n").Replace("`r", "`n")
-    if ($value.EndsWith("`n")) { $value = $value.Substring(0, $value.Length - 1) }
-    return $value
-}
-
 function Test-PshBatch4ByteSequence {
     param(
         [AllowNull()][byte[]]$Left,
@@ -156,7 +149,7 @@ function Test-PshBatch4StringArray {
     return $true
 }
 
-function Get-PshBatch4EnvironmentLineNames {
+function Get-PshBatch4EnvironmentLineName {
     param(
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
@@ -176,8 +169,7 @@ function Get-PshBatch4EnvironmentLineNames {
 
 function Get-PshBatch4ProcessEnvironmentSnapshot {
     $environment = [Environment]::GetEnvironmentVariables('Process')
-    [string[]]$names = @($environment.Keys | ForEach-Object { [string]$_ })
-    [Array]::Sort($names, [StringComparer]::Ordinal)
+    [string[]]$names = @(ConvertTo-PshGoldenOrdinalOrder -Value @($environment.Keys | ForEach-Object { [string]$_ }))
     $lines = @()
     foreach ($name in $names) { $lines += ('{0}={1}' -f $name, [string]$environment[$name]) }
     return $lines
@@ -191,17 +183,17 @@ function Compare-PshBatch4GoldenIfPresent {
 
     if ([string]::IsNullOrWhiteSpace($GoldenRoot)) { return }
     $path = Join-Path $GoldenRoot ($Id + '.txt')
-    if (-not [IO.File]::Exists($path)) { return }
-    $expected = Normalize-PshBatch4Text ([IO.File]::ReadAllText($path, $utf8NoBom))
-    $actualText = Normalize-PshBatch4Text ($Actual -join "`n")
-    Assert-PshBatch4 ([string]::Equals($expected, $actualText, [StringComparison]::Ordinal)) ('GNU golden mismatch for {0}. Expected <{1}>, actual <{2}>.' -f $Id, $expected, $actualText)
+    Assert-PshBatch4 ([IO.File]::Exists($path)) ('GNU golden is missing: {0}' -f $path)
+    $expected = ConvertTo-PshGoldenNormalizedText -Text ([IO.File]::ReadAllText($path, $utf8NoBom))
+    $actualText = ConvertTo-PshGoldenNormalizedText -Text ($Actual -join "`n")
+    Assert-PshBatch4 (Test-PshGoldenOrdinalEqual -Left $expected -Right $actualText) ('GNU golden mismatch for {0}. Expected <{1}>, actual <{2}>.' -f $Id, $expected, $actualText)
     $script:goldenComparisonCount++
 }
 
 function Get-PshBatch4RawText {
     param([Parameter(Mandatory = $true)][object]$Result)
 
-    return Normalize-PshBatch4Text ($utf8NoBom.GetString([byte[]]$Result.RawBytes))
+    return ConvertTo-PshGoldenNormalizedText -Text ($utf8NoBom.GetString([byte[]]$Result.RawBytes))
 }
 
 function Test-PshBatch4ProcessAlive {
@@ -225,23 +217,23 @@ function Wait-PshBatch4ProcessExit {
     return (-not (Test-PshBatch4ProcessAlive -Process $Process))
 }
 
-function Stop-PshBatch4TrackedProcesses {
+function Invoke-PshBatch4TrackedProcessCleanup {
     foreach ($process in @($script:trackedProcesses)) {
         if ($null -eq $process) { continue }
         try {
             if (Test-PshBatch4ProcessAlive -Process $process) {
                 $process.Kill()
-                try { [void]$process.WaitForExit(3000) } catch { }
+                try { [void]$process.WaitForExit(3000) } catch { [void]$_.Exception.Message }
             }
         }
-        catch { }
-        finally { try { $process.Dispose() } catch { } }
+        catch { [void]$_.Exception.Message }
+        finally { try { $process.Dispose() } catch { [void]$_.Exception.Message } }
     }
     $script:trackedProcesses.Clear()
 
 }
 
-function Start-PshBatch4TaggedChild {
+function Invoke-PshBatch4TaggedChild {
     param(
         [Parameter(Mandatory = $true)][string]$Tag,
         [int]$DurationSeconds = 60
@@ -283,7 +275,7 @@ function Start-PshBatch4TaggedChild {
     return $process
 }
 
-function ConvertFrom-PshBatch4ProcessIds {
+function ConvertFrom-PshBatch4ProcessId {
     param([AllowNull()][string[]]$Lines = @())
 
     $ids = @()
@@ -296,14 +288,14 @@ function ConvertFrom-PshBatch4ProcessIds {
     return [int[]]$ids
 }
 
-function Assert-PshBatch4ExactProcessIds {
+function Assert-PshBatch4ExactProcessId {
     param(
         [AllowNull()][string[]]$Lines = @(),
         [Parameter(Mandatory = $true)][int[]]$Expected,
         [Parameter(Mandatory = $true)][string]$Context
     )
 
-    $actual = @(ConvertFrom-PshBatch4ProcessIds -Lines $Lines | Sort-Object)
+    $actual = @(ConvertFrom-PshBatch4ProcessId -Lines $Lines | Sort-Object)
     $wanted = @($Expected | Sort-Object)
     $equal = $actual.Count -eq $wanted.Count
     if ($equal) {
@@ -314,7 +306,7 @@ function Assert-PshBatch4ExactProcessIds {
     Assert-PshBatch4 $equal ('{0} selected unexpected PIDs. Expected <{1}>, actual <{2}>.' -f $Context, ($wanted -join ','), ($actual -join ','))
 }
 
-function New-PshBatch4TimeoutNativeHelperAssembly {
+function Build-PshBatch4TimeoutNativeHelperAssembly {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     # Explicitly carry timeout's output pipes into the Windows grandchild;
@@ -549,7 +541,7 @@ try {
     [void][IO.Directory]::CreateDirectory($configRoot)
     [void][IO.Directory]::CreateDirectory($processRoot)
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        New-PshBatch4TimeoutNativeHelperAssembly -Path $timeoutNativeHelperAssemblyPath
+        Build-PshBatch4TimeoutNativeHelperAssembly -Path $timeoutNativeHelperAssemblyPath
     }
     if (-not [string]::IsNullOrWhiteSpace($GoldenRoot)) {
         Assert-PshBatch4 ([IO.Directory]::Exists($GoldenRoot)) ('GNU golden root does not exist: {0}' -f $GoldenRoot)
@@ -625,22 +617,22 @@ try {
     $parenthesizedPrefixLines = @('ProgramFiles=C:\Program Files', 'ProgramFiles(x86)=C:\Program Files (x86)')
     $parenthesizedPrefixWholeLineSort = @($parenthesizedPrefixLines)
     [Array]::Sort($parenthesizedPrefixWholeLineSort, [StringComparer]::Ordinal)
-    $parenthesizedPrefixNames = @(Get-PshBatch4EnvironmentLineNames -Lines $parenthesizedPrefixLines)
+    $parenthesizedPrefixNames = @(Get-PshBatch4EnvironmentLineName -Lines $parenthesizedPrefixLines)
     $parenthesizedPrefixNameSort = @($parenthesizedPrefixNames)
     [Array]::Sort($parenthesizedPrefixNameSort, [StringComparer]::Ordinal)
     Assert-PshBatch4 ((Test-PshBatch4StringArray $parenthesizedPrefixNames $parenthesizedPrefixNameSort) -and $parenthesizedPrefixWholeLineSort[0] -ceq $parenthesizedPrefixLines[1]) 'environment ordering regression did not distinguish name sorting from whole-line sorting.'
 
-    $hiddenDriveNames = @(Get-PshBatch4EnvironmentLineNames -Lines @('=C:=C:\psh-batch4', 'Path=C:\Windows'))
+    $hiddenDriveNames = @(Get-PshBatch4EnvironmentLineName -Lines @('=C:=C:\psh-batch4', 'Path=C:\Windows'))
     Assert-PshBatch4 (Test-PshBatch4StringArray $hiddenDriveNames @('=C:', 'Path')) 'environment line parsing did not preserve a Windows hidden drive variable name.'
     $invalidEnvironmentLineRejected = $false
-    try { [void](Get-PshBatch4EnvironmentLineNames -Lines @('PSH_BATCH4_INVALID_ENVIRONMENT_LINE')) }
+    try { [void](Get-PshBatch4EnvironmentLineName -Lines @('PSH_BATCH4_INVALID_ENVIRONMENT_LINE')) }
     catch { $invalidEnvironmentLineRejected = $true }
     Assert-PshBatch4 $invalidEnvironmentLineRejected 'environment line parsing accepted a line without a name/value separator.'
 
     $environmentBeforeInheritedListing = @(Get-PshBatch4ProcessEnvironmentSnapshot)
     $envInherited = Invoke-PshBatch4Command -Name env
     $environmentAfterInheritedListing = @(Get-PshBatch4ProcessEnvironmentSnapshot)
-    $envInheritedNames = @(Get-PshBatch4EnvironmentLineNames -Lines ([string[]]$envInherited.Output))
+    $envInheritedNames = @(Get-PshBatch4EnvironmentLineName -Lines ([string[]]$envInherited.Output))
     $envInheritedSortedNames = @($envInheritedNames)
     [Array]::Sort($envInheritedSortedNames, [StringComparer]::Ordinal)
     Assert-PshBatch4 ($envInherited.ExitCode -eq 0 -and (Test-PshBatch4StringArray $envInherited.Output $environmentBeforeInheritedListing)) 'env inherited output did not exactly match the current process environment in ordinal name order.'
@@ -823,7 +815,7 @@ exit 2
     finally { $currentProcess.Dispose() }
 
     $psTag = 'PshBatch4Ps' + [Guid]::NewGuid().ToString('N')
-    $psChild = Start-PshBatch4TaggedChild -Tag $psTag
+    $psChild = Invoke-PshBatch4TaggedChild -Tag $psTag
     Assert-PshBatch4 ($protectedProcessIds -notcontains $psChild.Id) 'the ps fixture unexpectedly resolved to a protected PID.'
     $psSelected = Invoke-PshBatch4Command -Name ps -Arguments @('-aefl', '-p', ([string]$psChild.Id)) -CountsAsBehavior
     Assert-PshBatch4 ($psSelected.ExitCode -eq 0 -and $psSelected.Output.Count -eq 2 -and $psSelected.Output[0] -match '^\s*PID\s+NAME\s+PATH$' -and $psSelected.Output[1] -match ('^\s*{0}\s+' -f $psChild.Id)) 'ps -aefl -p did not return the uniquely tagged child structurally.'
@@ -833,25 +825,25 @@ exit 2
     Assert-PshBatch4 ($psMissing.ExitCode -eq 1 -and $psMissing.Output.Count -eq 0) 'ps -p did not exit 1 when every requested PID was absent.'
 
     $pgrepCaseTag = 'PshBatch4CaseABC' + [Guid]::NewGuid().ToString('N')
-    $pgrepCaseChild = Start-PshBatch4TaggedChild -Tag $pgrepCaseTag
+    $pgrepCaseChild = Invoke-PshBatch4TaggedChild -Tag $pgrepCaseTag
     Assert-PshBatch4 ($protectedProcessIds -notcontains $pgrepCaseChild.Id) 'the pgrep fixture unexpectedly resolved to a protected PID.'
     $currentUser = [Environment]::UserName
     $pgrepSelectors = Invoke-PshBatch4Command -Name pgrep -Arguments @('-filu', $currentUser, ([Regex]::Escape($pgrepCaseTag.ToLowerInvariant()))) -CountsAsBehavior
     Assert-PshBatch4 ($pgrepSelectors.ExitCode -eq 0 -and $pgrepSelectors.Output.Count -eq 1 -and $pgrepSelectors.Output[0] -match ('^{0}\s+\S+' -f $pgrepCaseChild.Id)) 'pgrep -f/-i/-l/-u did not select only the uniquely tagged child.'
 
     $orderTag = 'PshBatch4Order' + [Guid]::NewGuid().ToString('N')
-    $oldestChild = Start-PshBatch4TaggedChild -Tag $orderTag
+    $oldestChild = Invoke-PshBatch4TaggedChild -Tag $orderTag
     Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 1100
-    $newestChild = Start-PshBatch4TaggedChild -Tag $orderTag
+    $newestChild = Invoke-PshBatch4TaggedChild -Tag $orderTag
     $pgrepOldest = Invoke-PshBatch4Command -Name pgrep -Arguments @('-f', '-o', ([Regex]::Escape($orderTag)))
     $pgrepNewest = Invoke-PshBatch4Command -Name pgrep -Arguments @('-f', '-n', ([Regex]::Escape($orderTag)))
-    Assert-PshBatch4ExactProcessIds -Lines $pgrepOldest.Output -Expected @($oldestChild.Id) -Context 'pgrep -o'
-    Assert-PshBatch4ExactProcessIds -Lines $pgrepNewest.Output -Expected @($newestChild.Id) -Context 'pgrep -n'
+    Assert-PshBatch4ExactProcessId -Lines $pgrepOldest.Output -Expected @($oldestChild.Id) -Context 'pgrep -o'
+    Assert-PshBatch4ExactProcessId -Lines $pgrepNewest.Output -Expected @($newestChild.Id) -Context 'pgrep -n'
     $pgrepMissing = Invoke-PshBatch4Command -Name pgrep -Arguments @('-f', ('PshBatch4Missing' + [Guid]::NewGuid().ToString('N')))
     Assert-PshBatch4 ($pgrepMissing.ExitCode -eq 1 -and $pgrepMissing.Output.Count -eq 0) 'pgrep no-match behavior failed.'
 
     $unsupportedSignalTag = 'PshBatch4UnsupportedSignal' + [Guid]::NewGuid().ToString('N')
-    $unsupportedSignalChild = Start-PshBatch4TaggedChild -Tag $unsupportedSignalTag
+    $unsupportedSignalChild = Invoke-PshBatch4TaggedChild -Tag $unsupportedSignalTag
     Assert-PshBatch4 ($protectedProcessIds -notcontains $unsupportedSignalChild.Id) 'the unsupported-signal fixture unexpectedly resolved to a protected PID.'
     $killUnsupportedStop = Invoke-PshBatch4Command -Name kill -Arguments @('-s', 'STOP', ([string]$unsupportedSignalChild.Id)) -CountsAsBehavior
     $killUnsupportedCont = Invoke-PshBatch4Command -Name kill -Arguments @('--signal', 'CONT', ([string]$unsupportedSignalChild.Id))
@@ -862,7 +854,7 @@ exit 2
     Assert-PshBatch4 ($killHard.ExitCode -eq 0 -and (Wait-PshBatch4ProcessExit -Process $unsupportedSignalChild)) 'kill KILL did not terminate the tracked child.'
 
     $termTag = 'PshBatch4Term' + [Guid]::NewGuid().ToString('N')
-    $termChild = Start-PshBatch4TaggedChild -Tag $termTag
+    $termChild = Invoke-PshBatch4TaggedChild -Tag $termTag
     Assert-PshBatch4 ($protectedProcessIds -notcontains $termChild.Id) 'the TERM fixture unexpectedly resolved to a protected PID.'
     $killTerm = Invoke-PshBatch4Command -Name kill -Arguments @('--signal', 'TERM', ([string]$termChild.Id))
     Assert-PshBatch4 ($killTerm.ExitCode -eq 0 -and (Wait-PshBatch4ProcessExit -Process $termChild)) 'kill TERM did not terminate the tracked child.'
@@ -873,19 +865,19 @@ exit 2
     $killMissing = Invoke-PshBatch4Command -Name kill -Arguments @('2147483000')
     Assert-PshBatch4 ($killMissing.ExitCode -eq 1 -and $killMissing.Output.Count -eq 0) 'kill did not return NoMatch when every requested PID was absent.'
     $killPartialTag = 'PshBatch4KillPartial' + [Guid]::NewGuid().ToString('N')
-    $killPartialChild = Start-PshBatch4TaggedChild -Tag $killPartialTag
+    $killPartialChild = Invoke-PshBatch4TaggedChild -Tag $killPartialTag
     Assert-PshBatch4 ($protectedProcessIds -notcontains $killPartialChild.Id) 'the partial-kill fixture unexpectedly resolved to a protected PID.'
     $killPartial = Invoke-PshBatch4Command -Name kill -Arguments @('--signal', 'TERM', '2147483000', ([string]$killPartialChild.Id))
     Assert-PshBatch4 ($killPartial.ExitCode -eq 3 -and (Wait-PshBatch4ProcessExit -Process $killPartialChild)) 'kill silently reported success after only some requested PIDs were signaled.'
 
     $pkillTag = 'PshBatch4Pkill' + [Guid]::NewGuid().ToString('N')
-    $pkillChild = Start-PshBatch4TaggedChild -Tag $pkillTag
+    $pkillChild = Invoke-PshBatch4TaggedChild -Tag $pkillTag
     $unrelatedTag = 'PshBatch4Unrelated' + [Guid]::NewGuid().ToString('N')
-    $unrelatedChild = Start-PshBatch4TaggedChild -Tag $unrelatedTag
+    $unrelatedChild = Invoke-PshBatch4TaggedChild -Tag $unrelatedTag
     Assert-PshBatch4 ($protectedProcessIds -notcontains $pkillChild.Id -and $protectedProcessIds -notcontains $unrelatedChild.Id) 'the pkill fixtures unexpectedly resolved to protected PIDs.'
     $pkillPattern = [Regex]::Escape($pkillTag)
     $pkillPreflight = Invoke-PshBatch4Command -Name pgrep -Arguments @('-f', $pkillPattern)
-    Assert-PshBatch4ExactProcessIds -Lines $pkillPreflight.Output -Expected @($pkillChild.Id) -Context 'pkill preflight'
+    Assert-PshBatch4ExactProcessId -Lines $pkillPreflight.Output -Expected @($pkillChild.Id) -Context 'pkill preflight'
     $pkillResult = Invoke-PshBatch4Command -Name pkill -Arguments @('-f', '--signal', 'TERM', $pkillPattern) -CountsAsBehavior
     Assert-PshBatch4 ($pkillResult.ExitCode -eq 0 -and (Wait-PshBatch4ProcessExit -Process $pkillChild)) 'pkill did not terminate its uniquely tagged child.'
     Assert-PshBatch4 (Test-PshBatch4ProcessAlive -Process $unrelatedChild) 'pkill terminated an unrelated tracked child.'
@@ -1048,7 +1040,7 @@ exit 2
     $timeoutMissing = Invoke-PshBatch4Command -Name timeout -Arguments @('1s', ('psh-batch4-missing-executable-' + [Guid]::NewGuid().ToString('N')))
     Assert-PshBatch4 ($timeoutMissing.ExitCode -eq 4) 'timeout missing command did not exit 4.'
 
-    Stop-PshBatch4TrackedProcesses
+    Invoke-PshBatch4TrackedProcessCleanup
 
     foreach ($name in $commandNames) {
         Assert-PshBatch4 ($covered.ContainsKey($name)) ('no behavior row executed for {0}.' -f $name)
@@ -1081,7 +1073,7 @@ exit 2
     $global:LASTEXITCODE = 0
 }
 finally {
-    Stop-PshBatch4TrackedProcesses
+    Invoke-PshBatch4TrackedProcessCleanup
     Remove-Module -Name Psh -Force -ErrorAction SilentlyContinue
     Set-Location -LiteralPath $originalLocation -ErrorAction SilentlyContinue
     foreach ($name in @($environmentNames)) {
