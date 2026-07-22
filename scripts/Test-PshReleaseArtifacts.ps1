@@ -493,7 +493,7 @@ function Invoke-PshReleaseCatalogMembershipVerification {
             Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId $ErrorId -Message "$Description membership verification returned an ambiguous result set (raw=$($validationResults.Count), status=$($statusResults.Count))."
         }
         $status = if ($null -ne $validation -and $null -ne $validation.PSObject.Properties['Status']) { [string]$validation.Status } else { [string]$validation }
-        if ($status -cne 'ValidationPassed') {
+        if (-not (Test-PshLifecycleCatalogValidationStatus -Status $status)) {
             Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId $ErrorId -Message "$Description does not cover its exact required member set: $status"
         }
     }

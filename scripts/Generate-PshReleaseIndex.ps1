@@ -454,7 +454,7 @@ function Confirm-PshReleaseCatalogForFinalize {
             Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseCatalogMembership' -Message "Release catalog membership verification returned an ambiguous result set (raw=$($validationResults.Count), status=$($statusResults.Count))."
         }
         $status = if ($null -ne $validation -and $null -ne $validation.PSObject.Properties['Status']) { [string]$validation.Status } else { [string]$validation }
-        if ($status -cne 'ValidationPassed') {
+        if (-not (Test-PshLifecycleCatalogValidationStatus -Status $status)) {
             Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseCatalogMembership' -Message "Release catalog does not cover the exact index/checksum set: $status"
         }
     }

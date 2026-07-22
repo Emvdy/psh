@@ -632,7 +632,7 @@ function Confirm-PshBuildPackageCatalogMembership {
             Throw-PshPackageBuildError -ExitCode 5 -ErrorId 'PshPackageBuildCatalogMembership' -Message "Package catalog membership verification returned an ambiguous result set for '$PackageName' (raw=$($validationResults.Count), status=$($statusResults.Count))."
         }
         $status = if ($null -ne $validation -and $null -ne $validation.PSObject.Properties['Status']) { [string]$validation.Status } else { [string]$validation }
-        if ($status -cne 'ValidationPassed') {
+        if (-not (Test-PshLifecycleCatalogValidationStatus -Status $status)) {
             Throw-PshPackageBuildError -ExitCode 5 -ErrorId 'PshPackageBuildCatalogMembership' -Message "Package catalog does not cover exactly package.manifest.json for '$PackageName': $status"
         }
     }

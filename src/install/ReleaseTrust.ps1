@@ -1120,7 +1120,7 @@ function Invoke-PshWindowsCatalogTrustVerifier {
     $publisher = Assert-PshPublisherCertificate -Certificate $signature.SignerCertificate -PublisherPolicy $policy
     $validation = & $catalogCommand -CatalogFilePath $catalogPath -Path $contentRoot -Detailed -ErrorAction Stop
     $status = if ($null -ne $validation.PSObject.Properties['Status']) { [string]$validation.Status } else { [string]$validation }
-    if ($status -cne 'ValidationPassed') {
+    if (-not (Test-PshLifecycleCatalogValidationStatus -Status $status)) {
         Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContent' -Message "Catalog content validation failed: $status"
     }
     return $publisher
@@ -1154,7 +1154,7 @@ function Invoke-PshWindowsCatalogMembershipVerifier {
         Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContent' -Message 'Catalog membership verification failed.' -InnerException $_.Exception
     }
     $status = if ($null -ne $validation -and $null -ne $validation.PSObject.Properties['Status']) { [string]$validation.Status } else { [string]$validation }
-    if ($status -cne 'ValidationPassed') {
+    if (-not (Test-PshLifecycleCatalogValidationStatus -Status $status)) {
         Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContent' -Message "Catalog content validation failed: $status"
     }
     return [pscustomobject][ordered]@{

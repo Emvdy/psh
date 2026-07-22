@@ -116,6 +116,13 @@ function Test-PshLifecycleExceptionMetadata {
     return ($null -ne $exception -and $exception -is [Exception] -and $exception.Data.Contains('PshExitCode'))
 }
 
+function Test-PshLifecycleCatalogValidationStatus {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()][string] $Status)
+
+    return ($null -ne $Status -and $Status -ceq 'Valid')
+}
+
 function Get-PshLifecyclePropertyNames {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][AllowNull()][object] $InputObject)
