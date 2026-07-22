@@ -2,11 +2,6 @@ name: Goal 6 Windows 11 ARM Capability Probe
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - goal6/tests-ci
-    paths:
-      - '.github/workflows/goal6-arm-probe.yml'
 
 permissions: {}
 
