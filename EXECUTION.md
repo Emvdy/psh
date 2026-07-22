@@ -14,7 +14,7 @@ condition has direct evidence.
 | Goal 3 | COMPLETE | `9254f3b` | Merged to `main` at `71fbda8`; final branch and `main` CI green |
 | Goal 4 | COMPLETE | `3289786` | Merged to `main`; Goal 4 `main` CI run `29758890021` and both x64 jobs green |
 | Goal 5 | COMPLETE | `22de234` | Final push CI run `29817760525` passed the PS5.1/PS7 x64 lifecycle matrix |
-| Goal 6 | PENDING | - | Blocked on Goal 5 DoneWhen |
+| Goal 6 | PENDING | - | Goal 5 complete; waiting for Goal 5 merge and green `main` CI before start |
 | Goal 7 | PENDING | - | Blocked on Goal 6 DoneWhen |
 | Goal 8 | PENDING | - | Blocked on Goal 7 DoneWhen |
 
@@ -876,8 +876,9 @@ Completed: 2026-07-22 (Asia/Shanghai)
   PS2EXE, `Invoke-Expression`, shell escape hatches, `irm | iex`, policy bypass,
   and embedded-script tampering.
 - **VM discipline - SATISFIED.** Goal 5 ran only on the GitHub Windows x64
-  matrix. The 229-assertion workflow contract rejects VM/hypervisor tooling,
-  and no Parallels VM was started, resumed, or queried.
+  matrix. The 229-assertion workflow contract rejects VM/hypervisor tooling;
+  within this Goal 5 execution record and CI workflow, no Parallels VM start,
+  resume, or query operation was performed.
 
 No Goal 5 StopIf condition was hit.
 
@@ -894,11 +895,11 @@ No Goal 5 StopIf condition was hit.
   behavior, but Authenticode/catalog signing, finalized release ZIPs, release
   checksums, and build provenance remain Goal 6 work. Nothing here claims those
   gates are complete.
-- The only workflow annotation was the pinned `actions/upload-artifact` action's
-  Node.js 20 deprecation notice; the runner forced Node.js 24 and both uploads
-  succeeded. One API EOF and one monitoring connection interruption occurred
-  after/during observation; queries and downloads succeeded after retry, the
-  workflow itself was not rerun, and its conclusion remained `success`.
+- The only workflow annotation type was the pinned `actions/upload-artifact`
+  action's Node.js 20 deprecation notice; each job emitted one such annotation,
+  the runner forced Node.js 24, and both uploads succeeded. Temporary GitHub
+  API/monitoring interruptions occurred during observation; retries recovered,
+  the workflow itself was not rerun, and its conclusion remained `success`.
 
 ### DoneWhen Audit
 
