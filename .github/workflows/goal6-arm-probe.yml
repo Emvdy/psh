@@ -2,9 +2,13 @@ name: Goal 6 Windows 11 ARM Capability Probe
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - goal6/tests-ci
+    paths:
+      - '.github/workflows/goal6-arm-probe.yml'
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
   windows-arm-capability:
@@ -248,13 +252,15 @@ jobs:
           $isDesktop51 = $PSVersionTable.PSEdition -ceq 'Desktop' -and
               $PSVersionTable.PSVersion.Major -eq 5 -and
               $PSVersionTable.PSVersion.Minor -eq 1
-          $isNativeArm64 = $processArchitecture -ceq 'Arm64'
-          $isX64EmulationOnly = $processArchitecture -ceq 'X64' -and $env:PSH_RUNNER_ARCH_CONTEXT -ceq 'ARM64'
+          $isNativeArm64 = $isDesktop51 -and $processArchitecture -ceq 'Arm64'
+          $isX64EmulationOnly = $isDesktop51 -and
+              $processArchitecture -ceq 'X64' -and
+              $env:PSH_RUNNER_ARCH_CONTEXT -ceq 'ARM64'
 
           $report = [ordered]@{
               schemaVersion = 1
               required = $false
-              available = $true
+              available = $isDesktop51
               desktop51 = $isDesktop51
               nativeArm64 = $isNativeArm64
               x64EmulationOnly = $isX64EmulationOnly
@@ -274,7 +280,10 @@ jobs:
                   processorArchitecture = $env:PROCESSOR_ARCHITECTURE
                   processorArchitectureW6432 = $env:PROCESSOR_ARCHITEW6432
               }
-              classification = if ($isNativeArm64) {
+              classification = if (-not $isDesktop51) {
+                  'not-windows-powershell-5.1'
+              }
+              elseif ($isNativeArm64) {
                   'native-arm64'
               }
               elseif ($isX64EmulationOnly) {
@@ -398,6 +407,15 @@ jobs:
               'Windows PowerShell 5.1 is optional. An X64 process is recorded as emulation only and does not establish native ARM64 support.'
           )
           $summary | Out-File -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Ensure fallback JSON report
+        if: ${{ always() }}
+        shell: cmd
+        env:
+          PSH_ARM_REPORT_ROOT: ${{ runner.temp }}\goal6-arm-probe
+        run: |
+          if not exist "%PSH_ARM_REPORT_ROOT%" mkdir "%PSH_ARM_REPORT_ROOT%"
+          if not exist "%PSH_ARM_REPORT_ROOT%\goal6-arm-capability-report.json" >"%PSH_ARM_REPORT_ROOT%\goal6-arm-capability-report.json" echo {"schemaVersion":1,"probe":"goal6-windows-11-arm-capability","fallback":true,"result":{"requiredPassed":false,"ps51Required":false,"ps51UnavailabilityFailsProbe":false}}
 
       - name: Upload ARM capability report
         if: ${{ always() }}
