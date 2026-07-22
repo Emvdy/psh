@@ -28,12 +28,16 @@ function Invoke-PshGoal6CandidateFailure {
         [Parameter(Mandatory = $true)][int] $ExitCode,
         [Parameter(Mandatory = $true)][string] $ErrorId,
         [Parameter(Mandatory = $true)][string] $Message,
-        [AllowNull()][Exception] $InnerException
+        [AllowNull()][Exception] $InnerException,
+        [AllowNull()][hashtable] $Diagnostics
     )
 
     $exception = if ($null -eq $InnerException) { New-Object Exception($Message) } else { New-Object Exception($Message, $InnerException) }
     $exception.Data['PshExitCode'] = $ExitCode
     $exception.Data['PshErrorId'] = $ErrorId
+    if ($null -ne $Diagnostics) {
+        foreach ($key in @($Diagnostics.Keys)) { $exception.Data[[string]$key] = $Diagnostics[$key] }
+    }
     throw $exception
 }
 
@@ -72,6 +76,93 @@ function Assert-PshGoal6CandidateOutputPath {
     return $full
 }
 
+function Initialize-PshGoal6CandidateNativeMethods {
+    if ($null -ne ('PshGoal6CandidateNativeMethods' -as [type])) { return }
+
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class PshGoal6CandidateNativeMethods
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool CreateDirectory(string path, IntPtr securityAttributes);
+}
+'@
+}
+
+function New-PshGoal6CandidateOwnedDirectory {
+    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Description)
+
+    $parent = [IO.Path]::GetDirectoryName($Path)
+    if ([string]::IsNullOrWhiteSpace($parent)) {
+        Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputPath' -Message "$Description must have a parent directory: $Path"
+    }
+    try {
+        if (-not [IO.Directory]::Exists($parent)) { [void][IO.Directory]::CreateDirectory($parent) }
+        [void](Assert-PshLifecycleNoReparseAncestors -Path $Path -Description $Description)
+        Initialize-PshGoal6CandidateNativeMethods
+    }
+    catch {
+        Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputPath' -Message "Unable to prepare ${Description}: $Path" -InnerException $_.Exception
+    }
+
+    if (-not [PshGoal6CandidateNativeMethods]::CreateDirectory($Path, [IntPtr]::Zero)) {
+        $nativeError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        $inner = New-Object System.ComponentModel.Win32Exception($nativeError)
+        if ($nativeError -eq 80 -or $nativeError -eq 183) {
+            Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputExists' -Message "$Description appeared concurrently and will not be adopted: $Path" -InnerException $inner
+        }
+        Invoke-PshGoal6CandidateFailure -ExitCode 3 -ErrorId 'PshGoal6CandidateOutputCreate' -Message "Unable to create ${Description}: $Path" -InnerException $inner
+    }
+}
+
+function New-PshGoal6CandidateUniqueSiblingPath {
+    param(
+        [Parameter(Mandatory = $true)][string] $DestinationPath,
+        [Parameter(Mandatory = $true)][string] $Purpose
+    )
+
+    $parent = [IO.Path]::GetDirectoryName($DestinationPath)
+    $name = [IO.Path]::GetFileName($DestinationPath)
+    if ([string]::IsNullOrWhiteSpace($parent) -or [string]::IsNullOrWhiteSpace($name)) {
+        Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputPath' -Message "Unable to derive a sibling $Purpose path from: $DestinationPath"
+    }
+    return Join-Path $parent ('.' + $name + '.' + $Purpose + '-' + [Guid]::NewGuid().ToString('N'))
+}
+
+function Move-PshGoal6CandidateDirectoryAtomically {
+    param(
+        [Parameter(Mandatory = $true)][string] $Source,
+        [Parameter(Mandatory = $true)][string] $Destination,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    try { [IO.Directory]::Move($Source, $Destination) }
+    catch {
+        if ([IO.File]::Exists($Destination) -or [IO.Directory]::Exists($Destination)) {
+            Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputExists' -Message "$Description appeared concurrently and will not be overwritten: $Destination" -InnerException $_.Exception
+        }
+        Invoke-PshGoal6CandidateFailure -ExitCode 3 -ErrorId 'PshGoal6CandidatePublish' -Message "Unable to publish ${Description}: $Destination" -InnerException $_.Exception
+    }
+}
+
+function Move-PshGoal6CandidateFileAtomically {
+    param(
+        [Parameter(Mandatory = $true)][string] $Source,
+        [Parameter(Mandatory = $true)][string] $Destination,
+        [Parameter(Mandatory = $true)][string] $Description
+    )
+
+    try { [IO.File]::Move($Source, $Destination) }
+    catch {
+        if ([IO.File]::Exists($Destination) -or [IO.Directory]::Exists($Destination)) {
+            Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputExists' -Message "$Description appeared concurrently and will not be overwritten: $Destination" -InnerException $_.Exception
+        }
+        Invoke-PshGoal6CandidateFailure -ExitCode 3 -ErrorId 'PshGoal6CandidatePublish' -Message "Unable to publish ${Description}: $Destination" -InnerException $_.Exception
+    }
+}
+
 function Test-PshGoal6CandidateContainedPath {
     param([Parameter(Mandatory = $true)][string] $Root, [Parameter(Mandatory = $true)][string] $Path)
 
@@ -88,14 +179,77 @@ function Test-PshGoal6CandidateSamePath {
     return [string]::Equals($firstFull, $secondFull, (Get-PshLifecyclePathComparison))
 }
 
+function Assert-PshGoal6CandidateOutputIsolation {
+    param(
+        [Parameter(Mandatory = $true)][string] $CandidateRoot,
+        [Parameter(Mandatory = $true)][string] $ReportPath,
+        [Parameter(Mandatory = $true)][string] $WorkingRoot,
+        [Parameter(Mandatory = $true)][string] $RepositoryRoot
+    )
+
+    if ((Test-PshGoal6CandidateSamePath -First $CandidateRoot -Second $WorkingRoot) -or
+        (Test-PshGoal6CandidateSamePath -First $CandidateRoot -Second $ReportPath) -or
+        (Test-PshGoal6CandidateSamePath -First $WorkingRoot -Second $ReportPath)) {
+        Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputOverlap' -Message 'CandidateRoot, WorkingRoot, and ReportPath must be distinct.'
+    }
+    foreach ($pair in @(
+            [pscustomobject]@{ Root = $CandidateRoot; Path = $WorkingRoot },
+            [pscustomobject]@{ Root = $WorkingRoot; Path = $CandidateRoot },
+            [pscustomobject]@{ Root = $CandidateRoot; Path = $ReportPath },
+            [pscustomobject]@{ Root = $ReportPath; Path = $CandidateRoot },
+            [pscustomobject]@{ Root = $WorkingRoot; Path = $ReportPath },
+            [pscustomobject]@{ Root = $ReportPath; Path = $WorkingRoot },
+            [pscustomobject]@{ Root = $RepositoryRoot; Path = $CandidateRoot },
+            [pscustomobject]@{ Root = $RepositoryRoot; Path = $WorkingRoot },
+            [pscustomobject]@{ Root = $RepositoryRoot; Path = $ReportPath }
+        )) {
+        if (Test-PshGoal6CandidateContainedPath -Root ([string]$pair.Root) -Path ([string]$pair.Path)) {
+            Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputOverlap' -Message 'Candidate, report, working, and repository paths must not overlap.'
+        }
+    }
+}
+
 function Invoke-PshGoal6CandidateTreeCleanup {
-    param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Description)
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Description,
+        [AllowEmptyCollection()][string[]] $AllowedFiles = @(),
+        [AllowEmptyCollection()][string[]] $AllowedDirectories = @(),
+        [switch] $RequireAll
+    )
 
     $entry = Get-PshLifecyclePathEntry -Path $Path -Description $Description
     if (-not [bool]$entry.Exists) { return }
     if (-not [bool]$entry.IsDirectory -or [bool]$entry.IsReparsePoint) {
         Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCleanupUnsafe' -Message "$Description changed to an unsafe entry: $Path"
     }
+    $fileNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $directoryNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @($AllowedFiles)) {
+        if ([string]::IsNullOrWhiteSpace($name) -or [IO.Path]::GetFileName($name) -cne $name -or
+            -not $fileNames.Add($name) -or $directoryNames.Contains($name)) {
+            Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCleanupUnsafe' -Message "$Description has an invalid cleanup file allowlist entry: $name"
+        }
+    }
+    foreach ($name in @($AllowedDirectories)) {
+        if ([string]::IsNullOrWhiteSpace($name) -or [IO.Path]::GetFileName($name) -cne $name -or
+            -not $directoryNames.Add($name) -or $fileNames.Contains($name)) {
+            Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCleanupUnsafe' -Message "$Description has an invalid cleanup directory allowlist entry: $name"
+        }
+    }
+    try { $topLevelEntries = @(Get-ChildItem -LiteralPath $Path -Force) }
+    catch { Invoke-PshGoal6CandidateFailure -ExitCode 3 -ErrorId 'PshGoal6CandidateCleanupInspect' -Message "Unable to inspect ${Description}: $Path" -InnerException $_.Exception }
+    foreach ($child in $topLevelEntries) {
+        $isReparse = (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+        $allowed = if ($child.PSIsContainer) { $directoryNames.Contains([string]$child.Name) } else { $fileNames.Contains([string]$child.Name) }
+        if ($isReparse -or -not $allowed) {
+            Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCleanupUnsafe' -Message "$Description contains an unexpected, wrong-type, or reparse top-level entry and will not be recursively removed: $($child.FullName)"
+        }
+    }
+    if ($RequireAll -and $topLevelEntries.Count -ne ($fileNames.Count + $directoryNames.Count)) {
+        Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCleanupUnsafe' -Message "$Description no longer contains its exact owned top-level set: $Path"
+    }
+    # Ordinary descendants remain inside atomically claimed roots; reparse points are the only filesystem escape.
     try { $entries = @(Get-ChildItem -LiteralPath $Path -Recurse -Force) }
     catch { Invoke-PshGoal6CandidateFailure -ExitCode 3 -ErrorId 'PshGoal6CandidateCleanupInspect' -Message "Unable to inspect ${Description}: $Path" -InnerException $_.Exception }
     foreach ($child in $entries) {
@@ -108,15 +262,45 @@ function Invoke-PshGoal6CandidateTreeCleanup {
 }
 
 function Invoke-PshGoal6CandidateReportCleanup {
-    param([Parameter(Mandatory = $true)][string] $Path)
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [AllowNull()][object] $ExpectedState
+    )
 
     $entry = Get-PshLifecyclePathEntry -Path $Path -Description 'candidate report'
     if (-not [bool]$entry.Exists) { return }
     if (-not [bool]$entry.IsRegularFile -or [bool]$entry.IsReparsePoint) {
         Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCleanupUnsafe' -Message "Candidate report changed to an unsafe entry: $Path"
     }
+    if ($null -ne $ExpectedState) {
+        $actual = Get-PshLifecycleFileSha256 -Path $Path
+        if ([int64]$actual.Length -ne [int64]$ExpectedState.Length -or [string]$actual.Sha256 -cne [string]$ExpectedState.Sha256) {
+            Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCleanupUnsafe' -Message "Candidate report no longer matches the file published by this invocation: $Path"
+        }
+    }
     try { [IO.File]::Delete($Path) }
     catch { Invoke-PshGoal6CandidateFailure -ExitCode 3 -ErrorId 'PshGoal6CandidateCleanup' -Message "Unable to remove candidate report: $Path" -InnerException $_.Exception }
+}
+
+function Invoke-PshGoal6CandidateCleanupActions {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Actions)
+
+    $failures = New-Object System.Collections.Generic.List[object]
+    foreach ($item in @($Actions)) {
+        $label = [string]$item.Label
+        try {
+            $action = [scriptblock]$item.Action
+            & $action | Out-Null
+        }
+        catch {
+            $failures.Add([pscustomobject][ordered]@{
+                    Label = $label
+                    Message = [string]$_.Exception.Message
+                    ErrorRecord = $_
+                })
+        }
+    }
+    return $failures.ToArray()
 }
 
 function Assert-PshGoal6CandidateExactFileSet {
@@ -142,6 +326,24 @@ function Assert-PshGoal6CandidateExactFileSet {
     if ($entries.Count -ne $expected.Count) {
         Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateContract' -Message "$Description does not contain exactly $($expected.Count) required files."
     }
+}
+
+function Invoke-PshGoal6CandidatePublishedCleanup {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][object[]] $ExpectedAssets
+    )
+
+    $expectedNames = @($ExpectedAssets | ForEach-Object { [string]$_.name })
+    Assert-PshGoal6CandidateExactFileSet -Root $Path -ExpectedNames $expectedNames -Description 'published candidate root'
+    foreach ($asset in $ExpectedAssets) {
+        $assetPath = Join-Path $Path ([string]$asset.name)
+        $actual = Get-PshLifecycleFileSha256 -Path $assetPath
+        if ([int64]$actual.Length -ne [int64]$asset.length -or [string]$actual.Sha256 -cne [string]$asset.sha256) {
+            Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCleanupUnsafe' -Message "Published candidate asset no longer matches this invocation and will not be removed: $assetPath"
+        }
+    }
+    Invoke-PshGoal6CandidateTreeCleanup -Path $Path -Description 'published candidate root' -AllowedFiles $expectedNames -RequireAll
 }
 
 function Invoke-PshGoal6CandidateCatalogBuild {
@@ -181,7 +383,7 @@ function Invoke-PshGoal6CandidateCatalogBuild {
     return $CatalogPath
 }
 
-function Write-PshGoal6CandidateReport {
+function Write-PshGoal6CandidateReportTemp {
     param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][object] $Value)
 
     $parent = [IO.Path]::GetDirectoryName($Path)
@@ -190,8 +392,72 @@ function Write-PshGoal6CandidateReport {
     }
     if (-not [IO.Directory]::Exists($parent)) { [void][IO.Directory]::CreateDirectory($parent) }
     [void](Assert-PshLifecycleNoReparseAncestors -Path $Path -Description 'candidate report')
-    try { [IO.File]::WriteAllText($Path, ((ConvertTo-PshCanonicalJson -InputObject $Value) + "`n"), (New-Object Text.UTF8Encoding($false))) }
-    catch { Invoke-PshGoal6CandidateFailure -ExitCode 3 -ErrorId 'PshGoal6CandidateReportWrite' -Message "Unable to write candidate report: $Path" -InnerException $_.Exception }
+    $encoding = New-Object Text.UTF8Encoding($false)
+    $bytes = $encoding.GetBytes((ConvertTo-PshCanonicalJson -InputObject $Value) + "`n")
+    $expectedSha256 = Get-PshLifecycleSha256Bytes -Bytes $bytes
+    $stream = $null
+    $created = $false
+    $writeError = $null
+    $disposeFailures = @()
+    try {
+        $stream = New-Object IO.FileStream($Path, ([IO.FileMode]::CreateNew), ([IO.FileAccess]::Write), ([IO.FileShare]::None))
+        $created = $true
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    }
+    catch { $writeError = $_ }
+    finally {
+        $disposeActions = New-Object System.Collections.Generic.List[object]
+        if ($null -ne $stream) {
+            $disposeActions.Add([pscustomobject]@{ Label = 'candidate report stream dispose'; Action = { $stream.Dispose() } })
+        }
+        $disposeFailures = @(Invoke-PshGoal6CandidateCleanupActions -Actions $disposeActions.ToArray())
+    }
+    if ($null -eq $writeError -and $disposeFailures.Count -gt 0) {
+        $writeError = $disposeFailures[0].ErrorRecord
+    }
+    if ($null -ne $writeError) {
+        $cleanupDiagnostic = ''
+        if ($created -and ([IO.File]::Exists($Path) -or [IO.Directory]::Exists($Path))) {
+            if ([IO.File]::Exists($Path)) {
+                try { [IO.File]::Delete($Path) }
+                catch { $cleanupDiagnostic = " Temporary report cleanup also failed: $($_.Exception.Message)" }
+            }
+            else { $cleanupDiagnostic = ' Temporary report changed to a directory and was not removed.' }
+        }
+        $disposeDiagnostic = if ($disposeFailures.Count -eq 0) { '' } else {
+            ' Dispose failures: ' + [string]::Join('; ', @($disposeFailures | ForEach-Object { "[$([string]$_.Label)] $([string]$_.Message)" }))
+        }
+        $failureDiagnostics = @{}
+        if (-not [string]::IsNullOrWhiteSpace($disposeDiagnostic)) { $failureDiagnostics['PshDisposeDiagnostics'] = $disposeDiagnostic.Trim() }
+        if (-not [string]::IsNullOrWhiteSpace($cleanupDiagnostic)) { $failureDiagnostics['PshCleanupDiagnostics'] = $cleanupDiagnostic.Trim() }
+        Invoke-PshGoal6CandidateFailure -ExitCode 3 -ErrorId 'PshGoal6CandidateReportWrite' -Message ("Unable to write candidate report temp file: $Path" + $disposeDiagnostic + $cleanupDiagnostic) -InnerException $writeError.Exception -Diagnostics $failureDiagnostics
+    }
+    try { $state = Get-PshLifecycleFileSha256 -Path $Path }
+    catch {
+        $verificationError = $_
+        $cleanupDiagnostic = ''
+        if ($created -and ([IO.File]::Exists($Path) -or [IO.Directory]::Exists($Path))) {
+            if ([IO.File]::Exists($Path)) {
+                try { [IO.File]::Delete($Path) }
+                catch { $cleanupDiagnostic = " Temporary report cleanup also failed: $($_.Exception.Message)" }
+            }
+            else { $cleanupDiagnostic = ' Temporary report changed to a directory and was not removed.' }
+        }
+        Invoke-PshGoal6CandidateFailure -ExitCode 3 -ErrorId 'PshGoal6CandidateReportWrite' -Message ("Unable to verify candidate report temp file: $Path" + $cleanupDiagnostic) -InnerException $verificationError.Exception
+    }
+    if ([int64]$state.Length -ne [int64]$bytes.Length -or [string]$state.Sha256 -cne $expectedSha256) {
+        $cleanupDiagnostic = ''
+        if ([IO.File]::Exists($Path) -or [IO.Directory]::Exists($Path)) {
+            if ([IO.File]::Exists($Path)) {
+                try { [IO.File]::Delete($Path) }
+                catch { $cleanupDiagnostic = " Temporary report cleanup also failed: $($_.Exception.Message)" }
+            }
+            else { $cleanupDiagnostic = ' Temporary report changed to a directory and was not removed.' }
+        }
+        Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateReportWrite' -Message ("Candidate report temp file failed its byte verification: $Path" + $cleanupDiagnostic)
+    }
+    return [pscustomobject][ordered]@{ Path = $Path; Length = [int64]$state.Length; Sha256 = [string]$state.Sha256 }
 }
 
 $RepositoryRoot = Resolve-PshGoal6CandidateDirectory -Path $RepositoryRoot -Description 'repository root'
@@ -227,26 +493,7 @@ if ([string]::IsNullOrWhiteSpace($WorkingRoot)) {
     $WorkingRoot = Join-Path ([IO.Path]::GetTempPath()) ('psh-goal6-candidate-' + [Guid]::NewGuid().ToString('N'))
 }
 $WorkingRoot = Assert-PshGoal6CandidateOutputPath -Path $WorkingRoot -Description 'candidate working root'
-if ((Test-PshGoal6CandidateSamePath -First $CandidateRoot -Second $WorkingRoot) -or
-    (Test-PshGoal6CandidateSamePath -First $CandidateRoot -Second $ReportPath) -or
-    (Test-PshGoal6CandidateSamePath -First $WorkingRoot -Second $ReportPath)) {
-    Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputOverlap' -Message 'CandidateRoot, WorkingRoot, and ReportPath must be distinct.'
-}
-if (Test-PshGoal6CandidateContainedPath -Root $CandidateRoot -Path $ReportPath) {
-    Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputOverlap' -Message 'ReportPath must be outside CandidateRoot so the candidate retains exactly 13 assets.'
-}
-foreach ($pair in @(
-        [pscustomobject]@{ Root = $CandidateRoot; Path = $WorkingRoot },
-        [pscustomobject]@{ Root = $WorkingRoot; Path = $CandidateRoot },
-        [pscustomobject]@{ Root = $WorkingRoot; Path = $ReportPath },
-        [pscustomobject]@{ Root = $RepositoryRoot; Path = $CandidateRoot },
-        [pscustomobject]@{ Root = $RepositoryRoot; Path = $WorkingRoot },
-        [pscustomobject]@{ Root = $RepositoryRoot; Path = $ReportPath }
-    )) {
-    if (Test-PshGoal6CandidateContainedPath -Root ([string]$pair.Root) -Path ([string]$pair.Path)) {
-        Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputOverlap' -Message 'Candidate, report, working, and repository paths must not overlap.'
-    }
-}
+Assert-PshGoal6CandidateOutputIsolation -CandidateRoot $CandidateRoot -ReportPath $ReportPath -WorkingRoot $WorkingRoot -RepositoryRoot $RepositoryRoot
 
 $expectedPackageNames = @(
     "psh-$Version-core",
@@ -268,13 +515,27 @@ $expectedAssetNames = @(
     'SHA256SUMS',
     "psh-release-$Version.cat"
 )
+$workingCleanupFiles = @("psh-release-$Version.cat")
+$workingCleanupDirectories = @(
+    'pre-sign-build',
+    'package-catalogs',
+    'package-catalog-inputs',
+    'final-build',
+    'release-catalog-input'
+)
 
-$workingCreated = $false
-$candidateCreated = $false
-$reportCreated = $false
+$workingOwned = $false
+$candidateStagingOwned = $false
+$reportTempOwned = $false
+$candidatePublished = $false
+$reportPublished = $false
+$candidateStagingRoot = $null
+$reportTempPath = $null
+$reportState = $null
+$assetRecords = $null
 try {
-    [void][IO.Directory]::CreateDirectory($WorkingRoot)
-    $workingCreated = $true
+    New-PshGoal6CandidateOwnedDirectory -Path $WorkingRoot -Description 'candidate working root'
+    $workingOwned = $true
     $workingEntry = Get-PshLifecyclePathEntry -Path $WorkingRoot -Description 'candidate working root'
     if (-not [bool]$workingEntry.IsDirectory -or [bool]$workingEntry.IsReparsePoint) {
         Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputPath' -Message "Candidate working root is unsafe: $WorkingRoot"
@@ -349,18 +610,19 @@ try {
         Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateVerification' -Message 'Final build release artifact verification did not pass catalog membership gates.'
     }
 
-    [void][IO.Directory]::CreateDirectory($CandidateRoot)
-    $candidateCreated = $true
-    $candidateEntry = Get-PshLifecyclePathEntry -Path $CandidateRoot -Description 'candidate root'
+    $candidateStagingRoot = New-PshGoal6CandidateUniqueSiblingPath -DestinationPath $CandidateRoot -Purpose 'staging'
+    New-PshGoal6CandidateOwnedDirectory -Path $candidateStagingRoot -Description 'candidate staging root'
+    $candidateStagingOwned = $true
+    $candidateEntry = Get-PshLifecyclePathEntry -Path $candidateStagingRoot -Description 'candidate staging root'
     if (-not [bool]$candidateEntry.IsDirectory -or [bool]$candidateEntry.IsReparsePoint) {
-        Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputPath' -Message "Candidate root is unsafe: $CandidateRoot"
+        Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputPath' -Message "Candidate staging root is unsafe: $candidateStagingRoot"
     }
     foreach ($assetName in $expectedAssetNames) {
         $source = Resolve-PshGoal6CandidateFile -Path (Join-Path $releaseAssetsRoot $assetName) -Description "candidate source asset '$assetName'"
-        [IO.File]::Copy($source, (Join-Path $CandidateRoot $assetName), $false)
+        [IO.File]::Copy($source, (Join-Path $candidateStagingRoot $assetName), $false)
     }
-    Assert-PshGoal6CandidateExactFileSet -Root $CandidateRoot -ExpectedNames $expectedAssetNames -Description 'candidate root'
-    $candidateVerification = @(& $artifactScript -ReleaseAssetsRoot $CandidateRoot -Version $Version -SourceCommit $SourceCommit -RepositoryRoot $RepositoryRoot -Mode Release)[-1]
+    Assert-PshGoal6CandidateExactFileSet -Root $candidateStagingRoot -ExpectedNames $expectedAssetNames -Description 'candidate staging root'
+    $candidateVerification = @(& $artifactScript -ReleaseAssetsRoot $candidateStagingRoot -Version $Version -SourceCommit $SourceCommit -RepositoryRoot $RepositoryRoot -Mode Release)[-1]
     if ([int]$candidateVerification.code -ne 0 -or [string]$candidateVerification.phase -cne 'release-catalog-membership-verified' -or
         -not [bool]$candidateVerification.catalogMembershipVerified -or [int]$candidateVerification.assetCount -ne 13 -or [int]$candidateVerification.packageCount -ne 3) {
         Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateVerification' -Message 'Copied candidate did not pass the exact 13-asset release verification contract.'
@@ -368,7 +630,7 @@ try {
 
     $assetRecords = New-Object System.Collections.Generic.List[object]
     foreach ($assetName in $expectedAssetNames) {
-        $assetPath = Join-Path $CandidateRoot $assetName
+        $assetPath = Join-Path $candidateStagingRoot $assetName
         $state = Get-PshLifecycleFileSha256 -Path $assetPath
         $assetRecords.Add([pscustomobject][ordered]@{ name = $assetName; length = [int64]$state.Length; sha256 = [string]$state.Sha256 })
     }
@@ -395,10 +657,18 @@ try {
         assets = $assetRecords.ToArray()
     }
 
-    Invoke-PshGoal6CandidateTreeCleanup -Path $WorkingRoot -Description 'candidate working root'
-    $workingCreated = $false
-    Write-PshGoal6CandidateReport -Path $ReportPath -Value $report
-    $reportCreated = $true
+    $reportTempPath = New-PshGoal6CandidateUniqueSiblingPath -DestinationPath $ReportPath -Purpose 'tmp'
+    $reportState = Write-PshGoal6CandidateReportTemp -Path $reportTempPath -Value $report
+    $reportTempOwned = $true
+
+    Invoke-PshGoal6CandidateTreeCleanup -Path $WorkingRoot -Description 'candidate working root' -AllowedFiles $workingCleanupFiles -AllowedDirectories $workingCleanupDirectories -RequireAll
+    $workingOwned = $false
+    Move-PshGoal6CandidateDirectoryAtomically -Source $candidateStagingRoot -Destination $CandidateRoot -Description 'candidate root'
+    $candidateStagingOwned = $false
+    $candidatePublished = $true
+    Move-PshGoal6CandidateFileAtomically -Source $reportTempPath -Destination $ReportPath -Description 'candidate report'
+    $reportTempOwned = $false
+    $reportPublished = $true
     Write-Output ([pscustomobject][ordered]@{
             schemaVersion = 1
             product = 'Psh'
@@ -416,13 +686,47 @@ try {
 }
 catch {
     $primaryError = $_
-    $cleanupError = $null
-    try {
-        if ($workingCreated) { Invoke-PshGoal6CandidateTreeCleanup -Path $WorkingRoot -Description 'candidate working root' }
-        if ($candidateCreated) { Invoke-PshGoal6CandidateTreeCleanup -Path $CandidateRoot -Description 'candidate root' }
-        if ($reportCreated -or [IO.File]::Exists($ReportPath) -or [IO.Directory]::Exists($ReportPath)) { Invoke-PshGoal6CandidateReportCleanup -Path $ReportPath }
+    $cleanupActions = New-Object System.Collections.Generic.List[object]
+    if ($workingOwned) {
+        $cleanupActions.Add([pscustomobject]@{ Label = 'candidate working root'; Action = {
+                    Invoke-PshGoal6CandidateTreeCleanup -Path $WorkingRoot -Description 'candidate working root' -AllowedFiles $workingCleanupFiles -AllowedDirectories $workingCleanupDirectories
+                } })
     }
-    catch { $cleanupError = $_ }
-    if ($null -ne $cleanupError) { throw $cleanupError }
+    if ($candidateStagingOwned) {
+        $cleanupActions.Add([pscustomobject]@{ Label = 'candidate staging root'; Action = {
+                    Invoke-PshGoal6CandidateTreeCleanup -Path $candidateStagingRoot -Description 'candidate staging root' -AllowedFiles $expectedAssetNames
+                } })
+    }
+    if ($reportTempOwned) {
+        $cleanupActions.Add([pscustomobject]@{ Label = 'candidate report temp file'; Action = {
+                    Invoke-PshGoal6CandidateReportCleanup -Path $reportTempPath -ExpectedState $reportState
+                } })
+    }
+    if ($candidatePublished) {
+        $cleanupActions.Add([pscustomobject]@{ Label = 'published candidate root'; Action = {
+                    Invoke-PshGoal6CandidatePublishedCleanup -Path $CandidateRoot -ExpectedAssets $assetRecords.ToArray()
+                } })
+    }
+    if ($reportPublished) {
+        $cleanupActions.Add([pscustomobject]@{ Label = 'published candidate report'; Action = {
+                    Invoke-PshGoal6CandidateReportCleanup -Path $ReportPath -ExpectedState $reportState
+                } })
+    }
+    $cleanupFailures = @(Invoke-PshGoal6CandidateCleanupActions -Actions $cleanupActions.ToArray())
+    if ($cleanupFailures.Count -gt 0) {
+        $diagnostics = [string]::Join('; ', @($cleanupFailures | ForEach-Object { "[$([string]$_.Label)] $([string]$_.Message)" }))
+        $combined = New-Object Exception("$($primaryError.Exception.Message) Cleanup failures: $diagnostics", $primaryError.Exception)
+        $metadataException = $primaryError.Exception
+        while ($null -ne $metadataException -and $metadataException -is [Exception]) {
+            if ($metadataException.Data.Contains('PshExitCode')) {
+                $combined.Data['PshExitCode'] = $metadataException.Data['PshExitCode']
+                $combined.Data['PshErrorId'] = $metadataException.Data['PshErrorId']
+                break
+            }
+            $metadataException = $metadataException.InnerException
+        }
+        $combined.Data['PshCleanupDiagnostics'] = $diagnostics
+        throw $combined
+    }
     throw $primaryError
 }

@@ -67,6 +67,26 @@ function Assert-PshGoal6CandidateFailure {
     Assert-PshGoal6CandidateTest $failed "$Label unexpectedly succeeded."
 }
 
+function Get-PshGoal6CandidateFunctionDefinition {
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $Name
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$parseErrors)
+    if (@($parseErrors).Count -ne 0) {
+        throw "Unable to parse production helper source '$Path': $([string]::Join('; ', @($parseErrors | ForEach-Object { [string]$_.Message })))"
+    }
+    $matches = @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and [string]$node.Name -ceq $Name
+            }, $true))
+    if ($matches.Count -ne 1) { throw "Production helper '$Name' was found $($matches.Count) times in: $Path" }
+    return [scriptblock]::Create([string]$matches[0].Extent.Text)
+}
+
 function Initialize-PshGoal6CandidateTestDirectory {
     param([Parameter(Mandatory = $true)][string] $Path)
 
@@ -224,6 +244,176 @@ if ([string]::IsNullOrWhiteSpace($ReportRoot)) {
 }
 $ReportRoot = [IO.Path]::GetFullPath($ReportRoot)
 if (-not [IO.Directory]::Exists($ReportRoot)) { [void](Initialize-PshGoal6CandidateTestDirectory -Path $ReportRoot) }
+
+foreach ($functionName in @(
+        'Invoke-PshGoal6CandidateFailure',
+        'Initialize-PshGoal6CandidateNativeMethods',
+        'New-PshGoal6CandidateOwnedDirectory',
+        'Test-PshGoal6CandidateContainedPath',
+        'Test-PshGoal6CandidateSamePath',
+        'Assert-PshGoal6CandidateOutputIsolation',
+        'Move-PshGoal6CandidateDirectoryAtomically',
+        'Move-PshGoal6CandidateFileAtomically',
+        'Invoke-PshGoal6CandidateTreeCleanup',
+        'Invoke-PshGoal6CandidateCleanupActions',
+        'Write-PshGoal6CandidateReportTemp'
+    )) {
+    . (Get-PshGoal6CandidateFunctionDefinition -Path $candidateScript -Name $functionName)
+}
+foreach ($functionName in @('Throw-PshReleaseIndexBuildError', 'Invoke-PshReleaseIndexCleanupActions', 'Resolve-PshReleaseIndexFile', 'Copy-PshReleaseIndexFile')) {
+    . (Get-PshGoal6CandidateFunctionDefinition -Path $indexScript -Name $functionName)
+}
+
+$atomicContractRoot = Initialize-PshGoal6CandidateTestDirectory -Path (Join-Path $ReportRoot 'atomic-contracts')
+
+$candidateReportHelperText = [string](Get-PshGoal6CandidateFunctionDefinition -Path $candidateScript -Name 'Write-PshGoal6CandidateReportTemp')
+$candidateReportDisposeLines = @($candidateReportHelperText -split "`r?`n" | Where-Object { [string]$_ -match '\.Dispose\(\)' })
+Assert-PshGoal6CandidateTest ($candidateReportDisposeLines.Count -eq 1 -and @($candidateReportDisposeLines | Where-Object { [string]$_ -notmatch 'Action\s*=' }).Count -eq 0) 'Candidate report helper has a Dispose call outside independent cleanup actions.'
+Assert-PshGoal6CandidateTest ($candidateReportHelperText.Contains('Invoke-PshGoal6CandidateCleanupActions') -and $candidateReportHelperText.Contains('PshDisposeDiagnostics')) 'Candidate report helper does not aggregate Dispose failures with diagnostics.'
+
+$releaseCopyHelperText = [string](Get-PshGoal6CandidateFunctionDefinition -Path $indexScript -Name 'Copy-PshReleaseIndexFile')
+$releaseCopyDisposeLines = @($releaseCopyHelperText -split "`r?`n" | Where-Object { [string]$_ -match '\.Dispose\(\)' })
+Assert-PshGoal6CandidateTest ($releaseCopyDisposeLines.Count -eq 4 -and @($releaseCopyDisposeLines | Where-Object { [string]$_ -notmatch 'Action\s*=' }).Count -eq 0) 'Release catalog copy helper has a Dispose call outside independent cleanup actions.'
+Assert-PshGoal6CandidateTest ($releaseCopyHelperText.Contains('Invoke-PshReleaseIndexCleanupActions') -and $releaseCopyHelperText.Contains('PshDisposeDiagnostics')) 'Release catalog copy helper does not aggregate Dispose failures with diagnostics.'
+
+$candidateDiagnosticError = $null
+try {
+    Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidatePrimary' -Message 'candidate primary failure' -Diagnostics @{ PshDisposeDiagnostics = 'candidate dispose failure' }
+}
+catch { $candidateDiagnosticError = $_ }
+$candidateDiagnosticMetadata = Get-PshGoal6CandidateFailureData -ErrorRecord $candidateDiagnosticError
+Assert-PshGoal6CandidateTest ([int]$candidateDiagnosticMetadata.ExitCode -eq 5 -and [string]$candidateDiagnosticMetadata.ErrorId -ceq 'PshGoal6CandidatePrimary') 'Candidate diagnostics replaced primary Psh error metadata.'
+Assert-PshGoal6CandidateTest ([string]$candidateDiagnosticError.Exception.Data['PshDisposeDiagnostics'] -ceq 'candidate dispose failure') 'Candidate failure did not retain Dispose diagnostics.'
+
+$indexDiagnosticError = $null
+try {
+    Throw-PshReleaseIndexBuildError -ExitCode 3 -ErrorId 'PshReleaseIndexPrimary' -Message 'release index primary failure' -Diagnostics @{ PshDisposeDiagnostics = 'index dispose failure' }
+}
+catch { $indexDiagnosticError = $_ }
+$indexDiagnosticMetadata = Get-PshGoal6CandidateFailureData -ErrorRecord $indexDiagnosticError
+Assert-PshGoal6CandidateTest ([int]$indexDiagnosticMetadata.ExitCode -eq 3 -and [string]$indexDiagnosticMetadata.ErrorId -ceq 'PshReleaseIndexPrimary') 'Release index diagnostics replaced primary Psh error metadata.'
+Assert-PshGoal6CandidateTest ([string]$indexDiagnosticError.Exception.Data['PshDisposeDiagnostics'] -ceq 'index dispose failure') 'Release index failure did not retain Dispose diagnostics.'
+
+if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $atomicOwnedRoot = Join-Path $atomicContractRoot 'atomic-owned-root'
+    New-PshGoal6CandidateOwnedDirectory -Path $atomicOwnedRoot -Description 'atomic owned root fixture'
+    $atomicOwnedEntries = @(Get-ChildItem -LiteralPath $atomicOwnedRoot -Force)
+    Assert-PshGoal6CandidateTest ([IO.Directory]::Exists($atomicOwnedRoot) -and $atomicOwnedEntries.Count -eq 0) 'Atomic owned directory creation did not create one empty directory.'
+
+    $preoccupiedOwnedRoot = Initialize-PshGoal6CandidateTestDirectory -Path (Join-Path $atomicContractRoot 'atomic-owned-root-sentinel')
+    $ownedRootSentinelPath = Join-Path $preoccupiedOwnedRoot 'sentinel.bin'
+    [IO.File]::WriteAllBytes($ownedRootSentinelPath, [byte[]](21, 22, 23, 24))
+    $ownedRootSentinelBefore = Get-PshLifecycleFileSha256 -Path $ownedRootSentinelPath
+    Assert-PshGoal6CandidateFailure -Label 'preoccupied atomic owned directory claim' -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputExists' -Action {
+        New-PshGoal6CandidateOwnedDirectory -Path $preoccupiedOwnedRoot -Description 'preoccupied atomic owned root fixture'
+    }
+    $ownedRootSentinelAfter = Get-PshLifecycleFileSha256 -Path $ownedRootSentinelPath
+    Assert-PshGoal6CandidateTest ([int64]$ownedRootSentinelAfter.Length -eq [int64]$ownedRootSentinelBefore.Length -and [string]$ownedRootSentinelAfter.Sha256 -ceq [string]$ownedRootSentinelBefore.Sha256) 'Atomic owned directory claim changed the preoccupied sentinel.'
+}
+
+$candidateMoveSource = Initialize-PshGoal6CandidateTestDirectory -Path (Join-Path $atomicContractRoot 'candidate-staging')
+Write-PshGoal6CandidateTestText -Path (Join-Path $candidateMoveSource 'owned.txt') -Text "owned candidate bytes`n"
+$preoccupiedCandidateRoot = Initialize-PshGoal6CandidateTestDirectory -Path (Join-Path $atomicContractRoot 'candidate-root-sentinel')
+$candidateSentinelPath = Join-Path $preoccupiedCandidateRoot 'sentinel.bin'
+[IO.File]::WriteAllBytes($candidateSentinelPath, [byte[]](0, 1, 2, 3, 254, 255))
+$candidateSentinelBefore = Get-PshLifecycleFileSha256 -Path $candidateSentinelPath
+Assert-PshGoal6CandidateFailure -Label 'preoccupied candidate root atomic move' -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputExists' -Action {
+    Move-PshGoal6CandidateDirectoryAtomically -Source $candidateMoveSource -Destination $preoccupiedCandidateRoot -Description 'candidate root'
+}
+$candidateSentinelAfter = Get-PshLifecycleFileSha256 -Path $candidateSentinelPath
+$candidateSentinelEntries = @(Get-ChildItem -LiteralPath $preoccupiedCandidateRoot -Force)
+Assert-PshGoal6CandidateTest ([IO.Directory]::Exists($candidateMoveSource)) 'Preoccupied CandidateRoot consumed the owned staging directory.'
+Assert-PshGoal6CandidateTest ($candidateSentinelEntries.Count -eq 1 -and [string]$candidateSentinelEntries[0].Name -ceq 'sentinel.bin') 'Preoccupied CandidateRoot contents changed.'
+Assert-PshGoal6CandidateTest ([int64]$candidateSentinelAfter.Length -eq [int64]$candidateSentinelBefore.Length -and [string]$candidateSentinelAfter.Sha256 -ceq [string]$candidateSentinelBefore.Sha256) 'Preoccupied CandidateRoot sentinel bytes changed.'
+
+$reportMoveSource = Join-Path $atomicContractRoot 'candidate-report.tmp'
+$preoccupiedReportPath = Join-Path $atomicContractRoot 'candidate-report.json'
+Write-PshGoal6CandidateTestText -Path $reportMoveSource -Text "owned report bytes`n"
+[IO.File]::WriteAllBytes($preoccupiedReportPath, [byte[]](9, 8, 7, 6, 5, 4))
+$reportSentinelBefore = Get-PshLifecycleFileSha256 -Path $preoccupiedReportPath
+Assert-PshGoal6CandidateFailure -Label 'preoccupied report atomic move' -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputExists' -Action {
+    Move-PshGoal6CandidateFileAtomically -Source $reportMoveSource -Destination $preoccupiedReportPath -Description 'candidate report'
+}
+$reportSentinelAfter = Get-PshLifecycleFileSha256 -Path $preoccupiedReportPath
+Assert-PshGoal6CandidateTest ([IO.File]::Exists($reportMoveSource)) 'Preoccupied ReportPath consumed the owned report temp file.'
+Assert-PshGoal6CandidateTest ([int64]$reportSentinelAfter.Length -eq [int64]$reportSentinelBefore.Length -and [string]$reportSentinelAfter.Sha256 -ceq [string]$reportSentinelBefore.Sha256) 'Preoccupied ReportPath sentinel bytes changed.'
+
+$reportCreateNewCollisionPath = Join-Path $atomicContractRoot '.candidate-report.json.tmp-collision'
+[IO.File]::WriteAllBytes($reportCreateNewCollisionPath, [byte[]](31, 32, 33, 34))
+$reportCreateNewSentinelBefore = Get-PshLifecycleFileSha256 -Path $reportCreateNewCollisionPath
+Assert-PshGoal6CandidateFailure -Label 'candidate report CreateNew collision' -ExitCode 3 -ErrorId 'PshGoal6CandidateReportWrite' -Action {
+    Write-PshGoal6CandidateReportTemp -Path $reportCreateNewCollisionPath -Value ([pscustomobject][ordered]@{ status = 'must-not-overwrite' })
+}
+$reportCreateNewSentinelAfter = Get-PshLifecycleFileSha256 -Path $reportCreateNewCollisionPath
+Assert-PshGoal6CandidateTest ([int64]$reportCreateNewSentinelAfter.Length -eq [int64]$reportCreateNewSentinelBefore.Length -and [string]$reportCreateNewSentinelAfter.Sha256 -ceq [string]$reportCreateNewSentinelBefore.Sha256) 'Candidate report CreateNew collision changed or removed the sentinel.'
+
+foreach ($overlapCase in @(
+        [pscustomobject]@{
+            Label = 'ReportPath ancestor of CandidateRoot'
+            Report = (Join-Path $atomicContractRoot 'candidate-report-ancestor')
+            Candidate = (Join-Path (Join-Path $atomicContractRoot 'candidate-report-ancestor') 'candidate')
+            Working = (Join-Path $atomicContractRoot 'candidate-report-other-working')
+        },
+        [pscustomobject]@{
+            Label = 'ReportPath ancestor of WorkingRoot'
+            Report = (Join-Path $atomicContractRoot 'working-report-ancestor')
+            Candidate = (Join-Path $atomicContractRoot 'working-report-other-candidate')
+            Working = (Join-Path (Join-Path $atomicContractRoot 'working-report-ancestor') 'working')
+        }
+    )) {
+    Assert-PshGoal6CandidateFailure -Label ([string]$overlapCase.Label) -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputOverlap' -Action {
+        Assert-PshGoal6CandidateOutputIsolation -CandidateRoot ([string]$overlapCase.Candidate) -ReportPath ([string]$overlapCase.Report) -WorkingRoot ([string]$overlapCase.Working) -RepositoryRoot $RepositoryRoot
+    }
+    foreach ($path in @([string]$overlapCase.Report, [string]$overlapCase.Candidate, [string]$overlapCase.Working)) {
+        Assert-PshGoal6CandidateTest (-not [IO.File]::Exists($path) -and -not [IO.Directory]::Exists($path)) "$($overlapCase.Label) left output residue: $path"
+    }
+}
+
+$cleanupRefusalRoot = Initialize-PshGoal6CandidateTestDirectory -Path (Join-Path $atomicContractRoot 'cleanup-refusal')
+[void](Initialize-PshGoal6CandidateTestDirectory -Path (Join-Path $cleanupRefusalRoot 'allowed'))
+$cleanupSentinelPath = Join-Path $cleanupRefusalRoot 'unexpected-sentinel.bin'
+[IO.File]::WriteAllBytes($cleanupSentinelPath, [byte[]](10, 20, 30, 40))
+$cleanupSentinelBefore = Get-PshLifecycleFileSha256 -Path $cleanupSentinelPath
+Assert-PshGoal6CandidateFailure -Label 'cleanup unexpected ordinary top-level sentinel' -ExitCode 5 -ErrorId 'PshGoal6CandidateCleanupUnsafe' -Action {
+    Invoke-PshGoal6CandidateTreeCleanup -Path $cleanupRefusalRoot -Description 'cleanup refusal fixture' -AllowedDirectories @('allowed')
+}
+$cleanupSentinelAfter = Get-PshLifecycleFileSha256 -Path $cleanupSentinelPath
+Assert-PshGoal6CandidateTest ([IO.Directory]::Exists($cleanupRefusalRoot) -and [IO.Directory]::Exists((Join-Path $cleanupRefusalRoot 'allowed'))) 'Cleanup refusal removed an owned tree containing an unexpected entry.'
+Assert-PshGoal6CandidateTest ([int64]$cleanupSentinelAfter.Length -eq [int64]$cleanupSentinelBefore.Length -and [string]$cleanupSentinelAfter.Sha256 -ceq [string]$cleanupSentinelBefore.Sha256) 'Cleanup refusal changed the unexpected sentinel bytes.'
+
+$cleanupOrder = New-Object System.Collections.Generic.List[string]
+$cleanupActionFailures = @(Invoke-PshGoal6CandidateCleanupActions -Actions @(
+        [pscustomobject]@{ Label = 'first'; Action = { $cleanupOrder.Add('first'); throw 'first cleanup failed' } },
+        [pscustomobject]@{ Label = 'second'; Action = { $cleanupOrder.Add('second') } },
+        [pscustomobject]@{ Label = 'third'; Action = { $cleanupOrder.Add('third') } }
+    ))
+Assert-PshGoal6CandidateTest ($cleanupActionFailures.Count -eq 1 -and [string]$cleanupActionFailures[0].Label -ceq 'first') 'Cleanup aggregation did not retain exactly the first action failure.'
+Assert-PshGoal6CandidateTest ([string]::Join(',', $cleanupOrder.ToArray()) -ceq 'first,second,third') 'Cleanup aggregation stopped before executing later actions.'
+
+$indexDisposeOrder = New-Object System.Collections.Generic.List[string]
+$indexDisposeFailures = @(Invoke-PshReleaseIndexCleanupActions -Actions @(
+        [pscustomobject]@{ Label = 'temporary stream'; Action = { $indexDisposeOrder.Add('temporary'); throw 'temporary stream dispose failed' } },
+        [pscustomobject]@{ Label = 'source stream'; Action = { $indexDisposeOrder.Add('source') } },
+        [pscustomobject]@{ Label = 'hash'; Action = { $indexDisposeOrder.Add('hash') } }
+    ))
+Assert-PshGoal6CandidateTest ($indexDisposeFailures.Count -eq 1 -and [string]$indexDisposeFailures[0].Label -ceq 'temporary stream') 'Release index Dispose aggregation did not retain exactly the first failure.'
+Assert-PshGoal6CandidateTest ([string]::Join(',', $indexDisposeOrder.ToArray()) -ceq 'temporary,source,hash') 'Release index Dispose aggregation stopped before closing later resources.'
+
+$catalogSourcePath = Join-Path $atomicContractRoot 'verified-release.cat'
+$catalogDestinationPath = Join-Path $atomicContractRoot 'psh-release-1.2.3.cat'
+[IO.File]::WriteAllBytes($catalogSourcePath, [byte[]](1, 3, 3, 7, 9, 11))
+[IO.File]::WriteAllBytes($catalogDestinationPath, [byte[]](42, 42, 42, 42))
+$catalogSentinelBefore = Get-PshLifecycleFileSha256 -Path $catalogDestinationPath
+Assert-PshGoal6CandidateFailure -Label 'atomic release catalog destination sentinel' -ExitCode 5 -ErrorId 'PshReleaseIndexOutputExists' -Action {
+    Copy-PshReleaseIndexFile -Source $catalogSourcePath -Destination $catalogDestinationPath -Description 'membership-verified release catalog'
+}
+$catalogSentinelAfter = Get-PshLifecycleFileSha256 -Path $catalogDestinationPath
+$catalogTemporaryEntries = @(Get-ChildItem -LiteralPath $atomicContractRoot -Force | Where-Object { [string]$_.Name -like '.psh-release-1.2.3.cat.tmp-*' })
+Assert-PshGoal6CandidateTest ([int64]$catalogSentinelAfter.Length -eq [int64]$catalogSentinelBefore.Length -and [string]$catalogSentinelAfter.Sha256 -ceq [string]$catalogSentinelBefore.Sha256) 'Atomic release catalog publication overwrote the destination sentinel.'
+Assert-PshGoal6CandidateTest ($catalogTemporaryEntries.Count -eq 0) 'Atomic release catalog publication retained a temp or partial file.'
+
+Invoke-PshGoal6CandidateTestTreeCleanup -Path $atomicContractRoot
+
 $fixtureRoot = Initialize-PshGoal6CandidateTestDirectory -Path (Join-Path $ReportRoot 'fixtures')
 $bootstrapperPath = Join-Path $fixtureRoot 'psh-installer.exe'
 $releaseNotesPath = Join-Path $fixtureRoot 'RELEASE_NOTES.md'
@@ -261,6 +451,8 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         status = 'passed'
         assertions = $script:Goal6CandidateAssertions
         windowsCatalogCasesExecuted = $false
+        atomicPublicationCasesExecuted = $true
+        windowsAtomicDirectoryCasesExecuted = $false
         platformBoundaryCode = 4
         platformBoundaryErrorId = 'PshGoal6CandidateCatalogUnavailable'
     }
@@ -390,11 +582,19 @@ $summary = [pscustomobject][ordered]@{
     catalogMembershipVerified = $true
     authenticodeIsInformational = $true
     negativeCases = @(
+        'preoccupied-candidate-root',
+        'preoccupied-report-path',
+        'report-createnew-collision',
+        'report-path-ancestor-overlap',
+        'cleanup-unexpected-top-level-entry',
+        'cleanup-action-aggregation',
+        'atomic-release-catalog-destination',
         'release-index-catalog-membership',
         'release-artifact-catalog-membership',
         'package-artifact-catalog-membership',
         'package-build-catalog-membership'
     )
+    windowsAtomicDirectoryCasesExecuted = $true
     provenanceAttestation = 'not-created-by-this-gate'
 }
 $summaryPath = Join-Path $ReportRoot 'Goal6.CandidateArtifacts.summary.json'

@@ -31,13 +31,38 @@ function Throw-PshReleaseIndexBuildError {
         [Parameter(Mandatory = $true)][int] $ExitCode,
         [Parameter(Mandatory = $true)][string] $ErrorId,
         [Parameter(Mandatory = $true)][string] $Message,
-        [AllowNull()][Exception] $InnerException
+        [AllowNull()][Exception] $InnerException,
+        [AllowNull()][hashtable] $Diagnostics
     )
 
     $exception = if ($null -eq $InnerException) { New-Object Exception($Message) } else { New-Object Exception($Message, $InnerException) }
     $exception.Data['PshExitCode'] = $ExitCode
     $exception.Data['PshErrorId'] = $ErrorId
+    if ($null -ne $Diagnostics) {
+        foreach ($key in @($Diagnostics.Keys)) { $exception.Data[[string]$key] = $Diagnostics[$key] }
+    }
     throw $exception
+}
+
+function Invoke-PshReleaseIndexCleanupActions {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Actions)
+
+    $failures = New-Object System.Collections.Generic.List[object]
+    foreach ($item in @($Actions)) {
+        $label = [string]$item.Label
+        try {
+            $action = [scriptblock]$item.Action
+            & $action | Out-Null
+        }
+        catch {
+            $failures.Add([pscustomobject][ordered]@{
+                    Label = $label
+                    Message = [string]$_.Exception.Message
+                    ErrorRecord = $_
+                })
+        }
+    }
+    return $failures.ToArray()
 }
 
 function Resolve-PshReleaseIndexFile {
@@ -85,11 +110,110 @@ function Copy-PshReleaseIndexFile {
     )
 
     $Source = Resolve-PshReleaseIndexFile -Path $Source -Description $Description
-    if ([IO.File]::Exists($Destination) -or [IO.Directory]::Exists($Destination)) {
-        Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseIndexOutputExists' -Message "$Description destination already exists: $Destination"
+    try { $Destination = Assert-PshLifecycleNoReparseAncestors -Path $Destination -Description "$Description destination" }
+    catch { Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseIndexOutputPath' -Message "$Description destination is unsafe: $Destination" -InnerException $_.Exception }
+    $parent = [IO.Path]::GetDirectoryName($Destination)
+    if ([string]::IsNullOrWhiteSpace($parent)) {
+        Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseIndexOutputPath' -Message "$Description destination must have a parent directory: $Destination"
     }
-    try { [IO.File]::Copy($Source, $Destination, $false) }
-    catch { Throw-PshReleaseIndexBuildError -ExitCode 3 -ErrorId 'PshReleaseIndexCopy' -Message "Unable to copy ${Description}: $Destination" -InnerException $_.Exception }
+    $parentEntry = Get-PshLifecyclePathEntry -Path $parent -Description "$Description destination parent"
+    if (-not [bool]$parentEntry.Exists -or -not [bool]$parentEntry.IsDirectory -or [bool]$parentEntry.IsReparsePoint) {
+        Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseIndexOutputPath' -Message "$Description destination parent is unsafe or missing: $parent"
+    }
+
+    $temporary = Join-Path $parent ('.' + [IO.Path]::GetFileName($Destination) + '.tmp-' + [Guid]::NewGuid().ToString('N'))
+    $temporaryOwned = $false
+    $sourceStream = $null
+    $temporaryStream = $null
+    $copyError = $null
+    $disposeFailures = New-Object System.Collections.Generic.List[object]
+    $moveAttempted = $false
+    $failureErrorId = 'PshReleaseIndexCopy'
+    $failureMessage = "Unable to copy ${Description}: $Destination"
+    try {
+        $sourceStream = New-Object IO.FileStream($Source, ([IO.FileMode]::Open), ([IO.FileAccess]::Read), ([IO.FileShare]::Read))
+        $temporaryStream = New-Object IO.FileStream($temporary, ([IO.FileMode]::CreateNew), ([IO.FileAccess]::ReadWrite), ([IO.FileShare]::None))
+        $temporaryOwned = $true
+        $sourceStream.CopyTo($temporaryStream)
+        $temporaryStream.Flush($true)
+
+        [int64]$sourceLength = $sourceStream.Length
+        [int64]$temporaryLength = $temporaryStream.Length
+        $sourceStream.Position = 0
+        $temporaryStream.Position = 0
+        $sourceSha = $null
+        $temporarySha = $null
+        try {
+            $sourceSha = [Security.Cryptography.SHA256]::Create()
+            $temporarySha = [Security.Cryptography.SHA256]::Create()
+            $sourceHash = ([BitConverter]::ToString($sourceSha.ComputeHash($sourceStream))).Replace('-', '').ToLowerInvariant()
+            $temporaryHash = ([BitConverter]::ToString($temporarySha.ComputeHash($temporaryStream))).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $hashDisposeActions = New-Object System.Collections.Generic.List[object]
+            if ($null -ne $sourceSha) {
+                $hashDisposeActions.Add([pscustomobject]@{ Label = 'source SHA256 dispose'; Action = { $sourceSha.Dispose() } })
+            }
+            if ($null -ne $temporarySha) {
+                $hashDisposeActions.Add([pscustomobject]@{ Label = 'temporary SHA256 dispose'; Action = { $temporarySha.Dispose() } })
+            }
+            foreach ($failure in @(Invoke-PshReleaseIndexCleanupActions -Actions $hashDisposeActions.ToArray())) {
+                $disposeFailures.Add($failure)
+            }
+        }
+        if ($disposeFailures.Count -gt 0) {
+            throw (New-Object IO.IOException('Unable to dispose release catalog hash resources.', $disposeFailures[0].ErrorRecord.Exception))
+        }
+        if ($sourceLength -ne $temporaryLength -or $sourceHash -cne $temporaryHash) {
+            $failureErrorId = 'PshReleaseIndexCopyVerification'
+            $failureMessage = "$Description temporary copy failed length/SHA256 verification: $temporary"
+            throw (New-Object IO.InvalidDataException($failureMessage))
+        }
+    }
+    catch { $copyError = $_ }
+    finally {
+        $streamDisposeActions = New-Object System.Collections.Generic.List[object]
+        if ($null -ne $temporaryStream) {
+            $streamDisposeActions.Add([pscustomobject]@{ Label = 'temporary file stream dispose'; Action = { $temporaryStream.Dispose() } })
+        }
+        if ($null -ne $sourceStream) {
+            $streamDisposeActions.Add([pscustomobject]@{ Label = 'source file stream dispose'; Action = { $sourceStream.Dispose() } })
+        }
+        foreach ($failure in @(Invoke-PshReleaseIndexCleanupActions -Actions $streamDisposeActions.ToArray())) {
+            $disposeFailures.Add($failure)
+        }
+    }
+    if ($null -eq $copyError -and $disposeFailures.Count -gt 0) {
+        $copyError = $disposeFailures[0].ErrorRecord
+    }
+    if ($null -eq $copyError) {
+        $moveAttempted = $true
+        try {
+            [IO.File]::Move($temporary, $Destination)
+            $temporaryOwned = $false
+        }
+        catch { $copyError = $_ }
+    }
+    if ($null -ne $copyError) {
+        $disposeDiagnostic = if ($disposeFailures.Count -eq 0) { '' } else {
+            ' Dispose failures: ' + [string]::Join('; ', @($disposeFailures | ForEach-Object { "[$([string]$_.Label)] $([string]$_.Message)" }))
+        }
+        $cleanupDiagnostic = ''
+        if ($temporaryOwned -and ([IO.File]::Exists($temporary) -or [IO.Directory]::Exists($temporary))) {
+            if ([IO.File]::Exists($temporary)) {
+                try { [IO.File]::Delete($temporary) }
+                catch { $cleanupDiagnostic = " Temporary copy cleanup also failed: $($_.Exception.Message)" }
+            }
+            else { $cleanupDiagnostic = ' Temporary copy changed to a directory and was not removed.' }
+        }
+        $failureDiagnostics = @{}
+        if (-not [string]::IsNullOrWhiteSpace($disposeDiagnostic)) { $failureDiagnostics['PshDisposeDiagnostics'] = $disposeDiagnostic.Trim() }
+        if (-not [string]::IsNullOrWhiteSpace($cleanupDiagnostic)) { $failureDiagnostics['PshCleanupDiagnostics'] = $cleanupDiagnostic.Trim() }
+        if ($moveAttempted -and ([IO.File]::Exists($Destination) -or [IO.Directory]::Exists($Destination))) {
+            Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseIndexOutputExists' -Message ("$Description destination appeared concurrently and will not be overwritten: $Destination" + $disposeDiagnostic + $cleanupDiagnostic) -InnerException $copyError.Exception -Diagnostics $failureDiagnostics
+        }
+        Throw-PshReleaseIndexBuildError -ExitCode 3 -ErrorId $failureErrorId -Message ($failureMessage + $disposeDiagnostic + $cleanupDiagnostic) -InnerException $copyError.Exception -Diagnostics $failureDiagnostics
+    }
 }
 
 function Get-PshReleaseIndexFileState {
