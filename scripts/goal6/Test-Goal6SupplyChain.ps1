@@ -53,6 +53,7 @@ try {
                 scope = 'ci-only-not-shipped'
                 packageSha256 = [string]$_.package.sha256
                 license = [string]$_.license.spdxId
+                packageContainsLicense = [bool]$_.license.packageContainsLicense
                 licensePath = [string]$_.license.retainedPath
                 licenseSha256 = [string]$_.license.sha256
                 provenancePath = [string]$_.provenance.retainedPath
@@ -118,4 +119,4 @@ $summary = [pscustomobject][ordered]@{
 $summaryPath = Join-Path $reportRootPath 'dependency-license-sbom-summary.json'
 Write-PshGoal6Json -Path $summaryPath -InputObject $summary
 if ($failedSteps.Count -gt 0) { throw "Dependency/license/SBOM gate failed in $($failedSteps.Count) step(s). See $summaryPath" }
-Write-Output ('Dependency/license/SBOM gate passed: release artifacts regenerated and checked; {0} CI-only dependencies retain verified MIT licenses.' -f $ciDependencies.Count)
+Write-Output ('Dependency/license/SBOM gate passed: release artifacts regenerated and checked; {0} CI-only dependencies retain verified licenses and provenance.' -f $ciDependencies.Count)

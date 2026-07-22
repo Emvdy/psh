@@ -91,6 +91,47 @@ function Get-PshProcessList {
     return $processes
 }
 
+function Get-PshWindowsProcessWmiRecord {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId
+    )
+
+    if ($ProcessId -le 0 -or [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return $null }
+    $searcher = $null
+    $results = $null
+    try {
+        Add-Type -AssemblyName System.Management -ErrorAction Stop
+        $queryText = 'SELECT CommandLine, ParentProcessId FROM Win32_Process WHERE ProcessId = {0}' -f $ProcessId
+        $searcher = New-Object System.Management.ManagementObjectSearcher -ArgumentList @($queryText)
+        $results = $searcher.Get()
+        foreach ($result in $results) {
+            return [pscustomobject]@{
+                CommandLine = [string]$result.Properties['CommandLine'].Value
+                ParentProcessId = [int]$result.Properties['ParentProcessId'].Value
+            }
+        }
+    }
+    catch { return $null }
+    finally {
+        if ($results -is [IDisposable]) { $results.Dispose() }
+        if ($searcher -is [IDisposable]) { $searcher.Dispose() }
+    }
+    return $null
+}
+
+function Get-PshWindowsProcessRecord {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId
+    )
+
+    if ($ProcessId -le 0 -or [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return $null }
+    $record = $null
+    try { $record = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = {0}' -f $ProcessId) -ErrorAction Stop }
+    catch { $record = $null }
+    if ($null -ne $record) { return $record }
+    return Get-PshWindowsProcessWmiRecord -ProcessId $ProcessId
+}
+
 function Get-PshProcessText {
     param(
         [Parameter(Mandatory = $true)][Diagnostics.Process]$Process,
@@ -109,20 +150,7 @@ function Get-PshProcessText {
         catch { $path = '' }
     }
     if ($FullCommand) {
-        # ProcessStartInfo has no portable command-line property for an already
-        # running process.  MainModule path is a useful, permission-safe fall-
-        # back; platform-specific command-line lookup is added where available.
-        try {
-            $cmd = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = {0}' -f $Process.Id) -ErrorAction Stop
-            if ($null -ne $cmd) { $commandLine = [string]$cmd.CommandLine }
-        }
-        catch {
-            try {
-                $commandLineProperty = $Process.PSObject.Properties['CommandLine']
-                if ($null -ne $commandLineProperty) { $commandLine = [string]$commandLineProperty.Value }
-            }
-            catch { $commandLine = '' }
-        }
+        $commandLine = [string](Get-PshProcessCommandLine -Process $Process)
     }
     if ([string]::IsNullOrWhiteSpace($name)) { $name = '<unknown>' }
     if ($Long) {
@@ -210,12 +238,7 @@ function ps {
         # relationship can be observed.  This is deterministic and avoids
         # exposing unrelated process rows by default.
         $currentId = [Diagnostics.Process]::GetCurrentProcess().Id
-        $parentId = 0
-        try {
-            $current = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = {0}' -f $currentId) -ErrorAction Stop
-            if ($null -ne $current) { $parentId = [int]$current.ParentProcessId }
-        }
-        catch { }
+        $parentId = Get-PshProcessParentId -ProcessId $currentId
         $processes = @($processes | Where-Object { $_.Id -eq $currentId -or ($parentId -gt 0 -and $_.Id -eq $parentId) })
     }
 
@@ -277,14 +300,7 @@ function Get-PshProcessCommandLine {
     }
     catch { }
 
-    $query = $null
-    $platformIsWindows = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
-    if ($platformIsWindows) {
-        try {
-            $query = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = {0}' -f $Process.Id) -ErrorAction Stop
-        }
-        catch { $query = $null }
-    }
+    $query = Get-PshWindowsProcessRecord -ProcessId $Process.Id
     if ($null -ne $query) {
         try {
             $value = [string]$query.CommandLine
@@ -344,14 +360,7 @@ function Get-PshProcessParentId {
     )
 
     if ($ProcessId -le 0) { return 0 }
-    $query = $null
-    $platformIsWindows = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
-    if ($platformIsWindows) {
-        try {
-            $query = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = {0}' -f $ProcessId) -ErrorAction Stop
-        }
-        catch { $query = $null }
-    }
+    $query = Get-PshWindowsProcessRecord -ProcessId $ProcessId
     if ($null -ne $query) {
         try { return [int]$query.ParentProcessId } catch { }
     }

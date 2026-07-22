@@ -8,7 +8,7 @@ param(
     [Parameter(Mandatory = $true)][string]$DestinationRoot,
     [string]$RepositoryRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
     [string]$LockPath = (Join-Path $PSScriptRoot 'ci-dependencies.lock.json'),
-    [ValidateSet('all', 'gitleaks', 'psscriptanalyzer')][string]$DependencyId = 'all',
+    [ValidateSet('all', 'gitleaks', 'pester', 'psscriptanalyzer')][string]$DependencyId = 'all',
     [string]$SummaryPath
 )
 
@@ -113,10 +113,7 @@ function Install-PshGoal6Dependency {
     Assert-PshGoal6Condition ([int64](Get-Item -LiteralPath $packagePath).Length -eq [int64]$Dependency.package.size) "$id package size mismatches."
     Assert-PshGoal6Condition ((Get-PshGoal6Sha256 -Path $packagePath) -ceq [string]$Dependency.package.sha256) "$id package SHA256 mismatches."
 
-    if ($id -ceq 'psscriptanalyzer') {
-        Assert-PshGoal6Condition ((Get-PshGoal6Sha512Base64 -Path $packagePath) -ceq [string]$Dependency.package.gallerySha512Base64) 'PSScriptAnalyzer Gallery SHA512 mismatches.'
-    }
-    else {
+    if ($id -ceq 'gitleaks') {
         $checksumsPath = Join-Path $DownloadRoot 'gitleaks-checksums.txt'
         Invoke-PshGoal6Download -Url ([string]$Dependency.package.checksumsUrl) -Destination $checksumsPath
         Assert-PshGoal6Condition ([int64](Get-Item -LiteralPath $checksumsPath).Length -eq [int64]$Dependency.package.checksumsSize) 'gitleaks checksums file size mismatches.'
@@ -124,6 +121,9 @@ function Install-PshGoal6Dependency {
         $checksumText = Get-PshGoal6StrictText -Path $checksumsPath
         $expectedLine = '{0}  {1}' -f [string]$Dependency.package.sha256, [string]$Dependency.package.fileName
         Assert-PshGoal6Condition (@($checksumText.Replace("`r`n", "`n").Split("`n") | Where-Object { $_ -ceq $expectedLine }).Count -eq 1) 'gitleaks official checksums do not contain the locked Windows x64 asset hash.'
+    }
+    else {
+        Assert-PshGoal6Condition ((Get-PshGoal6Sha512Base64 -Path $packagePath) -ceq [string]$Dependency.package.gallerySha512Base64) "$id Gallery SHA512 mismatches."
     }
 
     $installedRelativePath = [string]$Dependency.package.installedRelativePath
@@ -136,11 +136,16 @@ function Install-PshGoal6Dependency {
     Assert-PshGoal6Condition ([int64](Get-Item -LiteralPath $installedPath).Length -eq [int64]$Dependency.package.installedSize) "$id installed entry size mismatches."
     Assert-PshGoal6Condition ((Get-PshGoal6Sha256 -Path $installedPath) -ceq [string]$Dependency.package.installedSha256) "$id installed entry SHA256 mismatches."
 
-    $archiveLicensePath = Join-Path $extractRoot ([string]$Dependency.license.archivePath)
-    Assert-PshGoal6Condition ([IO.File]::Exists($archiveLicensePath)) "$id archive license is missing."
-    Assert-PshGoal6Condition ((Get-PshGoal6Sha256 -Path $archiveLicensePath) -ceq [string]$Dependency.license.sha256) "$id archive license SHA256 mismatches."
     $retainedLicensePath = Resolve-PshGoal6RelativePath -Root $RepositoryRootPath -RelativePath ([string]$Dependency.license.retainedPath) -Description "$id retained license"
-    Assert-PshGoal6Condition ((Get-PshGoal6Sha256 -Path $archiveLicensePath) -ceq (Get-PshGoal6Sha256 -Path $retainedLicensePath)) "$id archive and retained licenses differ."
+    if ([bool]$Dependency.license.packageContainsLicense) {
+        $archiveLicensePath = Resolve-PshGoal6RelativePath -Root $extractRoot -RelativePath ([string]$Dependency.license.archivePath) -Description "$id archive license path"
+        Assert-PshGoal6Condition ([IO.File]::Exists($archiveLicensePath)) "$id archive license is missing."
+        Assert-PshGoal6Condition ((Get-PshGoal6Sha256 -Path $archiveLicensePath) -ceq [string]$Dependency.license.sha256) "$id archive license SHA256 mismatches."
+        Assert-PshGoal6Condition ((Get-PshGoal6Sha256 -Path $archiveLicensePath) -ceq (Get-PshGoal6Sha256 -Path $retainedLicensePath)) "$id archive and retained licenses differ."
+    }
+    else {
+        Assert-PshGoal6Condition ((Get-PshGoal6Sha256 -Path $retainedLicensePath) -ceq [string]$Dependency.license.sha256) "$id retained source license SHA256 mismatches."
+    }
 
     if ($id -ceq 'gitleaks') {
         Assert-PshGoal6Condition ((Get-PshGoal6PeMachine -Path $installedPath) -ceq [string]$Dependency.package.peMachine) 'gitleaks executable is not Windows x64.'
@@ -158,6 +163,7 @@ function Install-PshGoal6Dependency {
         installedSha256 = [string]$Dependency.package.installedSha256
         license = [string]$Dependency.license.spdxId
         licenseSha256 = [string]$Dependency.license.sha256
+        licenseSource = if ([bool]$Dependency.license.packageContainsLicense) { 'verified-package-and-fixed-source' } else { 'fixed-source-commit-package-has-no-license-file' }
     }
 }
 
@@ -193,10 +199,9 @@ try {
     }
 
     if ([IO.Directory]::Exists($downloadRoot)) { Remove-Item -LiteralPath $downloadRoot -Recurse -Force }
-    Move-Item -LiteralPath $stagingRoot -Destination $destinationRootPath
     $summary.status = 'passed'
     $summary.dependencies = $records.ToArray()
-    Write-PshGoal6Json -Path $summaryPathFull -InputObject ([pscustomobject]$summary)
+    Complete-PshGoal6DependencyInstall -StagingRoot $stagingRoot -DestinationRoot $destinationRootPath -SummaryPath $summaryPathFull -Summary ([pscustomobject]$summary)
     Write-Output ('Installed and verified {0} Goal 6 CI dependencies at {1}.' -f $records.Count, $destinationRootPath)
 }
 catch {

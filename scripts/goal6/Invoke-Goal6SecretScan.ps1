@@ -15,6 +15,19 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Goal6.Common.ps1')
 
+function Invoke-PshGoal6GitCapture {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryRootPath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $output = @(& git -C $RepositoryRootPath @Arguments 2>&1)
+    $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    Assert-PshGoal6Condition ($exitCode -eq 0) "$Description failed: $($output -join ' ')"
+    return @($output | ForEach-Object { [string]$_ })
+}
+
 function Invoke-PshGoal6GitleaksScan {
     param(
         [Parameter(Mandatory = $true)][string]$ExecutablePath,
@@ -30,9 +43,10 @@ function Invoke-PshGoal6GitleaksScan {
         '--redact=100',
         '--ignore-gitleaks-allow',
         '--report-format', 'json',
-        '--report-path', $ReportPath,
-        $RepositoryRootPath
+        '--report-path', $ReportPath
     )
+    if ($Mode -ceq 'git') { $arguments += '--log-opts=--all' }
+    $arguments += $RepositoryRootPath
     $output = @(& $ExecutablePath @arguments 2>&1)
     $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
     Write-PshGoal6Text -Path $LogPath -Text ((@($output | ForEach-Object { [string]$_ }) -join "`n") + "`n")
@@ -61,6 +75,7 @@ $summaryPath = Join-Path $reportRootPath 'gitleaks-summary.json'
 $failure = $null
 $version = $null
 $scans = @()
+$remoteRefCoverage = $null
 
 try {
     Assert-PshGoal6Condition (-not [IO.File]::Exists((Join-Path $repositoryRootPath '.gitleaksignore'))) 'Repository .gitleaksignore files are not permitted by the no-suppression secret gate.'
@@ -82,6 +97,26 @@ try {
     $shallowExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
     Assert-PshGoal6Condition ($shallowExitCode -eq 0 -and (($shallowOutput -join '').Trim()) -ceq 'false') 'Secret history scan requires a non-shallow checkout.'
 
+    $remoteUrlOutput = Invoke-PshGoal6GitCapture -RepositoryRootPath $repositoryRootPath -Arguments @('remote', 'get-url', 'origin') -Description 'Resolve origin URL'
+    Assert-PshGoal6Condition ($remoteUrlOutput.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace([string]$remoteUrlOutput[0])) 'Secret history scan requires exactly one configured origin URL.'
+    $remoteLines = @()
+    $remoteFailure = $null
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        $remoteOutput = @(& git -C $repositoryRootPath ls-remote --heads --tags --refs origin 2>&1)
+        $remoteExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+        if ($remoteExitCode -eq 0) {
+            $remoteLines = @($remoteOutput | ForEach-Object { [string]$_ })
+            $remoteFailure = $null
+            break
+        }
+        $remoteFailure = ($remoteOutput -join ' ')
+        if ($attempt -lt 4) { Start-Sleep -Seconds 2 }
+    }
+    Assert-PshGoal6Condition ($null -eq $remoteFailure) "Unable to enumerate origin heads/tags after four attempts: $remoteFailure"
+    $localBranchLines = Invoke-PshGoal6GitCapture -RepositoryRootPath $repositoryRootPath -Arguments @('for-each-ref', '--format=%(objectname) %(refname)', 'refs/remotes/origin') -Description 'Enumerate local origin branch refs'
+    $localTagLines = Invoke-PshGoal6GitCapture -RepositoryRootPath $repositoryRootPath -Arguments @('for-each-ref', '--format=%(objectname) %(refname)', 'refs/tags') -Description 'Enumerate local tag refs'
+    $remoteRefCoverage = Assert-PshGoal6RemoteRefCoverage -RemoteLines $remoteLines -LocalBranchLines $localBranchLines -LocalTagLines $localTagLines
+
     $historyScan = Invoke-PshGoal6GitleaksScan -ExecutablePath $executablePath -Mode git -RepositoryRootPath $repositoryRootPath -ReportPath (Join-Path $reportRootPath 'gitleaks-history.json') -LogPath (Join-Path $reportRootPath 'gitleaks-history.log')
     $worktreeScan = Invoke-PshGoal6GitleaksScan -ExecutablePath $executablePath -Mode dir -RepositoryRootPath $repositoryRootPath -ReportPath (Join-Path $reportRootPath 'gitleaks-worktree.json') -LogPath (Join-Path $reportRootPath 'gitleaks-worktree.log')
     $scans = @($historyScan, $worktreeScan)
@@ -96,7 +131,8 @@ $summary = [pscustomobject][ordered]@{
     scanner = 'gitleaks'
     scannerVersion = $version
     scannerConfiguration = 'built-in defaults; no repository config, ignore file, or gitleaks:allow comments'
-    historyCoverage = 'all refs reachable from a non-shallow checkout'
+    historyCoverage = 'gitleaks git --log-opts=--all after exact origin heads/tags parity verification'
+    remoteRefCoverage = $remoteRefCoverage
     worktreeCoverage = 'directory scan including tracked and untracked files'
     redactionPercent = 100
     scans = $scans

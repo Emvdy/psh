@@ -572,6 +572,49 @@ try {
     }
 
     Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+    $processCommandSourceText = [IO.File]::ReadAllText((Join-Path $commandSourceRoot 'ProcessCommands.ps1'), $utf8NoBom)
+    Assert-PshBatch4 ($processCommandSourceText -notmatch '(?i)\bGet-WmiObject\b' -and $processCommandSourceText -match '\bSystem\.Management\.ManagementObjectSearcher\b') 'Windows process fallback must use System.Management without the deprecated Get-WmiObject cmdlet.'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $processFallbackProbe = & (Get-Module -Name Psh -ErrorAction Stop) {
+            $originalFallback = (Get-Command -Name Get-PshWindowsProcessWmiRecord -CommandType Function -ErrorAction Stop).ScriptBlock
+            $originalCimFunction = Get-Item -LiteralPath Function:Get-CimInstance -ErrorAction SilentlyContinue
+            try {
+                $script:PshBatch4CimProbeCalls = 0
+                $script:PshBatch4WmiProbeCalls = 0
+                Set-Item -LiteralPath Function:Get-CimInstance -Value {
+                    param([string]$ClassName, [string]$Filter, [object]$ErrorAction)
+                    $script:PshBatch4CimProbeCalls++
+                    throw 'controlled CIM failure'
+                }
+                Set-Item -LiteralPath Function:Get-PshWindowsProcessWmiRecord -Value {
+                    param([int]$ProcessId)
+                    $script:PshBatch4WmiProbeCalls++
+                    return [pscustomobject]@{
+                        CommandLine = 'controlled System.Management fallback command line'
+                        ParentProcessId = 424242
+                    }
+                }
+                $currentProcess = [Diagnostics.Process]::GetCurrentProcess()
+                try {
+                    return [pscustomobject]@{
+                        CommandLine = [string](Get-PshProcessCommandLine -Process $currentProcess)
+                        ParentProcessId = [int](Get-PshProcessParentId -ProcessId $currentProcess.Id)
+                        CimCalls = [int]$script:PshBatch4CimProbeCalls
+                        WmiCalls = [int]$script:PshBatch4WmiProbeCalls
+                    }
+                }
+                finally { $currentProcess.Dispose() }
+            }
+            finally {
+                if ($null -eq $originalCimFunction) { Remove-Item -LiteralPath Function:Get-CimInstance -Force -ErrorAction SilentlyContinue }
+                else { Set-Item -LiteralPath Function:Get-CimInstance -Value $originalCimFunction.ScriptBlock }
+                Set-Item -LiteralPath Function:Get-PshWindowsProcessWmiRecord -Value $originalFallback
+                Remove-Variable -Name PshBatch4CimProbeCalls, PshBatch4WmiProbeCalls -Scope Script -ErrorAction SilentlyContinue
+            }
+        }
+        Assert-PshBatch4 ([string]$processFallbackProbe.CommandLine -ceq 'controlled System.Management fallback command line' -and [int]$processFallbackProbe.ParentProcessId -eq 424242) 'CIM failure did not fall back to the controlled System.Management process record.'
+        Assert-PshBatch4 ([int]$processFallbackProbe.CimCalls -eq 2 -and [int]$processFallbackProbe.WmiCalls -eq 2) 'Windows process metadata did not attempt CIM before System.Management for command-line and parent lookups.'
+    }
     foreach ($name in $commandNames) {
         $exported = Get-Command -Name ('Psh\{0}' -f $name) -CommandType Function -ErrorAction Stop
         Assert-PshBatch4 ($exported.Source -ceq 'Psh') ('{0} is not exported by Psh.' -f $name)

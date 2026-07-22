@@ -18,6 +18,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Goal6.Common.ps1')
+. (Join-Path $PSScriptRoot 'Goal6.Zip.ps1')
 
 function Get-PshGoal6RelativeBuildPath {
     param(
@@ -30,14 +31,6 @@ function Get-PshGoal6RelativeBuildPath {
     $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
     Assert-PshGoal6Condition ($pathFull.StartsWith($rootFull + [IO.Path]::DirectorySeparatorChar, $comparison)) "Build path escapes its run root: $Path"
     return $pathFull.Substring($rootFull.Length + 1).Replace('\', '/')
-}
-
-function Get-PshGoal6StreamSha256 {
-    param([Parameter(Mandatory = $true)][IO.Stream]$Stream)
-
-    $algorithm = [Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($algorithm.ComputeHash($Stream))).Replace('-', '').ToLowerInvariant() }
-    finally { $algorithm.Dispose() }
 }
 
 function Get-PshGoal6OrderedString {
@@ -137,52 +130,6 @@ function Invoke-PshGoal6IndependentBuild {
     }
 }
 
-function Get-PshGoal6NormalizedArchiveManifest {
-    param(
-        [Parameter(Mandatory = $true)][string]$RunRoot,
-        [Parameter(Mandatory = $true)][string]$ArchivePath
-    )
-
-    Add-Type -AssemblyName System.IO.Compression
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $entries = New-Object System.Collections.Generic.List[object]
-    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    $stream = [IO.File]::OpenRead($ArchivePath)
-    try {
-        $archive = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Read, $false)
-        try {
-            $entryNames = Get-PshGoal6OrderedString -Values @($archive.Entries | ForEach-Object { ([string]$_.FullName).Replace('\', '/') })
-            $entryByName = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
-            foreach ($entry in @($archive.Entries)) { $entryByName[([string]$entry.FullName).Replace('\', '/')] = $entry }
-            foreach ($entryName in $entryNames) {
-                if ($entryName.EndsWith('/', [StringComparison]::Ordinal)) { continue }
-                Assert-PshGoal6Condition (-not [IO.Path]::IsPathRooted($entryName)) "Archive contains a rooted entry: $entryName"
-                $segments = @($entryName.Split('/'))
-                Assert-PshGoal6Condition ($segments -notcontains '.' -and $segments -notcontains '..') "Archive contains a traversal entry: $entryName"
-                Assert-PshGoal6Condition (@($segments | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -eq 0) "Archive contains an empty path segment: $entryName"
-                Assert-PshGoal6Condition ($seen.Add($entryName)) "Archive contains a case-insensitive duplicate entry: $entryName"
-                $entry = $entryByName[$entryName]
-                $entryStream = $entry.Open()
-                try { $sha256 = Get-PshGoal6StreamSha256 -Stream $entryStream }
-                finally { $entryStream.Dispose() }
-                $entries.Add([pscustomobject][ordered]@{
-                        path = $entryName
-                        length = [int64]$entry.Length
-                        sha256 = $sha256
-                    })
-            }
-        }
-        finally { $archive.Dispose() }
-    }
-    finally { $stream.Dispose() }
-    return [pscustomobject][ordered]@{
-        path = Get-PshGoal6RelativeBuildPath -Root $RunRoot -Path $ArchivePath
-        containerSha256Informational = Get-PshGoal6Sha256 -Path $ArchivePath
-        containerMetadataCompared = $false
-        entries = $entries.ToArray()
-    }
-}
-
 function Get-PshGoal6BuildManifest {
     param(
         [Parameter(Mandatory = $true)][string]$RunName,
@@ -198,7 +145,7 @@ function Get-PshGoal6BuildManifest {
         $relativePath = Get-PshGoal6RelativeBuildPath -Root $RunRoot -Path $file.FullName
         if ($relativePath -in @('bootstrapper-build.log', 'package-build.log')) { $ignored.Add($relativePath); continue }
         if ([IO.Path]::GetExtension($relativePath) -ieq '.zip') {
-            $archives.Add((Get-PshGoal6NormalizedArchiveManifest -RunRoot $RunRoot -ArchivePath $file.FullName))
+            $archives.Add((Get-PshGoal6ZipArchiveManifest -ArchivePath $file.FullName -DisplayPath $relativePath))
             continue
         }
         $files.Add([pscustomobject][ordered]@{
@@ -215,7 +162,7 @@ function Get-PshGoal6BuildManifest {
         stableFiles = $files.ToArray()
         normalizedArchives = $archives.ToArray()
         ignoredFiles = $ignored.ToArray()
-        archiveComparisonPolicy = 'Compare entry paths, uncompressed lengths, and entry SHA256 values; record but do not gate on ZIP container hashes or timestamps.'
+        archiveComparisonPolicy = 'Normalize only DOS entry timestamps; hard-compare entry order, uncompressed content, compressed bytes, flags/method, extra fields, comments, and attributes; reject link/reparse/special entries.'
     }
 }
 
@@ -251,19 +198,7 @@ function Compare-PshGoal6BuildManifest {
     foreach ($archivePath in $archivePaths) {
         if (-not $firstArchives.ContainsKey($archivePath)) { $differences.Add([pscustomobject][ordered]@{ kind = 'archive-missing-first'; path = $archivePath; first = $null; second = 'present' }); continue }
         if (-not $secondArchives.ContainsKey($archivePath)) { $differences.Add([pscustomobject][ordered]@{ kind = 'archive-missing-second'; path = $archivePath; first = 'present'; second = $null }); continue }
-        $firstEntries = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
-        $secondEntries = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
-        foreach ($entry in @($firstArchives[$archivePath].entries)) { $firstEntries[[string]$entry.path] = $entry }
-        foreach ($entry in @($secondArchives[$archivePath].entries)) { $secondEntries[[string]$entry.path] = $entry }
-        $entryPaths = Get-PshGoal6OrderedString -Values @((@($firstEntries.Keys) + @($secondEntries.Keys)) | Sort-Object -Unique)
-        foreach ($entryPath in $entryPaths) {
-            $qualifiedPath = $archivePath + '!' + $entryPath
-            if (-not $firstEntries.ContainsKey($entryPath)) { $differences.Add([pscustomobject][ordered]@{ kind = 'archive-entry-missing-first'; path = $qualifiedPath; first = $null; second = [string]$secondEntries[$entryPath].sha256 }); continue }
-            if (-not $secondEntries.ContainsKey($entryPath)) { $differences.Add([pscustomobject][ordered]@{ kind = 'archive-entry-missing-second'; path = $qualifiedPath; first = [string]$firstEntries[$entryPath].sha256; second = $null }); continue }
-            if ([int64]$firstEntries[$entryPath].length -ne [int64]$secondEntries[$entryPath].length -or [string]$firstEntries[$entryPath].sha256 -cne [string]$secondEntries[$entryPath].sha256) {
-                $differences.Add([pscustomobject][ordered]@{ kind = 'archive-entry-content'; path = $qualifiedPath; first = ('{0}:{1}' -f [int64]$firstEntries[$entryPath].length, [string]$firstEntries[$entryPath].sha256); second = ('{0}:{1}' -f [int64]$secondEntries[$entryPath].length, [string]$secondEntries[$entryPath].sha256) })
-            }
-        }
+        foreach ($archiveDifference in @(Compare-PshGoal6ZipArchiveManifest -First $firstArchives[$archivePath] -Second $secondArchives[$archivePath])) { $differences.Add($archiveDifference) }
     }
     return $differences.ToArray()
 }
@@ -303,7 +238,7 @@ $summary = [pscustomobject][ordered]@{
     packageBuildInvokedIndependentlyTwice = $true
     catalogInputs = 'deterministic reproducibility-only fixtures; not release trust evidence'
     stableFilePolicy = 'Compare relative paths, lengths, and per-file SHA256; exclude build logs and ZIP container bytes.'
-    archivePolicy = 'Stream-extract normalized file entries and compare path, uncompressed length, and SHA256; ignore container timestamps and do not gate on whole-ZIP hashes.'
+    archivePolicy = 'Zero only local/central DOS modification timestamps, then hard-compare normalized container bytes and explicit entry order, flags/method, compressed length, extra/comment fields, internal/external attributes, and uncompressed SHA256.'
     firstStableFileCount = if ($null -eq $manifestOne) { 0 } else { @($manifestOne.stableFiles).Count }
     secondStableFileCount = if ($null -eq $manifestTwo) { 0 } else { @($manifestTwo.stableFiles).Count }
     firstArchiveCount = if ($null -eq $manifestOne) { 0 } else { @($manifestOne.normalizedArchives).Count }
@@ -317,4 +252,4 @@ $summaryPath = Join-Path $outputRootPath 'reproducibility-summary.json'
 Write-PshGoal6Json -Path $summaryPath -InputObject $summary
 if ($null -ne $failure) { throw "Reproducibility gate failed: $failure" }
 if ($differences.Count -gt 0) { throw "Reproducibility gate found $($differences.Count) content difference(s). See $summaryPath" }
-Write-Output ('Reproducibility gate passed: two independent bootstrapper/package builds produced identical stable file and normalized archive manifests.')
+Write-Output ('Reproducibility gate passed: two independent builds matched after timestamp-only ZIP normalization with all non-timestamp container and entry semantics gated.')

@@ -1,8 +1,8 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "manifest": {
     "created": "2026-07-22T00:00:00Z",
-    "namespaceSeed": "goal6-ci-quality-dependencies-v1"
+    "namespaceSeed": "goal6-ci-quality-dependencies-v2"
   },
   "dependencies": [
     {
@@ -34,6 +34,7 @@
       },
       "license": {
         "spdxId": "MIT",
+        "packageContainsLicense": true,
         "archivePath": "LICENSE",
         "sourceUrl": "https://raw.githubusercontent.com/gitleaks/gitleaks/83d9cd684c87d95d656c1458ef04895a7f1cbd8e/LICENSE",
         "retainedPath": "scripts/goal6/licenses/gitleaks-8.30.1/LICENSE",
@@ -43,6 +44,46 @@
       "provenance": {
         "retainedPath": "scripts/goal6/licenses/gitleaks-8.30.1/PROVENANCE.md",
         "sha256": "af11ff5e137d13b7e59eccd2d4810aaec09a05c0b5210332b7d56add4d970ec1"
+      }
+    },
+    {
+      "id": "pester",
+      "displayName": "Pester",
+      "version": "5.9.0",
+      "usage": "ci-only-powershell-test-framework",
+      "platform": "any",
+      "source": {
+        "repository": "https://github.com/pester/Pester",
+        "tag": "5.9.0",
+        "commit": "8b10038031899d023ab5875f99c29bc7b11451d9",
+        "releaseUrl": "https://github.com/pester/Pester/releases/tag/5.9.0",
+        "galleryMetadataUrl": "https://www.powershellgallery.com/api/v2/Packages(Id='Pester',Version='5.9.0')"
+      },
+      "package": {
+        "url": "https://www.powershellgallery.com/api/v2/package/Pester/5.9.0",
+        "fileName": "Pester.5.9.0.nupkg",
+        "archiveType": "zip",
+        "sha256": "5a0fd80b361600bf4bbd4c307c1fd01b17f11668bab19e657add41b00ad22ab9",
+        "galleryHashAlgorithm": "SHA512",
+        "gallerySha512Base64": "DIfd4Itvse518HCzS/doIs7ZZ2IgtAQeKr2y3MScezDeR5rqLBoQURCoQ/XNcBTxiqFNwT2ILdI5Gg2sI3CdkQ==",
+        "size": 327975,
+        "moduleManifestArchivePath": "Pester.psd1",
+        "installedRelativePath": "Pester/5.9.0/Pester.psd1",
+        "installedSha256": "a35b3320360821222bf138906af05fb7d4474ae2f24f5840bd53c15f144ccb9e",
+        "installedSize": 21594
+      },
+      "license": {
+        "spdxId": "Apache-2.0",
+        "packageContainsLicense": false,
+        "archivePath": null,
+        "sourceUrl": "https://raw.githubusercontent.com/pester/Pester/8b10038031899d023ab5875f99c29bc7b11451d9/LICENSE",
+        "retainedPath": "scripts/goal6/licenses/Pester-5.9.0/LICENSE",
+        "sha256": "6a2fc73db70e674162600052e12a6537e93b51d5dfcf2340c4ed08cdb174debb",
+        "size": 579
+      },
+      "provenance": {
+        "retainedPath": "scripts/goal6/licenses/Pester-5.9.0/PROVENANCE.md",
+        "sha256": "71c31467eb206dc0c44f97790daf3c89ea839144a3bd2a3ba49b1c9ebceaadb8"
       }
     },
     {
@@ -72,6 +113,7 @@
       },
       "license": {
         "spdxId": "MIT",
+        "packageContainsLicense": true,
         "archivePath": "LICENSE",
         "sourceUrl": "https://raw.githubusercontent.com/PowerShell/PSScriptAnalyzer/f05704df81b2aca17dc027ee39b3fce106d418fc/LICENSE",
         "retainedPath": "scripts/goal6/licenses/PSScriptAnalyzer-1.25.0/LICENSE",
