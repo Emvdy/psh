@@ -13,7 +13,13 @@ param(
     [string] $Version = 'latest',
 
     [Parameter()]
-    [switch] $NonInteractive
+    [switch] $NonInteractive,
+
+    [Parameter()]
+    [string] $ArchivePath,
+
+    [Parameter()]
+    [string] $ArchiveSha256
 )
 
 Set-StrictMode -Version 2.0
@@ -369,12 +375,20 @@ function Invoke-PshOfflineInstall {
         [Parameter()][string] $Edition = 'Core',
         [Parameter()][ValidateNotNullOrEmpty()][string] $Version = 'latest',
         [Parameter()][switch] $NonInteractive,
-        [Parameter()][ValidatePattern('\A[0-9a-fA-F]{64}\z')][string] $ArchiveSha256
+        [Parameter()][string] $ArchivePath,
+        [Parameter()][string] $ArchiveSha256
     )
 
     if ($null -ne $script:PshOfflineHelperLoadError) { throw $script:PshOfflineHelperLoadError }
     Assert-PshOfflineEdition -Value $Edition
     Assert-PshOfflineExecutionPolicy
+    if ([string]::IsNullOrWhiteSpace($ArchivePath) -or [string]::IsNullOrWhiteSpace($ArchiveSha256)) {
+        Throw-PshOfflineEntryError -ExitCode 4 -Kind 'Dependency' -ErrorId 'PshOfflineArchiveEvidenceRequired' -Message 'Verified offline installation requires ArchivePath and ArchiveSha256 from a trusted external release channel.'
+    }
+    if ($ArchiveSha256 -cnotmatch '\A[0-9A-Fa-f]{64}\z' -or $ArchiveSha256 -cmatch '\A0{64}\z') {
+        Throw-PshOfflineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshOfflineArchiveSha256' -Message 'Offline archive SHA256 evidence must be a non-zero 64-character hexadecimal value.'
+    }
+    $normalizedArchiveSha256 = $ArchiveSha256.ToLowerInvariant()
     $packageRoot = [IO.Path]::GetFullPath($PSScriptRoot)
     $manifestPath = Join-Path $packageRoot 'package.manifest.json'
     $catalogPath = Join-Path $packageRoot 'package.manifest.cat'
@@ -383,19 +397,24 @@ function Invoke-PshOfflineInstall {
     }
     $trustedPackage = Confirm-PshPackageManifestTrust -ManifestPath $manifestPath -CatalogPath $catalogPath -Offline
     $record = Assert-PshTrustedPackageManifest -InputObject $trustedPackage
-    $manifest = $record.Manifest
-    if ([string]$manifest.edition -cne $Edition) {
-        Throw-PshOfflineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshOfflineEditionMismatch' -Message "Requested edition '$Edition' does not match package edition '$($manifest.edition)'."
-    }
-    if ($Version -ine 'latest') {
-        $requestedVersion = Assert-PshLifecycleSemVer -Value $Version -Description 'Requested offline version'
-        if ($requestedVersion -cne [string]$manifest.version) {
-            Throw-PshOfflineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshOfflineVersionMismatch' -Message "Requested version '$requestedVersion' does not match package version '$($manifest.version)'."
-        }
-    }
-
     $context = $null
+    $archiveBinding = $null
     try {
+        # Bind the manifest record and complete extracted tree to the external
+        # ZIP after catalog parsing. Read locks remain held while every source
+        # byte is copied and checked against this archive-bound record.
+        $archiveBinding = Confirm-PshPackageArchiveBinding -ArchivePath $ArchivePath -ArchiveSha256 $normalizedArchiveSha256 -PackageRoot $packageRoot -RetainLocks
+        $manifest = $record.Manifest
+        if ([string]$manifest.edition -cne $Edition) {
+            Throw-PshOfflineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshOfflineEditionMismatch' -Message "Requested edition '$Edition' does not match package edition '$($manifest.edition)'."
+        }
+        if ($Version -ine 'latest') {
+            $requestedVersion = Assert-PshLifecycleSemVer -Value $Version -Description 'Requested offline version'
+            if ($requestedVersion -cne [string]$manifest.version) {
+                Throw-PshOfflineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshOfflineVersionMismatch' -Message "Requested version '$requestedVersion' does not match package version '$($manifest.version)'."
+            }
+        }
+
         $context = New-PshOfflineOwnedRoot
         $installView = New-PshOfflineInstallView -Context $context -PackageRoot $packageRoot -TrustedPackage $trustedPackage
         $installerPath = Resolve-PshOfflineChildPath -Root $installView -RelativePath 'payload/install/Install-PshPackage.ps1'
@@ -408,12 +427,19 @@ function Invoke-PshOfflineInstall {
             Version = [string]$manifest.version
             Offline = $true
         }
-        if (-not [string]::IsNullOrWhiteSpace($ArchiveSha256)) { $arguments['ArchiveSha256'] = $ArchiveSha256 }
+        $arguments['ArchiveSha256'] = [string]$archiveBinding.ArchiveSha256
         if ($NonInteractive) { $arguments['Confirm'] = $false }
-        return & $installerPath @arguments
+        $installResults = @(& $installerPath @arguments)
+        if ($installResults.Count -eq 0 -or $null -eq $installResults[-1]) {
+            Throw-PshOfflineEntryError -ExitCode 3 -Kind 'Io' -ErrorId 'PshOfflineInstallResult' -Message 'Trusted package installer returned no result.'
+        }
+        $finalTrust = Complete-PshProductionArchiveTrustReport -InputObject $record.Trust -TrustMode 'offline-external-archive-sha256+package-catalog-sha256' -Checksum 'external-archive-manifest-tree-sha256-verified' -ArchiveSha256 ([string]$archiveBinding.ArchiveSha256)
+        $installResults[-1] | Add-Member -NotePropertyName trust -NotePropertyValue $finalTrust -Force
+        return $installResults
     }
     finally {
         Remove-PshOfflineOwnedRoot -Context $context
+        if ($null -ne $archiveBinding) { try { $archiveBinding.Dispose() } catch { } }
     }
 }
 
@@ -455,7 +481,7 @@ function Write-PshOfflineFailureEnvelope {
 
 if (-not $script:PshOfflineWasDotSourced) {
     try {
-        Invoke-PshOfflineInstall -Edition $Edition -Version $Version -NonInteractive:$NonInteractive
+        Invoke-PshOfflineInstall -Edition $Edition -Version $Version -NonInteractive:$NonInteractive -ArchivePath $ArchivePath -ArchiveSha256 $ArchiveSha256
         $global:LASTEXITCODE = 0
     }
     catch {

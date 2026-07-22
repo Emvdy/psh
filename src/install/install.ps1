@@ -357,47 +357,13 @@ function Resolve-PshOnlineVersion {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][string] $RequestedVersion)
 
-    if ($RequestedVersion -ine 'latest') {
-        $fixedVersion = Assert-PshLifecycleSemVer -Value $RequestedVersion -Description 'Requested release version'
-        return [pscustomobject][ordered]@{ Version = $fixedVersion; Tag = ConvertTo-PshFixedReleaseTag -Version $fixedVersion }
+    $metadata = Resolve-PshTrustedReleaseMetadata -RequestedVersion $RequestedVersion
+    $record = Assert-PshTrustedReleaseMetadata -InputObject $metadata
+    return [pscustomobject][ordered]@{
+        Version = [string]$record.Version
+        Tag = [string]$record.Tag
+        TrustedMetadata = $metadata
     }
-
-    $uri = ConvertTo-PshOnlineUri -Value $script:PshOnlineLatestApi
-    $response = $null
-    try {
-        $response = Invoke-PshOnlineRequestWithRetry -Uri $uri
-        if ([string]$response.ResponseUri -cne $uri.AbsoluteUri) {
-            Throw-PshOnlineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshLatestRedirect' -Message 'GitHub latest-release API followed an unreviewed redirect.'
-        }
-        if ([int]$response.StatusCode -ne 200) {
-            Throw-PshOnlineEntryError -ExitCode 3 -Kind 'Io' -ErrorId 'PshLatestHttpStatus' -Message "GitHub latest-release API returned HTTP status $($response.StatusCode)."
-        }
-        $bytes = Read-PshOnlineResponseBytes -Response $response -MaximumLength 1048576 -Description 'GitHub latest-release document'
-    }
-    finally { Close-PshOnlineResponse -Response $response }
-    try {
-        $text = (New-Object Text.UTF8Encoding($false, $true)).GetString($bytes)
-        $document = $text | ConvertFrom-Json -ErrorAction Stop
-    }
-    catch { Throw-PshOnlineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshLatestJson' -Message 'GitHub latest-release response is not valid UTF-8 JSON.' -InnerException $_.Exception }
-    foreach ($name in @('tag_name', 'draft', 'prerelease')) {
-        if ($null -eq $document.PSObject.Properties[$name]) {
-            Throw-PshOnlineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshLatestSchema' -Message "GitHub latest-release response is missing '$name'."
-        }
-    }
-    if ($document.draft -isnot [bool] -or $document.prerelease -isnot [bool] -or [bool]$document.draft -or [bool]$document.prerelease) {
-        Throw-PshOnlineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshLatestReleaseKind' -Message 'GitHub latest-release response must identify a published stable release.'
-    }
-    $tag = [string]$document.tag_name
-    if ($tag -cnotmatch '\Av.+\z') {
-        Throw-PshOnlineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshLatestTag' -Message 'GitHub latest-release response does not contain a fixed v-prefixed tag.'
-    }
-    $fixedVersion = Assert-PshLifecycleSemVer -Value $tag.Substring(1) -Description 'GitHub latest release version'
-    $fixedTag = ConvertTo-PshFixedReleaseTag -Version $fixedVersion
-    if ($tag -cne $fixedTag) {
-        Throw-PshOnlineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshLatestTag' -Message "GitHub latest-release tag must be exactly '$fixedTag'."
-    }
-    return [pscustomobject][ordered]@{ Version = $fixedVersion; Tag = $fixedTag }
 }
 
 function Resolve-PshOnlineRedirectUri {
@@ -621,6 +587,7 @@ function Invoke-PshOnlineInstall {
     $fixedTag = [string]$resolved.Tag
     $context = $null
     $trustedAsset = $null
+    $archiveBinding = $null
     try {
         $context = New-PshOnlineOwnedRoot
         $trustRoot = Join-Path ([string]$context.Root) 'release-trust'
@@ -631,7 +598,7 @@ function Invoke-PshOnlineInstall {
         $indexPath = Save-PshOnlineBootstrapAsset -Context $context -Uri "$releaseBase/$indexName" -DestinationPath (Join-Path $trustRoot $indexName) -MaximumLength 16777216
         $checksumPath = Save-PshOnlineBootstrapAsset -Context $context -Uri "$releaseBase/SHA256SUMS" -DestinationPath (Join-Path $trustRoot 'SHA256SUMS') -MaximumLength 16777216
         $catalogPath = Save-PshOnlineBootstrapAsset -Context $context -Uri "$releaseBase/$catalogName" -DestinationPath (Join-Path $trustRoot $catalogName) -MaximumLength 33554432
-        $trustedRelease = Confirm-PshReleaseTrustBundle -IndexPath $indexPath -ChecksumPath $checksumPath -CatalogPath $catalogPath
+        $trustedRelease = Confirm-PshReleaseTrustBundle -IndexPath $indexPath -ChecksumPath $checksumPath -CatalogPath $catalogPath -TrustedMetadata $resolved.TrustedMetadata
         $releaseRecord = Assert-PshTrustedRelease -InputObject $trustedRelease
         if ([string]$releaseRecord.Index.version -cne $fixedVersion -or [string]$releaseRecord.Index.tag -cne $fixedTag) {
             Throw-PshOnlineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshOnlineReleaseMismatch' -Message 'Authenticated release does not match the requested fixed version and tag.'
@@ -647,6 +614,7 @@ function Invoke-PshOnlineInstall {
         $packageRoot = Expand-PshOnlineTrustedPackage -Context $context -TrustedAsset $trustedAsset -DestinationRoot (Join-Path ([string]$context.Root) 'extracted')
         $trustedPackage = Confirm-PshPackageManifestTrust -ManifestPath (Join-Path $packageRoot 'package.manifest.json') -CatalogPath (Join-Path $packageRoot 'package.manifest.cat') -ExpectedAsset $packageAsset -TrustedRelease $trustedRelease
         $packageRecord = Assert-PshTrustedPackageManifest -InputObject $trustedPackage
+        $archiveBinding = Confirm-PshPackageArchiveBinding -ArchivePath $packagePath -ArchiveSha256 ([string]$assetRecord.Sha256) -PackageRoot $packageRoot -RetainLocks
         if ([string]$packageRecord.Manifest.version -cne $fixedVersion -or [string]$packageRecord.Manifest.edition -cne $Edition) {
             Throw-PshOnlineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshOnlinePackageMismatch' -Message 'Authenticated package manifest does not match the selected release package.'
         }
@@ -655,16 +623,23 @@ function Invoke-PshOnlineInstall {
         $requestedNonInteractive = [bool]$NonInteractive
         $offlineEntry = Join-Path $packageRoot 'install-offline.ps1'
         # The package entry is authenticated by the release asset hash and the
-        # package manifest/catalog before this signed offline entry is loaded.
+        # package manifest/catalog before this offline entry is loaded.
         # It owns the sidecar-free materialization and final Install-PshPackage call.
-        . $offlineEntry -Edition $requestedEdition -Version $fixedVersion -NonInteractive:$requestedNonInteractive
+        . $offlineEntry -Edition $requestedEdition -Version $fixedVersion -NonInteractive:$requestedNonInteractive -ArchivePath $packagePath -ArchiveSha256 ([string]$archiveBinding.ArchiveSha256)
         $offlineCommand = Get-Command -Name Invoke-PshOfflineInstall -CommandType Function -ErrorAction SilentlyContinue
         if ($null -eq $offlineCommand) {
             Throw-PshOnlineEntryError -ExitCode 5 -Kind 'Integrity' -ErrorId 'PshOnlineOfflineEntry' -Message 'Trusted package offline entry did not expose Invoke-PshOfflineInstall.'
         }
-        return Invoke-PshOfflineInstall -Edition $requestedEdition -Version $fixedVersion -NonInteractive:$requestedNonInteractive -ArchiveSha256 ([string]$assetRecord.Sha256)
+        $installResults = @(Invoke-PshOfflineInstall -Edition $requestedEdition -Version $fixedVersion -NonInteractive:$requestedNonInteractive -ArchivePath $packagePath -ArchiveSha256 ([string]$archiveBinding.ArchiveSha256))
+        if ($installResults.Count -eq 0 -or $null -eq $installResults[-1]) {
+            Throw-PshOnlineEntryError -ExitCode 3 -Kind 'Io' -ErrorId 'PshOnlineInstallResult' -Message 'Trusted offline entry returned no installation result.'
+        }
+        $finalTrust = Complete-PshProductionArchiveTrustReport -InputObject $packageRecord.Trust -TrustMode 'github-release-asset-digest+archive-binding+package-catalog-sha256' -Checksum 'release-asset-archive-manifest-tree-sha256-verified' -ArchiveSha256 ([string]$archiveBinding.ArchiveSha256)
+        $installResults[-1] | Add-Member -NotePropertyName trust -NotePropertyValue $finalTrust -Force
+        return $installResults
     }
     finally {
+        if ($null -ne $archiveBinding) { try { $archiveBinding.Dispose() } catch { } }
         if ($null -ne $trustedAsset) { try { $trustedAsset.Dispose() } catch { } }
         Remove-PshOnlineOwnedRoot -Context $context
     }

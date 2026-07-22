@@ -22,6 +22,10 @@ namespace Psh.Bootstrapper
 
         public string Version { get; internal set; }
 
+        public string ArchivePath { get; internal set; }
+
+        public string ArchiveSha256 { get; internal set; }
+
         public bool NonInteractive { get; internal set; }
 
         public bool Help { get; internal set; }
@@ -46,8 +50,12 @@ namespace Psh.Bootstrapper
             SemanticVersionPattern,
             RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture);
 
+        private static readonly Regex ArchiveSha256 = new Regex(
+            @"\A[0-9A-Fa-f]{64}\z",
+            RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture);
+
         public const string UsageText =
-            "Usage: psh-installer.exe [--offline] [--edition Core|Full] [--version latest|x.y.z] [--non-interactive]";
+            "Usage: psh-installer.exe [--offline --archive-path FILE --archive-sha256 HEX] [--edition Core|Full] [--version latest|x.y.z] [--non-interactive]";
 
         public static BootstrapperArguments Parse(string[] args)
         {
@@ -153,10 +161,68 @@ namespace Psh.Bootstrapper
                     continue;
                 }
 
+                if (string.Equals(option, "archive-path", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!seen.Add(option))
+                    {
+                        throw new BootstrapperUsageException("The archive-path option may be specified only once.");
+                    }
+
+                    result.ArchivePath = ReadValue(args, ref index, "archive-path");
+                    continue;
+                }
+
+                if (string.Equals(option, "archive-sha256", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!seen.Add(option))
+                    {
+                        throw new BootstrapperUsageException("The archive-sha256 option may be specified only once.");
+                    }
+
+                    string value = ReadValue(args, ref index, "archive-sha256");
+                    if (!ArchiveSha256.IsMatch(value) || IsAllZeroSha256(value))
+                    {
+                        throw new BootstrapperUsageException(
+                            "Archive SHA256 must be a non-zero 64-character hexadecimal value.");
+                    }
+
+                    result.ArchiveSha256 = value.ToLowerInvariant();
+                    continue;
+                }
+
                 throw new BootstrapperUsageException("Unknown option: " + args[index]);
             }
 
+            bool hasArchivePath = !string.IsNullOrEmpty(result.ArchivePath);
+            bool hasArchiveSha256 = !string.IsNullOrEmpty(result.ArchiveSha256);
+            if (result.Offline)
+            {
+                if (!hasArchivePath || !hasArchiveSha256)
+                {
+                    throw new BootstrapperUsageException(
+                        "Offline mode requires both --archive-path and --archive-sha256.");
+                }
+            }
+            else if (hasArchivePath || hasArchiveSha256)
+            {
+                throw new BootstrapperUsageException(
+                    "Archive evidence options are valid only with --offline.");
+            }
+
             return result;
+        }
+
+        private static bool IsAllZeroSha256(string value)
+        {
+            for (int index = 0; index < value.Length; index++)
+            {
+                if (value[index] != '0')
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private static bool IsStrictSemanticVersion(string value)

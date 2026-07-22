@@ -4,10 +4,13 @@
 #Requires -Version 5.1
 
 <#
-    Release trust primitives.  Parsing and hashing do not establish source
-    trust: callers receive a trusted release or package object only after the
-    production publisher policy and Windows catalog verifier authenticate the
-    exact snapshot bytes used by the strict parsers below.
+    Release trust primitives. Online trust is rooted in the SHA256 digests
+    published by the fixed GitHub release-metadata API and then extended
+    through catalog membership, the release index, and package manifests.
+    Offline trust validates the package catalog membership and the manifest's
+    complete SHA256 tree without requiring a network or a code-signing
+    certificate. Authenticode verification remains available as an additional
+    capability, but it is not a prerequisite for the v0.1.0 hash trust path.
 #>
 
 Set-StrictMode -Version 2.0
@@ -22,6 +25,8 @@ if ($null -eq (Get-Command -Name Read-PshStrictJsonSnapshot -CommandType Functio
 }
 
 $script:PshReleaseRepository = 'https://github.com/Emvdy/psh'
+$script:PshReleaseApiRoot = 'https://api.github.com/repos/Emvdy/psh/releases'
+$script:PshProductionTrustPolicyVersion = '2026-07-22.2'
 $script:PshReleaseIndexKeys = @('schemaVersion', 'product', 'repository', 'version', 'tag', 'sourceCommit', 'assets')
 $script:PshReleaseAssetKeys = @('name', 'role', 'url', 'length', 'sha256', 'package')
 $script:PshReleasePackageKeys = @('version', 'edition', 'architecture', 'packageManifestSha256', 'treeSha256', 'testOnly')
@@ -43,6 +48,12 @@ if ($null -eq (Get-Variable -Name PshTrustedReleaseRegistry -Scope Script -Error
 if ($null -eq (Get-Variable -Name PshTrustedPackageRegistry -Scope Script -ErrorAction SilentlyContinue)) {
     $script:PshTrustedPackageRegistry = New-Object 'System.Runtime.CompilerServices.ConditionalWeakTable[object,object]'
 }
+if ($null -eq (Get-Variable -Name PshReleaseMetadataTrustToken -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:PshReleaseMetadataTrustToken = New-Object object
+}
+if ($null -eq (Get-Variable -Name PshTrustedReleaseMetadataRegistry -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:PshTrustedReleaseMetadataRegistry = New-Object 'System.Runtime.CompilerServices.ConditionalWeakTable[object,object]'
+}
 
 function Throw-PshReleaseTrustError {
     [CmdletBinding()]
@@ -55,6 +66,535 @@ function Throw-PshReleaseTrustError {
 
     $kind = if ($ExitCode -eq 3) { 'Io' } elseif ($ExitCode -eq 4) { 'Dependency' } else { 'Integrity' }
     Throw-PshLifecycleError -ExitCode $ExitCode -Kind $kind -ErrorId $ErrorId -Message $Message -InnerException $InnerException
+}
+
+function Get-PshProductionTrustPolicy {
+    [CmdletBinding()]
+    param()
+
+    return [pscustomobject][ordered]@{
+        schemaVersion = 1
+        policyVersion = $script:PshProductionTrustPolicyVersion
+        repository = $script:PshReleaseRepository
+        releaseMetadataApi = $script:PshReleaseApiRoot
+        hashAlgorithm = 'SHA256'
+        onlineTrustMode = 'github-release-asset-digest'
+        offlineTrustMode = 'offline-external-archive-sha256+package-catalog-sha256'
+        catalogMembershipRequired = $true
+        archiveBindingRequired = $true
+        signatureRequired = $false
+        provenanceAttestationRequiredAtPublish = $true
+        runtimeAttestationVerification = 'external-release-gate'
+    }
+}
+
+function New-PshProductionTrustReport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $TrustMode,
+        [Parameter(Mandatory = $true)][string] $Checksum,
+        [Parameter(Mandatory = $true)][string] $CatalogMembership,
+        [Parameter(Mandatory = $true)][bool] $SignatureNotRequired,
+        [Parameter(Mandatory = $true)][string] $ArchiveBinding,
+        [Parameter()][AllowNull()][string] $ArchiveSha256,
+        [Parameter(Mandatory = $true)][string] $AttestationVerification
+    )
+
+    $policy = Get-PshProductionTrustPolicy
+    return [pscustomobject][ordered]@{
+        schemaVersion = 1
+        policyVersion = [string]$policy.policyVersion
+        trustMode = $TrustMode
+        checksum = $Checksum
+        catalogMembership = $CatalogMembership
+        signatureNotRequired = $SignatureNotRequired
+        archiveBinding = $ArchiveBinding
+        archiveSha256 = $ArchiveSha256
+        attestationVerification = $AttestationVerification
+    }
+}
+
+function Close-PshReleaseMetadataResponse {
+    [CmdletBinding()]
+    param([Parameter()][AllowNull()][object] $Response)
+
+    if ($null -eq $Response) { return }
+    $stream = Get-PshLifecycleProperty $Response 'Stream'
+    if ($stream -is [IDisposable]) {
+        try { $stream.Dispose() } catch { }
+    }
+    $disposable = Get-PshLifecycleProperty $Response 'Disposable'
+    if ($disposable -is [IDisposable] -and -not [object]::ReferenceEquals($stream, $disposable)) {
+        try { $disposable.Dispose() } catch { }
+    }
+}
+
+function Invoke-PshReleaseMetadataHttpRequest {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][Uri] $Uri)
+
+    $onlineTransport = Get-Command -Name Invoke-PshOnlineHttpRequest -CommandType Function -ErrorAction SilentlyContinue
+    if ($null -ne $onlineTransport) {
+        return Invoke-PshOnlineHttpRequest -Uri $Uri
+    }
+
+    $request = [Net.HttpWebRequest][Net.WebRequest]::Create($Uri)
+    $request.Method = 'GET'
+    $request.AllowAutoRedirect = $false
+    $request.AutomaticDecompression = [Net.DecompressionMethods]::None
+    $request.Timeout = 30000
+    $request.ReadWriteTimeout = 30000
+    $request.UserAgent = 'Psh-Installer/1.0'
+    $request.Accept = 'application/vnd.github+json'
+    $response = $null
+    try {
+        try { $response = [Net.HttpWebResponse]$request.GetResponse() }
+        catch [Net.WebException] {
+            if ($null -eq $_.Exception.Response) { throw }
+            $response = [Net.HttpWebResponse]$_.Exception.Response
+        }
+        return [pscustomobject][ordered]@{
+            StatusCode = [int]$response.StatusCode
+            ResponseUri = $response.ResponseUri.AbsoluteUri
+            ContentLength = [int64]$response.ContentLength
+            Stream = $response.GetResponseStream()
+            Disposable = $response
+        }
+    }
+    catch {
+        if ($null -ne $response) { try { $response.Dispose() } catch { } }
+        throw
+    }
+}
+
+function Read-PshReleaseMetadataResponseBytes {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $Response,
+        [Parameter(Mandatory = $true)][int64] $MaximumLength
+    )
+
+    $declaredLength = [int64](Get-PshLifecycleProperty $Response 'ContentLength')
+    if ($declaredLength -gt $MaximumLength) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataLength' -Message 'GitHub release metadata exceeds the installer limit.'
+    }
+    $stream = Get-PshLifecycleProperty $Response 'Stream'
+    if ($stream -isnot [IO.Stream] -or -not $stream.CanRead) {
+        Throw-PshReleaseTrustError -ExitCode 3 -ErrorId 'PshReleaseMetadataResponse' -Message 'GitHub release metadata has no readable response stream.'
+    }
+    $memory = New-Object IO.MemoryStream
+    try {
+        $buffer = New-Object byte[] 65536
+        while ($true) {
+            $read = $stream.Read($buffer, 0, $buffer.Length)
+            if ($read -eq 0) { break }
+            if ($memory.Length -gt ($MaximumLength - $read)) {
+                Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataLength' -Message 'GitHub release metadata exceeds the installer limit.'
+            }
+            $memory.Write($buffer, 0, $read)
+        }
+        if ($declaredLength -ge 0 -and $memory.Length -ne $declaredLength) {
+            Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataLength' -Message 'GitHub release metadata length does not match its HTTPS response.'
+        }
+        return (, $memory.ToArray())
+    }
+    finally { $memory.Dispose() }
+}
+
+function Invoke-PshReleaseMetadataRequestWithRetry {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][Uri] $Uri)
+
+    foreach ($attempt in 1..4) {
+        $response = $null
+        try { $response = Invoke-PshReleaseMetadataHttpRequest -Uri $Uri }
+        catch {
+            if ($attempt -lt 4) { Start-Sleep -Milliseconds (250 * $attempt); continue }
+            Throw-PshReleaseTrustError -ExitCode 3 -ErrorId 'PshReleaseMetadataTransport' -Message "GitHub release metadata request failed after $attempt attempts." -InnerException $_.Exception
+        }
+        $statusCode = [int](Get-PshLifecycleProperty $response 'StatusCode')
+        if ($statusCode -in @(502, 503, 504) -and $attempt -lt 4) {
+            Close-PshReleaseMetadataResponse -Response $response
+            Start-Sleep -Milliseconds (250 * $attempt)
+            continue
+        }
+        return $response
+    }
+    Throw-PshReleaseTrustError -ExitCode 3 -ErrorId 'PshReleaseMetadataTransport' -Message 'GitHub release metadata request failed.'
+}
+
+function Resolve-PshTrustedReleaseMetadata {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string] $RequestedVersion)
+
+    $requestedTag = $null
+    $apiUriText = $null
+    if ($RequestedVersion -ieq 'latest') {
+        $apiUriText = $script:PshReleaseApiRoot + '/latest'
+    }
+    else {
+        $fixedVersion = Assert-PshLifecycleSemVer -Value $RequestedVersion -Description 'Requested release version'
+        $requestedTag = 'v' + $fixedVersion
+        $apiUriText = $script:PshReleaseApiRoot + '/tags/' + $requestedTag
+    }
+    $apiUri = New-Object Uri($apiUriText, [UriKind]::Absolute)
+    $response = $null
+    try {
+        $response = Invoke-PshReleaseMetadataRequestWithRetry -Uri $apiUri
+        if ([string](Get-PshLifecycleProperty $response 'ResponseUri') -cne $apiUri.AbsoluteUri) {
+            Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataRedirect' -Message 'GitHub release metadata followed an unreviewed redirect.'
+        }
+        if ([int](Get-PshLifecycleProperty $response 'StatusCode') -ne 200) {
+            Throw-PshReleaseTrustError -ExitCode 3 -ErrorId 'PshReleaseMetadataHttpStatus' -Message "GitHub release metadata returned HTTP status $([int](Get-PshLifecycleProperty $response 'StatusCode'))."
+        }
+        $bytes = Read-PshReleaseMetadataResponseBytes -Response $response -MaximumLength 16777216
+    }
+    finally { Close-PshReleaseMetadataResponse -Response $response }
+
+    try {
+        $text = (New-Object Text.UTF8Encoding($false, $true)).GetString($bytes)
+        $document = $text | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataJson' -Message 'GitHub release metadata is not valid UTF-8 JSON.' -InnerException $_.Exception
+    }
+    foreach ($name in @('tag_name', 'draft', 'prerelease', 'assets')) {
+        if ($null -eq $document.PSObject.Properties[$name]) {
+            Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataSchema' -Message "GitHub release metadata is missing '$name'."
+        }
+    }
+    if ($document.draft -isnot [bool] -or $document.prerelease -isnot [bool] -or [bool]$document.draft -or [bool]$document.prerelease) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataKind' -Message 'GitHub release metadata must identify a published stable release.'
+    }
+    $tag = [string]$document.tag_name
+    if ($tag -cnotmatch '\Av.+\z') {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataTag' -Message 'GitHub release metadata does not contain a fixed v-prefixed tag.'
+    }
+    $version = Assert-PshLifecycleSemVer -Value $tag.Substring(1) -Description 'GitHub release version'
+    if ($tag -cne ('v' + $version) -or ($null -ne $requestedTag -and $tag -cne $requestedTag)) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataTag' -Message 'GitHub release metadata does not match the requested fixed tag.'
+    }
+    if ($document.assets -isnot [System.Array]) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataAssets' -Message 'GitHub release metadata assets must be an array.'
+    }
+
+    $expectedNames = @("psh-release-$version.json", 'SHA256SUMS', "psh-release-$version.cat")
+    $normalizedAssets = New-Object System.Collections.Generic.List[object]
+    foreach ($expectedName in $expectedNames) {
+        $assetMatches = @($document.assets | Where-Object { [string](Get-PshLifecycleProperty $_ 'name') -ceq $expectedName })
+        if ($assetMatches.Count -ne 1) {
+            Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataAsset' -Message "GitHub release metadata must contain exactly one '$expectedName' asset."
+        }
+        $asset = $assetMatches[0]
+        $digest = Get-PshLifecycleProperty $asset 'digest'
+        $size = Assert-PshLifecycleInteger -Value (Get-PshLifecycleProperty $asset 'size') -Description "GitHub release asset '$expectedName' size" -NonNegative
+        $downloadUrl = Get-PshLifecycleProperty $asset 'browser_download_url'
+        $expectedUrl = "$($script:PshReleaseRepository)/releases/download/$tag/$expectedName"
+        if ($digest -isnot [string] -or [string]$digest -cnotmatch '\Asha256:[0-9a-f]{64}\z' -or [int64]$size -le 0) {
+            Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataDigest' -Message "GitHub release asset '$expectedName' has no valid SHA256 digest and size."
+        }
+        if ($downloadUrl -isnot [string] -or [string]$downloadUrl -cne $expectedUrl) {
+            Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataUrl' -Message "GitHub release asset '$expectedName' has an unexpected download URL."
+        }
+        [void]$normalizedAssets.Add([pscustomobject][ordered]@{
+                name = $expectedName
+                length = [int64]$size
+                sha256 = ([string]$digest).Substring(7)
+                url = $expectedUrl
+            })
+    }
+
+    $record = [pscustomobject][ordered]@{
+        Repository = $script:PshReleaseRepository
+        Version = $version
+        Tag = $tag
+        ApiUri = $apiUri.AbsoluteUri
+        Assets = @($normalizedAssets.ToArray())
+    }
+    $handle = [pscustomobject][ordered]@{
+        PSTypeName = 'Psh.TrustedReleaseMetadata'
+        TrustToken = $script:PshReleaseMetadataTrustToken
+        Repository = [string]$record.Repository
+        Version = [string]$record.Version
+        Tag = [string]$record.Tag
+        Assets = @($record.Assets | ForEach-Object { [pscustomobject][ordered]@{ name = $_.name; length = $_.length; sha256 = $_.sha256; url = $_.url } })
+    }
+    [void]$script:PshTrustedReleaseMetadataRegistry.Add($handle, $record)
+    return $handle
+}
+
+function Assert-PshTrustedReleaseMetadata {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowNull()][object] $InputObject)
+
+    $record = $null
+    $token = Get-PshLifecycleProperty $InputObject 'TrustToken'
+    if ($null -eq $token -or -not [object]::ReferenceEquals($token, $script:PshReleaseMetadataTrustToken) -or
+        -not $script:PshTrustedReleaseMetadataRegistry.TryGetValue($InputObject, [ref]$record)) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshUntrustedReleaseMetadata' -Message 'Release trust requires metadata obtained from the fixed GitHub Releases API.'
+    }
+    return [pscustomobject][ordered]@{
+        Repository = [string]$record.Repository
+        Version = [string]$record.Version
+        Tag = [string]$record.Tag
+        ApiUri = [string]$record.ApiUri
+        Assets = @($record.Assets | ForEach-Object { [pscustomobject][ordered]@{ name = $_.name; length = $_.length; sha256 = $_.sha256; url = $_.url } })
+    }
+}
+
+function Close-PshPackageArchiveBindingFiles {
+    [CmdletBinding()]
+    param([Parameter()][AllowNull()][object[]] $Records)
+
+    foreach ($record in @($Records)) {
+        if ($null -eq $record) { continue }
+        $stream = Get-PshLifecycleProperty $record 'Stream'
+        if ($stream -is [IDisposable]) { try { $stream.Dispose() } catch { } }
+    }
+}
+
+function Open-PshPackageArchiveDirectorySnapshot {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string] $PackageRoot)
+
+    $records = New-Object System.Collections.ArrayList
+    try {
+        $root = Assert-PshLifecycleNoReparseAncestors -Path $PackageRoot -Description 'offline package archive-binding root'
+        $rootEntry = Get-PshLifecyclePathEntry -Path $root -Description 'offline package archive-binding root'
+        if (-not [bool]$rootEntry.Exists -or -not [bool]$rootEntry.IsDirectory -or [bool]$rootEntry.IsReparsePoint) {
+            Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchivePackageRoot' -Message "Archive binding requires a non-reparse package directory: $root"
+        }
+        $root = [IO.Path]::GetFullPath($root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+        $prefix = $root + [IO.Path]::DirectorySeparatorChar
+        $files = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::OrdinalIgnoreCase)
+        $stack = New-Object System.Collections.Stack
+        $stack.Push($root)
+        while ($stack.Count -gt 0) {
+            $directory = [string]$stack.Pop()
+            [string[]]$entries = [IO.Directory]::GetFileSystemEntries($directory)
+            [Array]::Sort($entries, [StringComparer]::OrdinalIgnoreCase)
+            foreach ($entryPath in $entries) {
+                $fullPath = Assert-PshLifecycleNoReparseAncestors -Path $entryPath -Description 'offline package archive-binding entry'
+                $attributes = [IO.File]::GetAttributes($fullPath)
+                if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchivePackageReparsePoint' -Message "Archive-bound package contains a reparse point: $fullPath"
+                }
+                if (($attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+                    $stack.Push($fullPath)
+                    continue
+                }
+                if (-not $fullPath.StartsWith($prefix, (Get-PshLifecyclePathComparison))) {
+                    Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveEntryPath' -Message "Archive-bound package path escapes its root: $fullPath"
+                }
+                $relativeCandidate = $fullPath.Substring($prefix.Length).Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+                try { $relative = Assert-PshLifecycleRelativePath -Value $relativeCandidate -Description 'Archive-bound package file path' }
+                catch { Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveEntryPath' -Message "Archive-bound package contains an unsafe file path: $relativeCandidate" -InnerException $_.Exception }
+                if ($files.ContainsKey($relative)) {
+                    Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveDuplicateEntry' -Message "Archive-bound package contains a case-insensitive duplicate file path: $relative"
+                }
+                $stream = $null
+                try {
+                    $stream = New-Object IO.FileStream($fullPath, ([IO.FileMode]::Open), ([IO.FileAccess]::Read), ([IO.FileShare]::Read))
+                    $sha = [Security.Cryptography.SHA256]::Create()
+                    try { $sha256 = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() }
+                    finally { $sha.Dispose() }
+                    $stream.Position = 0
+                    $record = [pscustomobject][ordered]@{
+                        RelativePath = $relative
+                        Path = $fullPath
+                        Length = [int64]$stream.Length
+                        Sha256 = $sha256
+                        Stream = $stream
+                    }
+                    [void]$records.Add($record)
+                    $files.Add($relative, $record)
+                    $stream = $null
+                }
+                finally {
+                    if ($null -ne $stream) { try { $stream.Dispose() } catch { } }
+                }
+            }
+        }
+        return [pscustomobject][ordered]@{
+            Root = $root
+            Files = $files
+            Records = $records
+        }
+    }
+    catch {
+        Close-PshPackageArchiveBindingFiles -Records @($records)
+        if (Test-PshLifecycleExceptionMetadata $_) { throw }
+        Throw-PshReleaseTrustError -ExitCode 3 -ErrorId 'PshOfflineArchivePackageRead' -Message 'Unable to snapshot the extracted package for archive binding.' -InnerException $_.Exception
+    }
+}
+
+function Confirm-PshPackageArchiveBinding {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $ArchivePath,
+        [Parameter(Mandatory = $true)][string] $ArchiveSha256,
+        [Parameter(Mandatory = $true)][string] $PackageRoot,
+        [Parameter()][switch] $RetainLocks
+    )
+
+    if ($ArchiveSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $ArchiveSha256 -ceq ('0' * 64)) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveSha256' -Message 'Offline archive SHA256 evidence must be a non-zero lowercase SHA256 value.'
+    }
+    try {
+        Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+    }
+    catch {
+        Throw-PshReleaseTrustError -ExitCode 4 -ErrorId 'PshOfflineArchiveSupportUnavailable' -Message 'ZIP archive verification support is unavailable on this runtime.' -InnerException $_.Exception
+    }
+
+    $archiveFullPath = Assert-PshLifecycleNoReparseAncestors -Path $ArchivePath -Description 'offline package archive evidence'
+    $archiveEntry = Get-PshLifecyclePathEntry -Path $archiveFullPath -Description 'offline package archive evidence'
+    if (-not [bool]$archiveEntry.Exists -or -not [bool]$archiveEntry.IsRegularFile -or [bool]$archiveEntry.IsReparsePoint) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveFile' -Message "Offline archive evidence must be a regular non-reparse file: $archiveFullPath"
+    }
+
+    $archiveStream = $null
+    $archive = $null
+    $packageSnapshot = $null
+    try {
+        $archiveStream = New-Object IO.FileStream($archiveFullPath, ([IO.FileMode]::Open), ([IO.FileAccess]::Read), ([IO.FileShare]::Read))
+        $archiveSha = [Security.Cryptography.SHA256]::Create()
+        try { $actualArchiveSha256 = ([BitConverter]::ToString($archiveSha.ComputeHash($archiveStream))).Replace('-', '').ToLowerInvariant() }
+        finally { $archiveSha.Dispose() }
+        if ($actualArchiveSha256 -cne $ArchiveSha256) {
+            Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveHashMismatch' -Message 'Offline package archive does not match its trusted SHA256 evidence.'
+        }
+        $archiveStream.Position = 0
+        try { $archive = New-Object IO.Compression.ZipArchive($archiveStream, ([IO.Compression.ZipArchiveMode]::Read), $true, (New-Object Text.UTF8Encoding($false, $true))) }
+        catch { Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveFormat' -Message 'Offline package archive is not a valid ZIP file.' -InnerException $_.Exception }
+
+        $packageSnapshot = Open-PshPackageArchiveDirectorySnapshot -PackageRoot $PackageRoot
+        $packageFiles = Get-PshLifecycleProperty $packageSnapshot 'Files'
+        $archivePaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        $entryRecords = New-Object System.Collections.Generic.List[object]
+        foreach ($zipEntry in @($archive.Entries)) {
+            $entryName = [string]$zipEntry.FullName
+            if ([string]::IsNullOrWhiteSpace($entryName) -or [string]::IsNullOrEmpty([string]$zipEntry.Name) -or $entryName.EndsWith('/')) {
+                Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveDirectoryEntry' -Message "Offline package ZIP contains an explicit or malformed directory entry: $entryName"
+            }
+            try { $relative = Assert-PshLifecycleRelativePath -Value $entryName -Description 'Offline package ZIP entry path' }
+            catch { Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveEntryPath' -Message "Offline package ZIP contains an unsafe entry path: $entryName" -InnerException $_.Exception }
+            if (-not $archivePaths.Add($relative)) {
+                Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveDuplicateEntry' -Message "Offline package ZIP contains a case-insensitive duplicate entry: $relative"
+            }
+
+            [int64]$externalAttributes = [int64]$zipEntry.ExternalAttributes
+            if ($externalAttributes -lt 0) { $externalAttributes += 4294967296 }
+            [int64]$dosAttributes = $externalAttributes -band 65535
+            [int64]$unixMode = ($externalAttributes -shr 16) -band 65535
+            [int64]$unixType = $unixMode -band 61440
+            if (($dosAttributes -band ([int][IO.FileAttributes]::Directory)) -ne 0 -or
+                ($dosAttributes -band ([int][IO.FileAttributes]::ReparsePoint)) -ne 0 -or
+                ($unixType -ne 0 -and $unixType -ne 32768)) {
+                Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveEntryType' -Message "Offline package ZIP contains a link, directory, or special entry: $relative"
+            }
+            if (-not $packageFiles.ContainsKey($relative)) {
+                Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchivePackageMissingFile' -Message "Extracted package is missing a file from its trusted archive: $relative"
+            }
+            $packageFile = $packageFiles[$relative]
+            if ([string](Get-PshLifecycleProperty $packageFile 'RelativePath') -cne $relative) {
+                Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveEntryPath' -Message "ZIP entry case does not match the extracted package path: $relative"
+            }
+            if ([int64]$zipEntry.Length -ne [int64](Get-PshLifecycleProperty $packageFile 'Length')) {
+                Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveEntryLength' -Message "ZIP entry length does not match the extracted package file: $relative"
+            }
+
+            $entryStream = $null
+            $entrySha = $null
+            try {
+                $entryStream = $zipEntry.Open()
+                $entrySha = [Security.Cryptography.SHA256]::Create()
+                $buffer = New-Object byte[] 65536
+                [int64]$entryLength = 0
+                while ($true) {
+                    $read = $entryStream.Read($buffer, 0, $buffer.Length)
+                    if ($read -eq 0) { break }
+                    $entryLength += [int64]$read
+                    if ($entryLength -gt [int64](Get-PshLifecycleProperty $packageFile 'Length')) {
+                        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveEntryLength' -Message "ZIP entry expands beyond the extracted package file length: $relative"
+                    }
+                    [void]$entrySha.TransformBlock($buffer, 0, $read, $buffer, 0)
+                }
+                $empty = New-Object byte[] 0
+                [void]$entrySha.TransformFinalBlock($empty, 0, 0)
+                $entrySha256 = ([BitConverter]::ToString($entrySha.Hash)).Replace('-', '').ToLowerInvariant()
+                if ($entryLength -ne [int64](Get-PshLifecycleProperty $packageFile 'Length') -or
+                    $entrySha256 -cne [string](Get-PshLifecycleProperty $packageFile 'Sha256')) {
+                    Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveEntryHash' -Message "ZIP entry bytes do not match the extracted package file: $relative"
+                }
+            }
+            catch {
+                if (Test-PshLifecycleExceptionMetadata $_) { throw }
+                Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveEntryRead' -Message "Unable to read ZIP entry for archive binding: $relative" -InnerException $_.Exception
+            }
+            finally {
+                if ($null -ne $entrySha) { try { $entrySha.Dispose() } catch { } }
+                if ($null -ne $entryStream) { try { $entryStream.Dispose() } catch { } }
+            }
+            [void]$entryRecords.Add([pscustomobject][ordered]@{
+                    relativePath = $relative
+                    length = [int64](Get-PshLifecycleProperty $packageFile 'Length')
+                    sha256 = [string](Get-PshLifecycleProperty $packageFile 'Sha256')
+                })
+        }
+
+        [string[]]$packageNames = @($packageFiles.Keys)
+        [Array]::Sort($packageNames, [StringComparer]::Ordinal)
+        foreach ($packageName in $packageNames) {
+            if (-not $archivePaths.Contains($packageName)) {
+                Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchivePackageExtraFile' -Message "Extracted package contains a file missing from its trusted archive: $packageName"
+            }
+        }
+        $result = [pscustomobject][ordered]@{
+            PSTypeName = 'Psh.PackageArchiveBinding'
+            Trusted = $true
+            ArchiveBinding = 'verified'
+            ArchivePath = $archiveFullPath
+            ArchiveSha256 = $actualArchiveSha256
+            FileCount = $entryRecords.Count
+            Files = $entryRecords.ToArray()
+        }
+        if ($RetainLocks) {
+            $result | Add-Member -NotePropertyName Released -NotePropertyValue $false
+            $result | Add-Member -NotePropertyName PackageRecords -NotePropertyValue @((Get-PshLifecycleProperty $packageSnapshot 'Records'))
+            $result | Add-Member -NotePropertyName Archive -NotePropertyValue $archive
+            $result | Add-Member -NotePropertyName ArchiveStream -NotePropertyValue $archiveStream
+            $result | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+                if ([bool]$this.Released) { return }
+                foreach ($record in @($this.PackageRecords)) {
+                    $stream = Get-PshLifecycleProperty $record 'Stream'
+                    if ($stream -is [IDisposable]) { try { $stream.Dispose() } catch { } }
+                }
+                if ($this.Archive -is [IDisposable]) { try { $this.Archive.Dispose() } catch { } }
+                if ($this.ArchiveStream -is [IDisposable]) { try { $this.ArchiveStream.Dispose() } catch { } }
+                $this.Released = $true
+                $this.PackageRecords = @()
+                $this.Archive = $null
+                $this.ArchiveStream = $null
+            }
+            $packageSnapshot = $null
+            $archive = $null
+            $archiveStream = $null
+        }
+        return $result
+    }
+    catch {
+        if (Test-PshLifecycleExceptionMetadata $_) { throw }
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveVerification' -Message 'Offline package archive verification failed closed.' -InnerException $_.Exception
+    }
+    finally {
+        if ($null -ne $packageSnapshot) {
+            Close-PshPackageArchiveBindingFiles -Records @((Get-PshLifecycleProperty $packageSnapshot 'Records'))
+        }
+        if ($null -ne $archive) { try { $archive.Dispose() } catch { } }
+        if ($null -ne $archiveStream) { try { $archiveStream.Dispose() } catch { } }
+    }
 }
 
 function Assert-PshReleaseRequiredProperties {
@@ -585,6 +1125,44 @@ function Invoke-PshWindowsCatalogTrustVerifier {
     return $publisher
 }
 
+function Invoke-PshWindowsCatalogMembershipVerifier {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object] $Request)
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        Throw-PshReleaseTrustError -ExitCode 4 -ErrorId 'PshCatalogMembershipUnavailable' -Message 'Windows file-catalog membership verification is unavailable on this platform.'
+    }
+    $catalogCommand = Get-Command -Name Test-FileCatalog -CommandType Cmdlet -ErrorAction SilentlyContinue
+    if ($null -eq $catalogCommand) {
+        Throw-PshReleaseTrustError -ExitCode 4 -ErrorId 'PshCatalogMembershipUnavailable' -Message 'Test-FileCatalog is unavailable on this Windows runtime.'
+    }
+    $catalogPath = Assert-PshLifecycleNoReparseAncestors -Path ([string](Get-PshLifecycleProperty $Request 'CatalogPath')) -Description 'catalog membership snapshot'
+    $contentRoot = Assert-PshLifecycleNoReparseAncestors -Path ([string](Get-PshLifecycleProperty $Request 'ContentRoot')) -Description 'catalog membership content root'
+    $catalogEntry = Get-PshLifecyclePathEntry -Path $catalogPath -Description 'catalog membership snapshot'
+    if (-not [bool]$catalogEntry.Exists -or -not [bool]$catalogEntry.IsRegularFile -or [bool]$catalogEntry.IsReparsePoint) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogFile' -Message "Catalog must be a regular non-reparse file: $catalogPath"
+    }
+    $contentEntry = Get-PshLifecyclePathEntry -Path $contentRoot -Description 'catalog membership content root'
+    if (-not [bool]$contentEntry.Exists -or -not [bool]$contentEntry.IsDirectory -or [bool]$contentEntry.IsReparsePoint) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContentRoot' -Message "Catalog content root must be a non-reparse directory: $contentRoot"
+    }
+    try {
+        $validation = & $catalogCommand -CatalogFilePath $catalogPath -Path $contentRoot -Detailed -ErrorAction Stop
+    }
+    catch {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContent' -Message 'Catalog membership verification failed.' -InnerException $_.Exception
+    }
+    $status = if ($null -ne $validation -and $null -ne $validation.PSObject.Properties['Status']) { [string]$validation.Status } else { [string]$validation }
+    if ($status -cne 'ValidationPassed') {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContent' -Message "Catalog content validation failed: $status"
+    }
+    return [pscustomobject][ordered]@{
+        Trusted = $true
+        CatalogMembership = 'verified'
+        SignatureNotRequired = $true
+    }
+}
+
 function Get-PshTrustStreamBytes {
     [CmdletBinding()]
     param(
@@ -906,7 +1484,58 @@ function Invoke-PshCatalogTrustVerifier {
     return $result
 }
 
+function Invoke-PshProductionCatalogMembershipVerifier {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object] $Context)
+
+    $request = [pscustomobject][ordered]@{
+        CatalogPath = [string](Get-PshLifecycleProperty (Get-PshLifecycleProperty $Context 'Catalog') 'Path')
+        ContentRoot = [string](Get-PshLifecycleProperty $Context 'ContentRoot')
+        Offline = $true
+    }
+    try {
+        $results = @(Invoke-PshWindowsCatalogMembershipVerifier -Request $request)
+    }
+    catch {
+        if (Test-PshLifecycleExceptionMetadata $_) { throw }
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogMembershipFailed' -Message 'Catalog membership verifier failed closed.' -InnerException $_.Exception
+    }
+    if ($results.Count -ne 1 -or (Get-PshLifecycleProperty $results[0] 'Trusted') -isnot [bool] -or
+        -not [bool](Get-PshLifecycleProperty $results[0] 'Trusted') -or
+        [string](Get-PshLifecycleProperty $results[0] 'CatalogMembership') -cne 'verified') {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogMembershipResult' -Message 'Catalog membership verifier did not return one verified result.'
+    }
+    return $results[0]
+}
+
+function Assert-PshReleaseMetadataFileState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $Metadata,
+        [Parameter(Mandatory = $true)][object] $Source
+    )
+
+    $name = [IO.Path]::GetFileName([string](Get-PshLifecycleProperty $Source 'Path'))
+    $assetMatches = @((Get-PshLifecycleProperty $Metadata 'Assets') | Where-Object { [string]$_.name -ceq $name })
+    if ($assetMatches.Count -ne 1) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataAsset' -Message "Trusted release metadata does not contain '$name'."
+    }
+    $expected = $assetMatches[0]
+    if ([int64](Get-PshLifecycleProperty $Source 'Length') -ne [int64](Get-PshLifecycleProperty $expected 'length') -or
+        [string](Get-PshLifecycleProperty $Source 'Sha256') -cne [string](Get-PshLifecycleProperty $expected 'sha256')) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataDigestMismatch' -Message "Release bootstrap asset '$name' does not match its GitHub release SHA256 digest and length."
+    }
+    return $true
+}
+
 function Get-PshProductionPublisherPolicy {
+    [CmdletBinding()]
+    param()
+
+    return Get-PshProductionTrustPolicy
+}
+
+function Get-PshAuthenticodePublisherPolicy {
     [CmdletBinding()]
     param()
 
@@ -922,6 +1551,27 @@ function Copy-PshReleaseTrustData {
     return ($json | ConvertFrom-Json -ErrorAction Stop)
 }
 
+function Complete-PshProductionArchiveTrustReport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object] $InputObject,
+        [Parameter(Mandatory = $true)][string] $TrustMode,
+        [Parameter(Mandatory = $true)][string] $Checksum,
+        [Parameter(Mandatory = $true)][string] $ArchiveSha256
+    )
+
+    $report = Copy-PshReleaseTrustData -InputObject $InputObject
+    if ([string](Get-PshLifecycleProperty $report 'catalogMembership') -cne 'verified' -or
+        (Get-PshLifecycleProperty $report 'signatureNotRequired') -isnot [bool] -or
+        -not [bool](Get-PshLifecycleProperty $report 'signatureNotRequired')) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshArchiveTrustReport' -Message 'Archive binding requires a verified hash-policy package trust report.'
+    }
+    if ($ArchiveSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or $ArchiveSha256 -ceq ('0' * 64)) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshOfflineArchiveSha256' -Message 'Completed archive trust requires a non-zero lowercase SHA256 value.'
+    }
+    return New-PshProductionTrustReport -TrustMode $TrustMode -Checksum $Checksum -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'verified' -ArchiveSha256 $ArchiveSha256 -AttestationVerification 'external-release-gate'
+}
+
 function Get-PshTrustedReleaseRecord {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][AllowNull()][object] $InputObject)
@@ -930,7 +1580,7 @@ function Get-PshTrustedReleaseRecord {
     $token = Get-PshLifecycleProperty $InputObject 'TrustToken'
     if ($null -eq $token -or -not [object]::ReferenceEquals($token, $script:PshReleaseTrustToken) -or
         -not $script:PshTrustedReleaseRegistry.TryGetValue($InputObject, [ref]$record)) {
-        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshUntrustedRelease' -Message 'A publisher-authenticated trusted release object is required; HTTPS or a bare SHA256 is not source trust.'
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshUntrustedRelease' -Message 'A production-policy trusted release object is required.'
     }
     return Copy-PshReleaseTrustData -InputObject $record
 }
@@ -943,7 +1593,7 @@ function Get-PshTrustedPackageRecord {
     $token = Get-PshLifecycleProperty $InputObject 'TrustToken'
     if ($null -eq $token -or -not [object]::ReferenceEquals($token, $script:PshPackageTrustToken) -or
         -not $script:PshTrustedPackageRegistry.TryGetValue($InputObject, [ref]$record)) {
-        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshUntrustedPackageManifest' -Message 'A publisher-authenticated trusted package manifest object is required.'
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshUntrustedPackageManifest' -Message 'A production-policy trusted package manifest object is required.'
     }
     return Copy-PshReleaseTrustData -InputObject $record
 }
@@ -954,10 +1604,12 @@ function Invoke-PshReleaseTrustBundleCore {
         [Parameter(Mandatory = $true)][string] $IndexPath,
         [Parameter(Mandatory = $true)][string] $ChecksumPath,
         [Parameter(Mandatory = $true)][string] $CatalogPath,
+        [Parameter()][AllowNull()][object] $TrustedMetadata,
         [Parameter()][switch] $Offline
     )
 
-    $publisherPolicy = Get-PshProductionPublisherPolicy
+    $metadata = if ($null -eq $TrustedMetadata) { $null } else { Assert-PshTrustedReleaseMetadata -InputObject $TrustedMetadata }
+    $publisherPolicy = if ($null -eq $metadata) { Get-PshAuthenticodePublisherPolicy } else { $null }
     $sources = New-Object System.Collections.ArrayList
     $context = $null
     try {
@@ -972,7 +1624,19 @@ function Invoke-PshReleaseTrustBundleCore {
             [pscustomobject]@{ Name = [IO.Path]::GetFileName([string]$checksumSource.Path); Role = 'checksums'; Source = $checksumSource }
         ) -CatalogSource $catalogSource
         [void](Assert-PshTrustSnapshotContextStable -Sources @($sources) -Context $context)
-        $trust = Invoke-PshCatalogTrustVerifier -Context $context -PublisherPolicy $publisherPolicy -Offline:$Offline
+        if ($null -ne $metadata) {
+            [void](Assert-PshReleaseMetadataFileState -Metadata $metadata -Source $indexSource)
+            [void](Assert-PshReleaseMetadataFileState -Metadata $metadata -Source $checksumSource)
+            [void](Assert-PshReleaseMetadataFileState -Metadata $metadata -Source $catalogSource)
+            $trust = Invoke-PshProductionCatalogMembershipVerifier -Context $context
+            $trustReport = New-PshProductionTrustReport -TrustMode 'github-release-asset-digest' -Checksum 'github-release-sha256-verified' -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'not-applicable' -AttestationVerification 'external-release-gate'
+            $publisher = $null
+        }
+        else {
+            $trust = Invoke-PshCatalogTrustVerifier -Context $context -PublisherPolicy $publisherPolicy -Offline:$Offline
+            $trustReport = New-PshProductionTrustReport -TrustMode 'authenticode-publisher-catalog' -Checksum 'catalog-sha256-verified' -CatalogMembership 'verified' -SignatureNotRequired $false -ArchiveBinding 'not-applicable' -AttestationVerification 'not-required'
+            $publisher = [string](Get-PshLifecycleProperty $trust 'Publisher')
+        }
         [void](Assert-PshTrustSnapshotContextStable -Sources @($sources) -Context $context)
 
         $indexSnapshot = New-PshStrictJsonSnapshotFromBytes -Path ([string]$indexSource.Path) -Bytes ([byte[]]$indexSource.Bytes) -Description 'Psh release index'
@@ -980,9 +1644,17 @@ function Invoke-PshReleaseTrustBundleCore {
         $index = Read-PshReleaseIndex -Path ([string]$indexSource.Path) -Snapshot $indexSnapshot
         $checksums = Read-PshSha256Sums -Path ([string]$checksumSource.Path) -Snapshot $checksumSnapshot
         [void](Assert-PshReleaseIndexChecksums -Index $index -Checksums $checksums)
+        if ($null -ne $metadata -and
+            ([string]$index.repository -cne [string]$metadata.Repository -or
+             [string]$index.version -cne [string]$metadata.Version -or
+             [string]$index.tag -cne [string]$metadata.Tag)) {
+            Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshReleaseMetadataIdentity' -Message 'Release index repository, version, or tag does not match the trusted GitHub release metadata.'
+        }
         $record = [pscustomobject][ordered]@{
             Trusted = $true
-            Publisher = [string](Get-PshLifecycleProperty $trust 'Publisher')
+            Publisher = $publisher
+            Repository = $script:PshReleaseRepository
+            Trust = $trustReport
             Index = $index
             Checksums = $checksums
             IndexSha256 = [string]$indexSnapshot.Sha256
@@ -992,7 +1664,9 @@ function Invoke-PshReleaseTrustBundleCore {
             PSTypeName = 'Psh.TrustedRelease'
             TrustToken = $script:PshReleaseTrustToken
             Trusted = $true
-            Publisher = [string]$record.Publisher
+            Publisher = $record.Publisher
+            Repository = [string]$record.Repository
+            Trust = Copy-PshReleaseTrustData -InputObject $record.Trust
             Index = Copy-PshReleaseTrustData -InputObject $record.Index
             Checksums = Copy-PshReleaseTrustData -InputObject $record.Checksums
             IndexSha256 = [string]$record.IndexSha256
@@ -1013,10 +1687,11 @@ function Confirm-PshReleaseTrustBundle {
         [Parameter(Mandatory = $true)][string] $IndexPath,
         [Parameter(Mandatory = $true)][string] $ChecksumPath,
         [Parameter(Mandatory = $true)][string] $CatalogPath,
+        [Parameter()][AllowNull()][object] $TrustedMetadata,
         [Parameter()][switch] $Offline
     )
 
-    return Invoke-PshReleaseTrustBundleCore -IndexPath $IndexPath -ChecksumPath $ChecksumPath -CatalogPath $CatalogPath -Offline:$Offline
+    return Invoke-PshReleaseTrustBundleCore -IndexPath $IndexPath -ChecksumPath $ChecksumPath -CatalogPath $CatalogPath -TrustedMetadata $TrustedMetadata -Offline:$Offline
 }
 
 function Test-PshTrustedRelease {
@@ -1074,11 +1749,14 @@ function Invoke-PshPackageManifestTrustCore {
         [Parameter()][switch] $Offline
     )
 
-    $publisherPolicy = Get-PshProductionPublisherPolicy
     if ([IO.Path]::GetFileName($ManifestPath) -cne 'package.manifest.json') {
         Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshManifestFileName' -Message 'Package manifest file must be named exactly package.manifest.json.'
     }
+    if ([IO.Path]::GetFileName($CatalogPath) -cne 'package.manifest.cat') {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogFileName' -Message 'Package catalog file must be named exactly package.manifest.cat.'
+    }
     $releaseIndex = $null
+    $trusted = $null
     if ($null -ne $TrustedRelease) {
         $trusted = Assert-PshTrustedRelease -InputObject $TrustedRelease
         $releaseIndex = Get-PshLifecycleProperty $trusted 'Index'
@@ -1097,6 +1775,12 @@ function Invoke-PshPackageManifestTrustCore {
         }
         $ExpectedAsset = $authenticatedAssets[0]
     }
+    $releaseTrustMode = if ($null -eq $trusted) { $null } else { [string](Get-PshLifecycleProperty (Get-PshLifecycleProperty $trusted 'Trust') 'trustMode') }
+    $useHashPolicy = [bool]$Offline -or $releaseTrustMode -ceq 'github-release-asset-digest'
+    if ($useHashPolicy -and -not [bool]$Offline -and $null -eq $ExpectedAsset) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshManifestAssetTrust' -Message 'Online hash trust requires package metadata from its trusted release asset.'
+    }
+    $publisherPolicy = if ($useHashPolicy) { $null } else { Get-PshAuthenticodePublisherPolicy }
     $sources = New-Object System.Collections.ArrayList
     $context = $null
     try {
@@ -1108,17 +1792,36 @@ function Invoke-PshPackageManifestTrustCore {
             [pscustomobject]@{ Name = 'package.manifest.json'; Role = 'manifest'; Source = $manifestSource }
         ) -CatalogSource $catalogSource
         [void](Assert-PshTrustSnapshotContextStable -Sources @($sources) -Context $context)
-        $trust = Invoke-PshCatalogTrustVerifier -Context $context -PublisherPolicy $publisherPolicy -Offline:$Offline
+        if ($useHashPolicy) {
+            $trust = Invoke-PshProductionCatalogMembershipVerifier -Context $context
+            if ([bool]$Offline) {
+                $trustReport = New-PshProductionTrustReport -TrustMode 'offline-external-archive-sha256+package-catalog-sha256' -Checksum 'archive-binding-required' -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'required-at-entry' -AttestationVerification 'external-release-gate'
+            }
+            else {
+                $trustReport = New-PshProductionTrustReport -TrustMode 'github-release-asset-digest+archive-binding+package-catalog-sha256' -Checksum 'archive-binding-required' -CatalogMembership 'verified' -SignatureNotRequired $true -ArchiveBinding 'required-at-entry' -AttestationVerification 'external-release-gate'
+            }
+            $publisher = $null
+        }
+        else {
+            $trust = Invoke-PshCatalogTrustVerifier -Context $context -PublisherPolicy $publisherPolicy -Offline:$Offline
+            $trustReport = New-PshProductionTrustReport -TrustMode 'authenticode-publisher-catalog' -Checksum 'manifest-and-tree-sha256-verified' -CatalogMembership 'verified' -SignatureNotRequired $false -ArchiveBinding 'not-applicable' -AttestationVerification 'not-required'
+            $publisher = [string](Get-PshLifecycleProperty $trust 'Publisher')
+        }
         [void](Assert-PshTrustSnapshotContextStable -Sources @($sources) -Context $context)
 
         $snapshot = New-PshStrictJsonSnapshotFromBytes -Path ([string]$manifestSource.Path) -Bytes ([byte[]]$manifestSource.Bytes) -Description 'Package manifest'
         $manifest = Read-PshPackageManifest -Path ([string]$manifestSource.Path) -Snapshot $snapshot
+        if ([string]$manifest.source.repository -cne $script:PshReleaseRepository) {
+            Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshManifestSourceMismatch' -Message "Package manifest source.repository must be exactly '$($script:PshReleaseRepository)'."
+        }
         if ($null -ne $ExpectedAsset) {
             [void](Assert-PshManifestMatchesReleaseAsset -Manifest $manifest -ManifestSha256 ([string]$snapshot.Sha256) -Asset $ExpectedAsset -ReleaseIndex $releaseIndex)
         }
         $record = [pscustomobject][ordered]@{
             Trusted = $true
-            Publisher = [string](Get-PshLifecycleProperty $trust 'Publisher')
+            Publisher = $publisher
+            Repository = $script:PshReleaseRepository
+            Trust = $trustReport
             Manifest = $manifest
             ManifestSha256 = [string]$snapshot.Sha256
             ManifestLength = [int64]$snapshot.Length
@@ -1127,7 +1830,9 @@ function Invoke-PshPackageManifestTrustCore {
             PSTypeName = 'Psh.TrustedPackageManifest'
             TrustToken = $script:PshPackageTrustToken
             Trusted = $true
-            Publisher = [string]$record.Publisher
+            Publisher = $record.Publisher
+            Repository = [string]$record.Repository
+            Trust = Copy-PshReleaseTrustData -InputObject $record.Trust
             Manifest = Copy-PshReleaseTrustData -InputObject $record.Manifest
             ManifestSha256 = [string]$record.ManifestSha256
             ManifestLength = [int64]$record.ManifestLength

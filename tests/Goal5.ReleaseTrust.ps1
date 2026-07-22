@@ -16,15 +16,15 @@ $RepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
 $script:Goal5ReleaseTrustAssertions = 0
 $trustPath = Join-Path $RepositoryRoot 'src/install/ReleaseTrust.ps1'
 . $trustPath
-$script:Goal5OriginalProductionPolicy = (Get-Command Get-PshProductionPublisherPolicy -CommandType Function).ScriptBlock
+$script:Goal5OriginalAuthenticodePolicy = (Get-Command Get-PshAuthenticodePublisherPolicy -CommandType Function).ScriptBlock
 $script:Goal5OriginalWindowsCatalogVerifier = (Get-Command Invoke-PshWindowsCatalogTrustVerifier -CommandType Function).ScriptBlock
 try {
 $script:Goal5ActivePublisherPolicy = $null
 $script:Goal5ActiveCatalogVerifier = $null
 
-function Get-PshProductionPublisherPolicy {
+function Get-PshAuthenticodePublisherPolicy {
     if ($null -eq $script:Goal5ActivePublisherPolicy) {
-        return & $script:Goal5OriginalProductionPolicy
+        return & $script:Goal5OriginalAuthenticodePolicy
     }
     return Assert-PshPublisherPolicy -Policy $script:Goal5ActivePublisherPolicy
 }
@@ -139,6 +139,48 @@ function New-PshGoal5ReleaseDirectoryLink {
     catch { return $false }
 }
 
+function New-PshGoal5ArchiveBindingZip {
+    param(
+        [Parameter(Mandatory = $true)][string] $PackageRoot,
+        [Parameter(Mandatory = $true)][string] $ZipPath,
+        [Parameter()][object[]] $ExtraEntries = @()
+    )
+
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction Stop
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+    $root = [IO.Path]::GetFullPath($PackageRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $stream = New-Object IO.FileStream($ZipPath, ([IO.FileMode]::CreateNew), ([IO.FileAccess]::ReadWrite), ([IO.FileShare]::None))
+    try {
+        $archive = New-Object IO.Compression.ZipArchive($stream, ([IO.Compression.ZipArchiveMode]::Create), $true, (New-Object Text.UTF8Encoding($false)))
+        try {
+            foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -Force -File | Sort-Object FullName)) {
+                $relative = $file.FullName.Substring(($root + [IO.Path]::DirectorySeparatorChar).Length).Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
+                $entry = $archive.CreateEntry($relative, [IO.Compression.CompressionLevel]::Optimal)
+                $entry.ExternalAttributes = 0
+                $entryStream = $entry.Open()
+                $fileStream = New-Object IO.FileStream($file.FullName, ([IO.FileMode]::Open), ([IO.FileAccess]::Read), ([IO.FileShare]::Read))
+                try { $fileStream.CopyTo($entryStream) }
+                finally { $fileStream.Dispose(); $entryStream.Dispose() }
+            }
+            foreach ($extra in @($ExtraEntries)) {
+                $entry = $archive.CreateEntry([string]$extra.Name, [IO.Compression.CompressionLevel]::Optimal)
+                $external = Get-PshLifecycleProperty $extra 'ExternalAttributes'
+                if ($null -ne $external) { $entry.ExternalAttributes = [int]$external }
+                $bytes = [byte[]](Get-PshLifecycleProperty $extra 'Bytes')
+                $entryStream = $entry.Open()
+                try { $entryStream.Write($bytes, 0, $bytes.Length) }
+                finally { $entryStream.Dispose() }
+            }
+        }
+        finally { $archive.Dispose() }
+    }
+    finally { $stream.Dispose() }
+    return [pscustomobject][ordered]@{
+        Path = $ZipPath
+        Sha256 = Get-PshLifecycleFileSha256 -Path $ZipPath | Select-Object -ExpandProperty Sha256
+    }
+}
+
 function New-PshGoal5ReleaseFixture {
     param([Parameter(Mandatory = $true)][string] $Root)
 
@@ -244,6 +286,8 @@ function New-PshGoal5ReleaseFixture {
     Write-PshGoal5ReleaseText -Path $checksumPath -Text $checksumText
     $catalogPath = Join-Path $Root 'release.cat'
     [IO.File]::WriteAllBytes($catalogPath, $encoding.GetBytes('catalog fixture'))
+    $packageCatalogPath = Join-Path $Root 'package.manifest.cat'
+    [IO.File]::WriteAllBytes($packageCatalogPath, $encoding.GetBytes('package catalog fixture'))
     $policy = [pscustomobject][ordered]@{
         schemaVersion = 1
         publisher = 'Emvdy Software'
@@ -257,7 +301,7 @@ function New-PshGoal5ReleaseFixture {
         Index = $index; IndexPath = $indexPath
         ChecksumPath = $checksumPath; ChecksumText = $checksumText
         CatalogPath = $catalogPath; Policy = $policy
-        Manifest = $manifest; ManifestPath = $manifestPath
+        Manifest = $manifest; ManifestPath = $manifestPath; PackageCatalogPath = $packageCatalogPath
         CoreAsset = $assets[0]
     }
 }
@@ -265,6 +309,7 @@ function New-PshGoal5ReleaseFixture {
 Assert-PshGoal5ReleaseTrust ([IO.File]::Exists($trustPath)) 'ReleaseTrust.ps1 is missing.'
 foreach ($name in @(
     'Read-PshReleaseIndex', 'Read-PshSha256Sums', 'Read-PshPublisherPolicy',
+    'Get-PshProductionTrustPolicy', 'Resolve-PshTrustedReleaseMetadata', 'Confirm-PshPackageArchiveBinding',
     'Confirm-PshReleaseTrustBundle', 'Confirm-PshPackageManifestTrust',
     'Test-PshTrustedRelease', 'Assert-PshTrustedRelease', 'Test-PshTrustedPackageManifest'
 )) {
@@ -326,6 +371,88 @@ try {
     $policyPath = Join-Path $fixture.Root 'publisher-policy.json'
     Write-PshGoal5ReleaseJson -Path $policyPath -Value $fixture.Policy
     Assert-PshGoal5ReleaseTrust ([string](Read-PshPublisherPolicy -Path $policyPath).publisher -ceq 'Emvdy Software') 'Publisher policy file did not parse.'
+    $productionPolicy = Get-PshProductionPublisherPolicy
+    Assert-PshGoal5ReleaseTrust ([int]$productionPolicy.schemaVersion -eq 1 -and [string]$productionPolicy.policyVersion -ceq '2026-07-22.2' -and
+        [string]$productionPolicy.onlineTrustMode -ceq 'github-release-asset-digest' -and [string]$productionPolicy.offlineTrustMode -ceq 'offline-external-archive-sha256+package-catalog-sha256' -and
+        -not [bool]$productionPolicy.signatureRequired -and [bool]$productionPolicy.catalogMembershipRequired -and [bool]$productionPolicy.archiveBindingRequired -and
+        [string]$productionPolicy.runtimeAttestationVerification -ceq 'external-release-gate') 'Production hash trust policy is not the fixed versioned archive-binding policy.'
+
+    $archiveBindingRoot = Join-Path $testRoot 'archive-binding-package'
+    [void][IO.Directory]::CreateDirectory((Join-Path $archiveBindingRoot 'sub'))
+    Write-PshGoal5ReleaseText -Path (Join-Path $archiveBindingRoot 'a.txt') -Text 'alpha'
+    $bindingBinaryBytes = [byte[]](1, 3, 5, 7, 9)
+    [IO.File]::WriteAllBytes((Join-Path $archiveBindingRoot 'sub/b.bin'), $bindingBinaryBytes)
+    $validArchive = New-PshGoal5ArchiveBindingZip -PackageRoot $archiveBindingRoot -ZipPath (Join-Path $testRoot 'archive-binding-valid.zip')
+    $retainedBinding = Confirm-PshPackageArchiveBinding -ArchivePath $validArchive.Path -ArchiveSha256 $validArchive.Sha256 -PackageRoot $archiveBindingRoot -RetainLocks
+    $retainedRecord = @($retainedBinding.PackageRecords)[0]
+    $retainedStream = Get-PshLifecycleProperty $retainedRecord 'Stream'
+    Assert-PshGoal5ReleaseTrust (-not [bool]$retainedBinding.Released -and $retainedStream -is [IO.FileStream] -and $retainedStream.CanRead) 'Retained archive binding did not keep the package snapshot live.'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $writeDenied = $false
+        try {
+            $writeProbe = New-Object IO.FileStream((Join-Path $archiveBindingRoot 'a.txt'), ([IO.FileMode]::Open), ([IO.FileAccess]::Write), ([IO.FileShare]::ReadWrite))
+            $writeProbe.Dispose()
+        }
+        catch { $writeDenied = $true }
+        Assert-PshGoal5ReleaseTrust $writeDenied 'Retained archive binding did not deny package mutation on Windows.'
+    }
+    $retainedBinding.Dispose()
+    $retainedBinding.Dispose()
+    Assert-PshGoal5ReleaseTrust ([bool]$retainedBinding.Released -and -not $retainedStream.CanRead) 'Retained archive binding did not release its streams idempotently.'
+    $archiveBinding = Confirm-PshPackageArchiveBinding -ArchivePath $validArchive.Path -ArchiveSha256 $validArchive.Sha256 -PackageRoot $archiveBindingRoot
+    Assert-PshGoal5ReleaseTrust ([bool]$archiveBinding.Trusted -and [string]$archiveBinding.ArchiveBinding -ceq 'verified' -and
+        [string]$archiveBinding.ArchiveSha256 -ceq [string]$validArchive.Sha256 -and [int]$archiveBinding.FileCount -eq 2) 'Valid external archive evidence did not bind to the extracted package tree.'
+    Assert-PshGoal5ReleaseTrustFailure -Action {
+        Confirm-PshPackageArchiveBinding -ArchivePath $validArchive.Path -ArchiveSha256 ('f' * 64) -PackageRoot $archiveBindingRoot
+    } -ExitCode 5 -ErrorId PshOfflineArchiveHashMismatch -Label 'wrong external archive SHA256'
+
+    Write-PshGoal5ReleaseText -Path (Join-Path $archiveBindingRoot 'a.txt') -Text 'ALPHA'
+    Assert-PshGoal5ReleaseTrustFailure -Action {
+        Confirm-PshPackageArchiveBinding -ArchivePath $validArchive.Path -ArchiveSha256 $validArchive.Sha256 -PackageRoot $archiveBindingRoot
+    } -ExitCode 5 -ErrorId PshOfflineArchiveEntryHash -Label 'archive-bound package byte tamper'
+    Write-PshGoal5ReleaseText -Path (Join-Path $archiveBindingRoot 'a.txt') -Text 'alpha'
+
+    Write-PshGoal5ReleaseText -Path (Join-Path $archiveBindingRoot 'extra.txt') -Text 'extra'
+    Assert-PshGoal5ReleaseTrustFailure -Action {
+        Confirm-PshPackageArchiveBinding -ArchivePath $validArchive.Path -ArchiveSha256 $validArchive.Sha256 -PackageRoot $archiveBindingRoot
+    } -ExitCode 5 -ErrorId PshOfflineArchivePackageExtraFile -Label 'archive-bound package extra file'
+    [IO.File]::Delete((Join-Path $archiveBindingRoot 'extra.txt'))
+
+    [IO.File]::Delete((Join-Path $archiveBindingRoot 'sub/b.bin'))
+    Assert-PshGoal5ReleaseTrustFailure -Action {
+        Confirm-PshPackageArchiveBinding -ArchivePath $validArchive.Path -ArchiveSha256 $validArchive.Sha256 -PackageRoot $archiveBindingRoot
+    } -ExitCode 5 -ErrorId PshOfflineArchivePackageMissingFile -Label 'archive-bound package missing file'
+    [IO.File]::WriteAllBytes((Join-Path $archiveBindingRoot 'sub/b.bin'), $bindingBinaryBytes)
+
+    $unrelatedRoot = Join-Path $testRoot 'archive-binding-unrelated'
+    [void][IO.Directory]::CreateDirectory($unrelatedRoot)
+    Write-PshGoal5ReleaseText -Path (Join-Path $unrelatedRoot 'unrelated.txt') -Text 'unrelated'
+    $unrelatedArchive = New-PshGoal5ArchiveBindingZip -PackageRoot $unrelatedRoot -ZipPath (Join-Path $testRoot 'archive-binding-unrelated.zip')
+    Assert-PshGoal5ReleaseTrustFailure -Action {
+        Confirm-PshPackageArchiveBinding -ArchivePath $unrelatedArchive.Path -ArchiveSha256 $unrelatedArchive.Sha256 -PackageRoot $archiveBindingRoot
+    } -ExitCode 5 -ErrorId PshOfflineArchivePackageMissingFile -Label 'unrelated but correctly hashed archive'
+
+    $traversalArchive = New-PshGoal5ArchiveBindingZip -PackageRoot $archiveBindingRoot -ZipPath (Join-Path $testRoot 'archive-binding-traversal.zip') -ExtraEntries @(
+        [pscustomobject]@{ Name = '../escape.txt'; Bytes = [Text.Encoding]::UTF8.GetBytes('escape') }
+    )
+    Assert-PshGoal5ReleaseTrustFailure -Action {
+        Confirm-PshPackageArchiveBinding -ArchivePath $traversalArchive.Path -ArchiveSha256 $traversalArchive.Sha256 -PackageRoot $archiveBindingRoot
+    } -ExitCode 5 -ErrorId PshOfflineArchiveEntryPath -Label 'archive traversal entry'
+
+    $symlinkAttributes = [BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]2717843456), 0)
+    $symlinkArchive = New-PshGoal5ArchiveBindingZip -PackageRoot $archiveBindingRoot -ZipPath (Join-Path $testRoot 'archive-binding-symlink.zip') -ExtraEntries @(
+        [pscustomobject]@{ Name = 'link.txt'; Bytes = [Text.Encoding]::UTF8.GetBytes('a.txt'); ExternalAttributes = $symlinkAttributes }
+    )
+    Assert-PshGoal5ReleaseTrustFailure -Action {
+        Confirm-PshPackageArchiveBinding -ArchivePath $symlinkArchive.Path -ArchiveSha256 $symlinkArchive.Sha256 -PackageRoot $archiveBindingRoot
+    } -ExitCode 5 -ErrorId PshOfflineArchiveEntryType -Label 'archive symlink entry'
+
+    $duplicateArchive = New-PshGoal5ArchiveBindingZip -PackageRoot $archiveBindingRoot -ZipPath (Join-Path $testRoot 'archive-binding-duplicate.zip') -ExtraEntries @(
+        [pscustomobject]@{ Name = 'A.TXT'; Bytes = [Text.Encoding]::UTF8.GetBytes('duplicate') }
+    )
+    Assert-PshGoal5ReleaseTrustFailure -Action {
+        Confirm-PshPackageArchiveBinding -ArchivePath $duplicateArchive.Path -ArchiveSha256 $duplicateArchive.Sha256 -PackageRoot $archiveBindingRoot
+    } -ExitCode 5 -ErrorId PshOfflineArchiveDuplicateEntry -Label 'archive case-insensitive duplicate entry'
 
     $releaseCommand = Get-Command Confirm-PshReleaseTrustBundle -CommandType Function
     $packageCommand = Get-Command Confirm-PshPackageManifestTrust -CommandType Function
@@ -380,7 +507,7 @@ try {
 
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         Assert-PshGoal5ReleaseTrustFailure -Action {
-            Confirm-PshReleaseTrustBundle -IndexPath $fixture.IndexPath -ChecksumPath $fixture.ChecksumPath -CatalogPath $fixture.CatalogPath
+            Get-PshAuthenticodePublisherPolicy
         } -ExitCode 4 -ErrorId PshPublisherPolicyUnavailable -Label 'unprovisioned production publisher policy'
     }
 
@@ -542,7 +669,7 @@ try {
     Assert-PshGoal5ReleaseTrustFailure -Action { Assert-PshPublisherPolicy -Policy $policyUnknown } -ExitCode 5 -ErrorId PshUnknownField -Label 'publisher policy unknown field'
 
     $script:Goal5PackageSnapshotManifestBytes = [IO.File]::ReadAllBytes($fixture.ManifestPath)
-    $script:Goal5PackageSnapshotCatalogBytes = [IO.File]::ReadAllBytes($fixture.CatalogPath)
+    $script:Goal5PackageSnapshotCatalogBytes = [IO.File]::ReadAllBytes($fixture.PackageCatalogPath)
     $script:Goal5PackageSnapshotRoot = $null
     $packageSnapshotVerifier = {
         param($request)
@@ -553,7 +680,7 @@ try {
         Assert-PshGoal5ReleaseTrust ([Convert]::ToBase64String((Get-PshTrustPathState -Path ([string]$request.CatalogPath) -Description 'fixture package catalog snapshot').Bytes) -ceq [Convert]::ToBase64String($script:Goal5PackageSnapshotCatalogBytes)) 'Package catalog snapshot bytes differ from the locked source.'
         [pscustomobject][ordered]@{ Trusted = $true; Publisher = 'Emvdy Software'; Subject = 'fixture' }
     }
-    $trustedPackage = Invoke-PshGoal5PackageTrustHarness -ManifestPath $fixture.ManifestPath -CatalogPath $fixture.CatalogPath -PublisherPolicy $fixture.Policy -ExpectedAsset $fixture.CoreAsset -TrustedRelease $trusted -Verifier $packageSnapshotVerifier
+    $trustedPackage = Invoke-PshGoal5PackageTrustHarness -ManifestPath $fixture.ManifestPath -CatalogPath $fixture.PackageCatalogPath -PublisherPolicy $fixture.Policy -ExpectedAsset $fixture.CoreAsset -TrustedRelease $trusted -Verifier $packageSnapshotVerifier
     Assert-PshGoal5ReleaseTrust (-not [IO.Directory]::Exists([string]$script:Goal5PackageSnapshotRoot)) 'Package trust snapshot root was not removed after success.'
     Assert-PshGoal5ReleaseTrust (Test-PshTrustedPackageManifest -InputObject $trustedPackage) 'Valid package manifest did not mint a trusted handle.'
     $packageRecord = Assert-PshTrustedPackageManifest -InputObject $trustedPackage
@@ -579,7 +706,7 @@ try {
     $manifestRaceError = $null
     $manifestRaceHandle = $null
     try {
-        $manifestRaceHandle = Invoke-PshGoal5PackageTrustHarness -ManifestPath $manifestRace.ManifestPath -CatalogPath $manifestRace.CatalogPath -PublisherPolicy $manifestRace.Policy -ExpectedAsset $fixture.CoreAsset -TrustedRelease $trusted -Verifier $manifestRaceVerifier
+        $manifestRaceHandle = Invoke-PshGoal5PackageTrustHarness -ManifestPath $manifestRace.ManifestPath -CatalogPath $manifestRace.PackageCatalogPath -PublisherPolicy $manifestRace.Policy -ExpectedAsset $fixture.CoreAsset -TrustedRelease $trusted -Verifier $manifestRaceVerifier
     }
     catch { $manifestRaceError = $_ }
     if ($script:Goal5ManifestRaceMutationCount -eq 0) {
@@ -592,25 +719,25 @@ try {
 
     $forgedExpectedAsset = Copy-PshGoal5ReleaseObject -Value $fixture.CoreAsset
     $forgedExpectedAsset.package.packageManifestSha256 = ('f' * 64)
-    $trustedPackageFromName = Invoke-PshGoal5PackageTrustHarness -ManifestPath $fixture.ManifestPath -CatalogPath $fixture.CatalogPath -PublisherPolicy $fixture.Policy -ExpectedAsset $forgedExpectedAsset -TrustedRelease $trusted -Verifier $validVerifier
+    $trustedPackageFromName = Invoke-PshGoal5PackageTrustHarness -ManifestPath $fixture.ManifestPath -CatalogPath $fixture.PackageCatalogPath -PublisherPolicy $fixture.Policy -ExpectedAsset $forgedExpectedAsset -TrustedRelease $trusted -Verifier $validVerifier
     Assert-PshGoal5ReleaseTrust (Test-PshTrustedPackageManifest -InputObject $trustedPackageFromName) 'Expected asset name did not resolve back to authenticated metadata.'
     $missingAsset = Copy-PshGoal5ReleaseObject -Value $fixture.CoreAsset
     $missingAsset.name = 'missing.zip'
     Assert-PshGoal5ReleaseTrustFailure -Action {
-        Invoke-PshGoal5PackageTrustHarness -ManifestPath $fixture.ManifestPath -CatalogPath $fixture.CatalogPath -PublisherPolicy $fixture.Policy -ExpectedAsset $missingAsset -TrustedRelease $trusted -Verifier $validVerifier
+        Invoke-PshGoal5PackageTrustHarness -ManifestPath $fixture.ManifestPath -CatalogPath $fixture.PackageCatalogPath -PublisherPolicy $fixture.Policy -ExpectedAsset $missingAsset -TrustedRelease $trusted -Verifier $validVerifier
     } -ExitCode 5 -ErrorId PshManifestAssetTrust -Label 'package manifest missing authenticated asset'
 
     $validManifestText = (ConvertTo-PshCanonicalJson -InputObject $fixture.Manifest) + "`n"
     $duplicateManifestText = $validManifestText.Replace('"schemaVersion":1', '"schemaVersion":1,"schemaVersion":1')
     Write-PshGoal5ReleaseText -Path $fixture.ManifestPath -Text $duplicateManifestText
     Assert-PshGoal5ReleaseTrustFailure -Action {
-        Invoke-PshGoal5PackageTrustHarness -ManifestPath $fixture.ManifestPath -CatalogPath $fixture.CatalogPath -PublisherPolicy $fixture.Policy -ExpectedAsset $fixture.CoreAsset -TrustedRelease $trusted -Verifier $validVerifier
+        Invoke-PshGoal5PackageTrustHarness -ManifestPath $fixture.ManifestPath -CatalogPath $fixture.PackageCatalogPath -PublisherPolicy $fixture.Policy -ExpectedAsset $fixture.CoreAsset -TrustedRelease $trusted -Verifier $validVerifier
     } -ExitCode 5 -ErrorId PshDuplicateField -Label 'duplicate package manifest JSON key'
     $manifestMismatch = Copy-PshGoal5ReleaseObject -Value $fixture.Manifest
     $manifestMismatch.version = '1.2.4'
     Write-PshGoal5ReleaseJson -Path $fixture.ManifestPath -Value $manifestMismatch
     Assert-PshGoal5ReleaseTrustFailure -Action {
-        Invoke-PshGoal5PackageTrustHarness -ManifestPath $fixture.ManifestPath -CatalogPath $fixture.CatalogPath -PublisherPolicy $fixture.Policy -ExpectedAsset $fixture.CoreAsset -TrustedRelease $trusted -Verifier $validVerifier
+        Invoke-PshGoal5PackageTrustHarness -ManifestPath $fixture.ManifestPath -CatalogPath $fixture.PackageCatalogPath -PublisherPolicy $fixture.Policy -ExpectedAsset $fixture.CoreAsset -TrustedRelease $trusted -Verifier $validVerifier
     } -ExitCode 5 -ErrorId PshManifestReleaseMismatch -Label 'package manifest release mismatch'
     Write-PshGoal5ReleaseText -Path $fixture.ManifestPath -Text $validManifestText
 }
@@ -622,7 +749,7 @@ finally {
 Write-Output "Goal 5 release trust passed ($script:Goal5ReleaseTrustAssertions assertions)."
 }
 finally {
-    try { Set-Item -Path Function:Get-PshProductionPublisherPolicy -Value $script:Goal5OriginalProductionPolicy -ErrorAction Stop } catch { }
+    try { Set-Item -Path Function:Get-PshAuthenticodePublisherPolicy -Value $script:Goal5OriginalAuthenticodePolicy -ErrorAction Stop } catch { }
     try { Set-Item -Path Function:Invoke-PshWindowsCatalogTrustVerifier -Value $script:Goal5OriginalWindowsCatalogVerifier -ErrorAction Stop } catch { }
-    Remove-Variable Goal5OriginalProductionPolicy, Goal5OriginalWindowsCatalogVerifier, Goal5ActivePublisherPolicy, Goal5ActiveCatalogVerifier -Scope Script -ErrorAction SilentlyContinue
+    Remove-Variable Goal5OriginalAuthenticodePolicy, Goal5OriginalWindowsCatalogVerifier, Goal5ActivePublisherPolicy, Goal5ActiveCatalogVerifier -Scope Script -ErrorAction SilentlyContinue
 }
