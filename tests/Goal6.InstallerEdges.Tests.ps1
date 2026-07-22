@@ -40,6 +40,7 @@ Describe 'Goal 6 installer edge matrix' {
         $script:Goal6InstallScript = Join-Path $script:Goal6RepositoryRoot 'src/install/Install-PshPackage.ps1'
         $script:Goal6LifecycleScript = Join-Path $script:Goal6RepositoryRoot 'src/install/PackageLifecycle.ps1'
         $script:Goal6EnginePath = [string](Get-Process -Id $PID -ErrorAction Stop).Path
+        $script:Goal6NonAdminTimeoutMilliseconds = 300000
         foreach ($requiredPath in @($script:Goal6InstallScript, $script:Goal6LifecycleScript, $script:Goal6EnginePath)) {
             if (-not [IO.File]::Exists($requiredPath)) { throw "Required Goal 6 installer input is missing: $requiredPath" }
         }
@@ -221,12 +222,47 @@ Describe 'Goal 6 installer edge matrix' {
         function Assert-PshGoal6InstallFailure {
             param(
                 [Parameter(Mandatory = $true)][object] $Result,
-                [Parameter(Mandatory = $true)][string] $Label
+                [Parameter(Mandatory = $true)][string] $Label,
+                [Parameter(Mandatory = $true)][int] $ExpectedExitCode,
+                [Parameter(Mandatory = $true)][string] $ExpectedErrorId,
+                [Parameter(Mandatory = $true)][string] $ExpectedMessagePattern
             )
 
             if ([bool]$Result.Succeeded) { throw "$Label unexpectedly installed successfully." }
-            if ([int]$Result.Metadata.ExitCode -ne 5) {
-                throw ("$Label used exit code $($Result.Metadata.ExitCode), expected integrity exit code 5: $($Result.Metadata.Message)")
+            if ($null -eq $Result.Metadata) { throw "$Label returned no structured failure metadata." }
+            if ([int]$Result.Metadata.ExitCode -ne $ExpectedExitCode) {
+                throw ("$Label used exit code $($Result.Metadata.ExitCode), expected $ExpectedExitCode: $($Result.Metadata.Message)")
+            }
+            if ([string]$Result.Metadata.ErrorId -cne $ExpectedErrorId) {
+                throw ("$Label used error id '$($Result.Metadata.ErrorId)', expected '$ExpectedErrorId': $($Result.Metadata.Message)")
+            }
+            if ([string]$Result.Metadata.Message -cnotmatch $ExpectedMessagePattern) {
+                throw ("$Label returned an unexpected diagnostic: $($Result.Metadata.Message)")
+            }
+        }
+
+        function Invoke-PshGoal6ChildProcessTreeTermination {
+            param([Parameter(Mandatory = $true)][Diagnostics.Process] $Process)
+
+            $taskKillPath = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { $null } else { Join-Path $env:SystemRoot 'System32/taskkill.exe' }
+            if (-not [string]::IsNullOrWhiteSpace($taskKillPath) -and [IO.File]::Exists($taskKillPath)) {
+                $oldPreference = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = 'Continue'
+                    & $taskKillPath /PID ([string]$Process.Id) /T /F 2>&1 | Microsoft.PowerShell.Core\Out-Null
+                }
+                catch { [void]$_.Exception.Message }
+                finally {
+                    $ErrorActionPreference = $oldPreference
+                    $global:LASTEXITCODE = 0
+                }
+            }
+            try {
+                if (-not $Process.HasExited) { $Process.Kill() }
+            }
+            catch { [void]$_.Exception.Message }
+            if (-not $Process.WaitForExit(5000)) {
+                throw "Timed-out non-admin child process $($Process.Id) could not be terminated."
             }
         }
 
@@ -251,16 +287,17 @@ Describe 'Goal 6 installer edge matrix' {
         function Invoke-PshGoal6TemporaryUserProfileCleanup {
             param([Parameter(Mandatory = $true)][string] $Sid)
 
-            for ($attempt = 0; $attempt -lt 40; $attempt++) {
-                $userProfile = @(Get-CimInstance -ClassName Win32_UserProfile -Filter ("SID='{0}'" -f $Sid) -ErrorAction SilentlyContinue | Select-Object -First 1)
+            $removalRequested = $false
+            for ($attempt = 0; $attempt -lt 120; $attempt++) {
+                $userProfile = @(Get-CimInstance -ClassName Win32_UserProfile -Filter ("SID='{0}'" -f $Sid) -ErrorAction Stop | Select-Object -First 1)
                 if ($userProfile.Count -eq 0) { return }
-                if (-not [bool]$userProfile[0].Loaded) {
+                if (-not [bool]$userProfile[0].Loaded -and -not $removalRequested) {
                     $userProfile[0] | Remove-CimInstance -ErrorAction Stop
-                    return
+                    $removalRequested = $true
                 }
                 Start-Sleep -Milliseconds 250
             }
-            throw "Temporary standard-user profile remained loaded: $Sid"
+            throw "Temporary standard-user profile remained present after cleanup: $Sid"
         }
 
         function Invoke-PshGoal6NonAdminChild {
@@ -323,6 +360,8 @@ param([Parameter(Mandatory = $true)][string]$ConfigPath)
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $utf8 = New-Object Text.UTF8Encoding($false, $true)
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
 $config = [IO.File]::ReadAllText($ConfigPath, $utf8) | ConvertFrom-Json -ErrorAction Stop
 $oldLocalAppData = $env:LOCALAPPDATA
 $oldEdition = $env:PSH_EDITION
@@ -375,7 +414,21 @@ finally {
                 Write-PshGoal6Text -Path $childPath -Text $childScript
                 Grant-PshGoal6FixtureAccess -Path $testRoot -Sid $user.SID
                 $argumentList = '-NoLogo -NoProfile -NonInteractive -File "{0}" -ConfigPath "{1}"' -f $childPath, $configPath
-                $process = Start-Process -FilePath $script:Goal6EnginePath -Credential $credential -LoadUserProfile -WorkingDirectory $testRoot -ArgumentList $argumentList -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru -Wait -ErrorAction Stop
+                $process = $null
+                $processExitCode = $null
+                $timedOut = $false
+                try {
+                    $process = Start-Process -FilePath $script:Goal6EnginePath -Credential $credential -LoadUserProfile -WorkingDirectory $testRoot -ArgumentList $argumentList -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru -ErrorAction Stop
+                    if (-not $process.WaitForExit($script:Goal6NonAdminTimeoutMilliseconds)) {
+                        $timedOut = $true
+                        Invoke-PshGoal6ChildProcessTreeTermination -Process $process
+                    }
+                    [void]$process.WaitForExit()
+                    $processExitCode = if ($timedOut) { 124 } else { [int]$process.ExitCode }
+                }
+                finally {
+                    if ($null -ne $process) { $process.Dispose() }
+                }
 
                 $retainedRoot = Join-Path $script:Goal6ReportRoot 'installer-edges/non-admin'
                 [void][IO.Directory]::CreateDirectory($retainedRoot)
@@ -383,11 +436,12 @@ finally {
                     if ([IO.File]::Exists($retained)) { Copy-Item -LiteralPath $retained -Destination (Join-Path $retainedRoot ([IO.Path]::GetFileName($retained))) -Force }
                 }
                 if (-not [IO.File]::Exists($resultPath)) {
-                    throw "Non-admin child did not write its result; exit=$($process.ExitCode); reports: $retainedRoot"
+                    $reason = if ($timedOut) { 'timed out' } else { 'did not write its result' }
+                    throw "Non-admin child $reason; exit=$processExitCode; reports: $retainedRoot"
                 }
                 $result = [IO.File]::ReadAllText($resultPath, $script:Goal6Utf8) | ConvertFrom-Json -ErrorAction Stop
-                if ($process.ExitCode -ne 0 -or -not [bool]$result.success) {
-                    throw ("Non-admin child failed; exit=$($process.ExitCode); code=$($result.code); message=$($result.message); reports: $retainedRoot")
+                if ($timedOut -or $processExitCode -ne 0 -or -not [bool]$result.success) {
+                    throw ("Non-admin child failed; timeout=$timedOut; exit=$processExitCode; code=$($result.code); message=$($result.message); reports: $retainedRoot")
                 }
                 if ([bool]$result.isAdministrator) { throw 'The temporary standard-user child unexpectedly had administrator membership.' }
                 if ([string]$result.userSid -cne $sidValue) { throw 'The non-admin child ran under the wrong SID.' }
@@ -411,6 +465,7 @@ finally {
                 if ([IO.Directory]::Exists($testRoot)) {
                     try { Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction Stop } catch { [void]$cleanupErrors.Add([string]$_) }
                 }
+                if ([IO.Directory]::Exists($testRoot) -or [IO.File]::Exists($testRoot)) { [void]$cleanupErrors.Add("Non-admin fixture root still exists: $testRoot") }
                 if ($cleanupErrors.Count -ne 0) { throw ('Non-admin fixture cleanup failed: ' + ($cleanupErrors.ToArray() -join '; ')) }
             }
         }
@@ -435,7 +490,7 @@ finally {
                 if ($Scenario -ceq 'wrong-architecture') {
                     [void](Build-PshGoal6InstallerPackage -Root $packageRoot -Edition Full -Architecture win-arm64)
                     $result = Invoke-PshGoal6PackageInstall -PackageRoot $packageRoot -InstallRoot $installRoot -Edition Full
-                    Assert-PshGoal6InstallFailure -Result $result -Label 'Wrong-architecture package'
+                    Assert-PshGoal6InstallFailure -Result $result -Label 'Wrong-architecture package' -ExpectedExitCode 5 -ExpectedErrorId 'PshLifecycle.IntegrityFailure' -ExpectedMessagePattern '\AAn ARM64 package cannot run on this architecture\.\z'
                     if ([IO.File]::Exists((Join-Path $installRoot 'current.json'))) { throw 'Wrong-architecture package changed the active version.' }
                     return
                 }
@@ -443,7 +498,7 @@ finally {
                     [void](Build-PshGoal6InstallerPackage -Root $packageRoot -Edition Full -Architecture win-x64)
                     Remove-Item -LiteralPath (Join-Path $packageRoot 'payload/Psh/Tools/win-x64/rg/rg.exe') -Force
                     $result = Invoke-PshGoal6PackageInstall -PackageRoot $packageRoot -InstallRoot $installRoot -Edition Full
-                    Assert-PshGoal6InstallFailure -Result $result -Label 'Full package missing rg'
+                    Assert-PshGoal6InstallFailure -Result $result -Label 'Full package missing rg' -ExpectedExitCode 5 -ExpectedErrorId 'PshPackageFileSet' -ExpectedMessagePattern '\APackage file count does not match its manifest \(actual=[0-9]+, expected=[0-9]+\)\.\z'
                     if ([IO.File]::Exists((Join-Path $installRoot 'current.json'))) { throw 'Full missing-tool package changed the active version.' }
                     return
                 }
@@ -451,7 +506,7 @@ finally {
                     [void](Build-PshGoal6InstallerPackage -Root $packageRoot -Edition Core -Architecture any)
                     [IO.File]::AppendAllText((Join-Path $packageRoot 'payload/Psh/Psh.psm1'), "# corrupted downloaded byte`n", $script:Goal6Utf8)
                     $result = Invoke-PshGoal6PackageInstall -PackageRoot $packageRoot -InstallRoot $installRoot -Edition Core
-                    Assert-PshGoal6InstallFailure -Result $result -Label 'Corrupted downloaded package'
+                    Assert-PshGoal6InstallFailure -Result $result -Label 'Corrupted downloaded package' -ExpectedExitCode 5 -ExpectedErrorId 'PshPackageFileMismatch' -ExpectedMessagePattern '\APackage file integrity does not match its manifest: payload/Psh/Psh\.psm1\z'
                     if ([IO.File]::Exists((Join-Path $installRoot 'current.json'))) { throw 'Corrupted package changed the active version.' }
                     return
                 }
@@ -462,7 +517,8 @@ finally {
                     Write-PshGoal6Text -Path $profilePath -Text $originalProfile
                     $before = [IO.File]::ReadAllBytes($profilePath)
                     $result = Invoke-PshGoal6PackageInstall -PackageRoot $packageRoot -InstallRoot $installRoot -Edition Core -ProfilePath @($profilePath)
-                    if ([bool]$result.Succeeded) { throw 'Malformed profile markers unexpectedly installed.' }
+                    $profileDiagnostic = '\APsh profile markers are unmatched, duplicated, or nested in: ' + [regex]::Escape([IO.Path]::GetFullPath($profilePath)) + ' \(start=1, end=0\)\.\z'
+                    Assert-PshGoal6InstallFailure -Result $result -Label 'Malformed profile markers' -ExpectedExitCode 3 -ExpectedErrorId 'PshLifecycle' -ExpectedMessagePattern $profileDiagnostic
                     $after = [IO.File]::ReadAllBytes($profilePath)
                     if ([Convert]::ToBase64String($before) -cne [Convert]::ToBase64String($after)) { throw 'Profile conflict changed the original profile bytes.' }
                     if ([IO.File]::Exists((Join-Path $installRoot 'current.json'))) { throw 'Profile conflict changed the active version.' }

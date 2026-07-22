@@ -52,12 +52,38 @@ Describe 'Goal 6 fixed Goal 1-5 acceptance matrix' {
         $script:Goal6Batch4GoldenRoot = Join-Path ([IO.Path]::GetFullPath([Environment]::GetEnvironmentVariable('PSH_GOAL6_GOLDEN_ROOT', 'Process'))) 'batch4'
         $script:Goal6Utf8 = New-Object Text.UTF8Encoding($false, $true)
         $script:Goal6EnginePath = [string](Get-Process -Id $PID -ErrorAction Stop).Path
+        $script:Goal6AcceptanceTimeoutMilliseconds = 900000
         if ([string]::IsNullOrWhiteSpace($script:Goal6EnginePath) -or -not [IO.File]::Exists($script:Goal6EnginePath)) {
             throw 'Unable to resolve the current PowerShell executable.'
         }
         foreach ($requiredGoldenRoot in @($script:Goal6Batch1GoldenRoot, $script:Goal6Batch2GoldenRoot, $script:Goal6Batch4GoldenRoot)) {
             if (-not [IO.Directory]::Exists($requiredGoldenRoot)) {
                 throw "Required GNU golden directory is missing: $requiredGoldenRoot"
+            }
+        }
+
+        function Invoke-PshGoal6AcceptanceProcessTreeTermination {
+            param([Parameter(Mandatory = $true)][Diagnostics.Process] $Process)
+
+            $taskKillPath = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { $null } else { Join-Path $env:SystemRoot 'System32/taskkill.exe' }
+            if (-not [string]::IsNullOrWhiteSpace($taskKillPath) -and [IO.File]::Exists($taskKillPath)) {
+                $oldPreference = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = 'Continue'
+                    & $taskKillPath /PID ([string]$Process.Id) /T /F 2>&1 | Microsoft.PowerShell.Core\Out-Null
+                }
+                catch { [void]$_.Exception.Message }
+                finally {
+                    $ErrorActionPreference = $oldPreference
+                    $global:LASTEXITCODE = 0
+                }
+            }
+            try {
+                if (-not $Process.HasExited) { $Process.Kill() }
+            }
+            catch { [void]$_.Exception.Message }
+            if (-not $Process.WaitForExit(5000)) {
+                throw "Timed-out acceptance child process $($Process.Id) could not be terminated."
             }
         }
 
@@ -72,35 +98,73 @@ Describe 'Goal 6 fixed Goal 1-5 acceptance matrix' {
             if (-not [IO.File]::Exists($testPath)) { throw "Required acceptance script is missing: $RelativePath" }
             $caseRoot = Join-Path $script:Goal6ReportRoot ('acceptance/' + $Name)
             $logPath = Join-Path $caseRoot 'output.log'
+            $stdoutPath = Join-Path $caseRoot 'stdout.log'
+            $stderrPath = Join-Path $caseRoot 'stderr.log'
+            $childConfigPath = Join-Path $caseRoot 'child-config.json'
             [void][IO.Directory]::CreateDirectory($caseRoot)
             $oldGoal5ReportRoot = [Environment]::GetEnvironmentVariable('PSH_GOAL5_REPORT_ROOT', 'Process')
             $oldGoal5PreSignRoot = [Environment]::GetEnvironmentVariable('PSH_GOAL5_PRE_SIGN_ROOT', 'Process')
+            $oldChildConfig = [Environment]::GetEnvironmentVariable('PSH_GOAL6_CHILD_CONFIG', 'Process')
             try {
                 [Environment]::SetEnvironmentVariable('PSH_GOAL5_REPORT_ROOT', (Join-Path $caseRoot 'goal5-reports'), 'Process')
                 [Environment]::SetEnvironmentVariable('PSH_GOAL5_PRE_SIGN_ROOT', (Join-Path $caseRoot 'goal5-reports/pre-sign-build'), 'Process')
-                $lines = New-Object System.Collections.Generic.List[string]
-                $oldPreference = $ErrorActionPreference
-                try {
-                    $ErrorActionPreference = 'Continue'
-                    & $script:Goal6EnginePath -NoLogo -NoProfile -NonInteractive -File $testPath @Arguments 2>&1 | ForEach-Object {
-                        [void]$lines.Add([string]$_)
-                    }
-                    $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+                $childConfig = [pscustomobject][ordered]@{
+                    testPath = $testPath
+                    arguments = @($Arguments)
                 }
-                finally { $ErrorActionPreference = $oldPreference }
-                $global:LASTEXITCODE = 0
-                $logText = ($lines.ToArray() -join "`n") + "`n"
+                [IO.File]::WriteAllText($childConfigPath, (($childConfig | ConvertTo-Json -Depth 4) + "`n"), $script:Goal6Utf8)
+                $childCommand = @'
+$ErrorActionPreference = 'Stop'
+$utf8 = New-Object Text.UTF8Encoding($false, $true)
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+$configPath = [Environment]::GetEnvironmentVariable('PSH_GOAL6_CHILD_CONFIG', 'Process')
+if ([string]::IsNullOrWhiteSpace($configPath)) { throw 'PSH_GOAL6_CHILD_CONFIG is required.' }
+$config = [IO.File]::ReadAllText($configPath, $utf8) | ConvertFrom-Json -ErrorAction Stop
+[string[]]$childArguments = @($config.arguments | ForEach-Object { [string]$_ })
+& ([string]$config.testPath) @childArguments
+exit 0
+'@
+                $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
+                $process = $null
+                $timedOut = $false
+                $exitCode = $null
+                try {
+                    [Environment]::SetEnvironmentVariable('PSH_GOAL6_CHILD_CONFIG', $childConfigPath, 'Process')
+                    $process = Start-Process -FilePath $script:Goal6EnginePath -ArgumentList @(
+                        '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand
+                    ) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru -ErrorAction Stop
+                    if (-not $process.WaitForExit($script:Goal6AcceptanceTimeoutMilliseconds)) {
+                        $timedOut = $true
+                        Invoke-PshGoal6AcceptanceProcessTreeTermination -Process $process
+                    }
+                    [void]$process.WaitForExit()
+                    $exitCode = if ($timedOut) { 124 } else { [int]$process.ExitCode }
+                }
+                finally {
+                    [Environment]::SetEnvironmentVariable('PSH_GOAL6_CHILD_CONFIG', $oldChildConfig, 'Process')
+                    if ($null -ne $process) { $process.Dispose() }
+                }
+                $stdoutText = if ([IO.File]::Exists($stdoutPath)) { [IO.File]::ReadAllText($stdoutPath, $script:Goal6Utf8) } else { '' }
+                $stderrText = if ([IO.File]::Exists($stderrPath)) { [IO.File]::ReadAllText($stderrPath, $script:Goal6Utf8) } else { '' }
+                $logText = "[stdout]`n$stdoutText`n[stderr]`n$stderrText"
+                if (-not $logText.EndsWith("`n", [StringComparison]::Ordinal)) { $logText += "`n" }
                 [IO.File]::WriteAllText($logPath, $logText, $script:Goal6Utf8)
+                $lines = @($logText.Replace("`r`n", "`n").Replace("`r", "`n").Split("`n"))
                 return [pscustomobject][ordered]@{
                     ExitCode = $exitCode
-                    DeferredOrSkipped = $logText -match '(?i)\b(?:deferred|skipped)\b'
+                    TimedOut = $timedOut
+                    DeferredOrSkipped = $logText -match '(?im)^\s*(?:skip(?:ped)?|defer(?:red)?)(?:\s*:|\b)'
                     LogPath = $logPath
-                    Tail = @($lines.ToArray() | Select-Object -Last 30)
+                    StdoutPath = $stdoutPath
+                    StderrPath = $stderrPath
+                    Tail = @($lines | Select-Object -Last 30)
                 }
             }
             finally {
                 [Environment]::SetEnvironmentVariable('PSH_GOAL5_REPORT_ROOT', $oldGoal5ReportRoot, 'Process')
                 [Environment]::SetEnvironmentVariable('PSH_GOAL5_PRE_SIGN_ROOT', $oldGoal5PreSignRoot, 'Process')
+                [Environment]::SetEnvironmentVariable('PSH_GOAL6_CHILD_CONFIG', $oldChildConfig, 'Process')
             }
         }
     }
@@ -109,6 +173,9 @@ Describe 'Goal 6 fixed Goal 1-5 acceptance matrix' {
         param($Name, $RelativePath, $Arguments)
 
         $result = Invoke-PshGoal6AcceptanceScript -Name $Name -RelativePath $RelativePath -Arguments $Arguments
+        if ([bool]$result.TimedOut) {
+            throw ('{0} timed out; log: {1}; stdout: {2}; stderr: {3}; tail: {4}' -f $RelativePath, $result.LogPath, $result.StdoutPath, $result.StderrPath, ($result.Tail -join ' | '))
+        }
         if ([int]$result.ExitCode -ne 0) {
             throw ('{0} exited {1}; log: {2}; tail: {3}' -f $RelativePath, $result.ExitCode, $result.LogPath, ($result.Tail -join ' | '))
         }
