@@ -130,6 +130,7 @@ Assert-PshGoal5WorkflowMatch $workflowText '(?m)^  push:\s*$' 'push trigger' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText '(?m)^    branches:\s*$' 'push branch allowlist' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText "(?m)^      - main\s*$" 'main push branch' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText "(?m)^      - 'goal5/\*\*'\s*$" 'goal5 branch family' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText "(?m)^      - 'goal6/\*\*'\s*$" 'goal6 branch family' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText '(?m)^  pull_request:\s*$' 'pull_request trigger' 1 1
 
 $permissions = [regex]::Match($workflowText, '(?ms)^permissions:\s*\n(?<body>(?:  [^\n]*\n)+)')
@@ -248,11 +249,25 @@ Assert-PshGoal5WorkflowMatch $workflowText "Extension -ieq '\.zip'" 'pre-sign ZI
 Assert-PshGoal5WorkflowMatch $workflowText 'Join-Path \$env:PSH_GOAL5_PRE_SIGN_ROOT \x27release-assets\x27' 'release-assets absence check' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText 'package-build-report\.json' 'package build report retention' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText 'release-artifacts-report\.json' 'release artifact report retention' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText 'release-artifacts-final-report\.json' 'final release artifact report retention' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText 'packageBuildReport\.preSignRoot' 'package report pre-sign root validation' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText "packageBuildReport\.indexPhase -cne 'catalog-deferred'" 'package report index phase validation' 1 1
-Assert-PshGoal5WorkflowMatch $workflowText "packageBuildReport\.artifactPhase -cne 'static-verified-signatures-deferred'" 'package report artifact phase validation' 1 1
-Assert-PshGoal5WorkflowMatch $workflowText "releaseArtifactsReport\.phase -cne 'static-verified-signatures-deferred'" 'release artifact phase validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText "packageBuildReport\.artifactPhase -cne 'static-verified-catalog-membership-deferred'" 'package report artifact phase validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText "packageBuildReport\.finalIndexPhase -cne 'finalized-with-verified-catalog-membership'" 'package report final index phase validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText "packageBuildReport\.finalArtifactPhase -cne 'release-catalog-membership-verified'" 'package report final artifact phase validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText '-not \[bool\]\$packageBuildReport\.catalogMembershipVerified' 'package report catalog membership validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText "releaseArtifactsReport\.phase -cne 'static-verified-catalog-membership-deferred'" 'release artifact phase validation' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText 'releaseArtifactsReport\.code -ne 4' 'release artifact code validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText 'releaseArtifactsReport\.assetCount -ne 12' 'build-stage release asset count validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText '\[bool\]\$releaseArtifactsReport\.catalogMembershipVerified' 'build-stage catalog membership deferral validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText "finalReleaseArtifactsReport\.phase -cne 'release-catalog-membership-verified'" 'final release artifact phase validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText 'finalReleaseArtifactsReport\.code -ne 0' 'final release artifact code validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText 'finalReleaseArtifactsReport\.assetCount -ne 13' 'exact final release asset count validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText '-not \[bool\]\$finalReleaseArtifactsReport\.catalogMembershipVerified' 'final catalog membership validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText '\$expectedReleaseAssetNames = @\(' 'exact release asset name contract' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText '\$releaseAssetEntries\.Count -ne 13' 'on-disk release asset count validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText 'Name -ceq \$expectedAssetName' 'on-disk exact release asset name validation' 1 1
+Assert-PshGoal5WorkflowMatch $workflowText "phase = 'pre-sign-and-catalog-membership-validated'" 'workflow validation phase' 1 1
 Assert-PshGoal5WorkflowMatch $workflowText 'workflow-validation-report\.json' 'workflow validation report' 1 1
 
 Assert-PshGoal5WorkflowMatch $workflowText 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' 'pinned checkout action' 1 1
