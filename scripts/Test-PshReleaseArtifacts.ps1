@@ -10,7 +10,6 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('\A[0-9a-f]{40}\z')][string] $SourceCommit,
     [string] $RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
     [ValidateSet('BuildStage', 'Release')][string] $Mode = 'BuildStage',
-    [AllowNull()][string] $SignToolPath,
     [AllowNull()][string] $ReportPath
 )
 
@@ -405,69 +404,135 @@ function Get-PshReleasePackageVerification {
     }
 }
 
-function Resolve-PshReleaseSignTool {
-    param([AllowNull()][string] $RequestedPath)
+function Get-PshReleaseArtifactAuthenticodeStatus {
+    param([Parameter(Mandatory = $true)][string] $CatalogPath)
 
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return $null }
-    if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
-        $resolved = Resolve-PshReleaseArtifactFile -Path $RequestedPath -Description 'signtool.exe'
-        if ([IO.Path]::GetFileName($resolved) -ine 'signtool.exe') {
-            Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId 'PshReleaseSignToolPath' -Message 'SignToolPath must name signtool.exe.'
-        }
-        return $resolved
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return 'Unavailable' }
+    $signatureCommand = Get-Command -Name Get-AuthenticodeSignature -CommandType Cmdlet -ErrorAction SilentlyContinue
+    if ($null -eq $signatureCommand) { return 'Unavailable' }
+    try {
+        $signature = & $signatureCommand -FilePath $CatalogPath -ErrorAction Stop
+        if ($null -eq $signature -or $null -eq $signature.PSObject.Properties['Status']) { return 'Unknown' }
+        return [string]$signature.Status
     }
-    $command = Get-Command signtool.exe -CommandType Application -ErrorAction SilentlyContinue
-    if ($null -eq $command) { return $null }
-    return [string]$command.Source
+    catch { return 'InspectionFailed' }
 }
 
-function Invoke-PshReleaseCatalogMemberVerification {
+function Invoke-PshReleaseCatalogContentCleanup {
     param(
-        [Parameter(Mandatory = $true)][string] $SignTool,
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string[]] $ExpectedNames
+    )
+
+    $entry = Get-PshLifecyclePathEntry -Path $Path -Description 'release catalog verification root'
+    if (-not [bool]$entry.Exists) { return }
+    if (-not [bool]$entry.IsDirectory -or [bool]$entry.IsReparsePoint) {
+        Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId 'PshReleaseCatalogCleanupUnsafe' -Message "Catalog verification root changed to an unsafe entry: $Path"
+    }
+    try { $children = @(Get-ChildItem -LiteralPath $Path -Force) }
+    catch { Throw-PshReleaseArtifactError -ExitCode 3 -ErrorId 'PshReleaseCatalogCleanupInspect' -Message "Unable to inspect catalog verification root: $Path" -InnerException $_.Exception }
+    foreach ($child in $children) {
+        if ($child.PSIsContainer -or (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or [string]$child.Name -cnotin $ExpectedNames) {
+            Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId 'PshReleaseCatalogCleanupUnsafe' -Message "Catalog verification root contains an unexpected entry: $($child.FullName)"
+        }
+    }
+    try {
+        foreach ($name in $ExpectedNames) {
+            $childPath = Join-Path $Path $name
+            if ([IO.File]::Exists($childPath)) { [IO.File]::Delete($childPath) }
+        }
+        [IO.Directory]::Delete($Path, $false)
+    }
+    catch { Throw-PshReleaseArtifactError -ExitCode 3 -ErrorId 'PshReleaseCatalogCleanup' -Message "Unable to remove catalog verification root: $Path" -InnerException $_.Exception }
+}
+
+function Invoke-PshReleaseCatalogMembershipVerification {
+    param(
+        [Parameter(Mandatory = $true)][object] $CatalogCommand,
         [Parameter(Mandatory = $true)][string] $CatalogPath,
-        [Parameter(Mandatory = $true)][string] $MemberPath,
+        [Parameter(Mandatory = $true)][object[]] $Members,
+        [Parameter(Mandatory = $true)][string] $ErrorId,
         [Parameter(Mandatory = $true)][string] $Description
     )
 
-    $output = @(& $SignTool verify /pa /c $CatalogPath $MemberPath 2>&1)
-    $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
-    if ($exitCode -ne 0) {
-        $diagnostic = (($output | ForEach-Object { [string]$_ }) -join "`n")
-        Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId 'PshReleaseCatalogVerification' -Message "$Description failed signtool catalog verification with code ${exitCode}: $diagnostic"
+    $CatalogPath = Resolve-PshReleaseArtifactFile -Path $CatalogPath -Description "$Description catalog"
+    $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('psh-release-membership-' + [Guid]::NewGuid().ToString('N'))
+    $temporaryRoot = Assert-PshLifecycleNoReparseAncestors -Path $temporaryRoot -Description "$Description verification root"
+    if ([IO.File]::Exists($temporaryRoot) -or [IO.Directory]::Exists($temporaryRoot)) {
+        Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId $ErrorId -Message "$Description verification root already exists: $temporaryRoot"
     }
+    $expectedNames = New-Object System.Collections.Generic.List[string]
+    try {
+        [void][IO.Directory]::CreateDirectory($temporaryRoot)
+        $rootEntry = Get-PshLifecyclePathEntry -Path $temporaryRoot -Description "$Description verification root"
+        if (-not [bool]$rootEntry.IsDirectory -or [bool]$rootEntry.IsReparsePoint) {
+            Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId $ErrorId -Message "$Description verification root is unsafe: $temporaryRoot"
+        }
+        foreach ($member in $Members) {
+            $name = [string]$member.Name
+            if ([string]::IsNullOrWhiteSpace($name) -or [IO.Path]::GetFileName($name) -cne $name -or $expectedNames.Contains($name)) {
+                Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId $ErrorId -Message "$Description has an invalid or duplicate member name: $name"
+            }
+            $expectedNames.Add($name)
+            $destination = Join-Path $temporaryRoot $name
+            if ($null -ne $member.PSObject.Properties['SourcePath']) {
+                $source = Resolve-PshReleaseArtifactFile -Path ([string]$member.SourcePath) -Description "$Description member '$name'"
+                [IO.File]::Copy($source, $destination, $false)
+            }
+            elseif ($null -ne $member.PSObject.Properties['Bytes']) {
+                [IO.File]::WriteAllBytes($destination, [byte[]]$member.Bytes)
+            }
+            else { Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId $ErrorId -Message "$Description member '$name' has no source bytes." }
+        }
+        try { $validationResults = @(& $CatalogCommand -CatalogFilePath $CatalogPath -Path $temporaryRoot -Detailed -ErrorAction Stop) }
+        catch { Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId $ErrorId -Message "$Description membership verification failed." -InnerException $_.Exception }
+        $statusResults = @($validationResults | Where-Object { $null -ne $_ -and $null -ne $_.PSObject.Properties['Status'] })
+        if ($statusResults.Count -eq 1) { $validation = $statusResults[0] }
+        elseif ($validationResults.Count -eq 1) { $validation = $validationResults[0] }
+        else {
+            Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId $ErrorId -Message "$Description membership verification returned an ambiguous result set (raw=$($validationResults.Count), status=$($statusResults.Count))."
+        }
+        $status = if ($null -ne $validation -and $null -ne $validation.PSObject.Properties['Status']) { [string]$validation.Status } else { [string]$validation }
+        if ($status -cne 'ValidationPassed') {
+            Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId $ErrorId -Message "$Description does not cover its exact required member set: $status"
+        }
+    }
+    finally { Invoke-PshReleaseCatalogContentCleanup -Path $temporaryRoot -ExpectedNames $expectedNames.ToArray() }
+    return Get-PshReleaseArtifactAuthenticodeStatus -CatalogPath $CatalogPath
 }
 
-function Test-PshReleasePackageCatalogs {
+function Test-PshReleasePackageCatalogSet {
     param(
-        [Parameter(Mandatory = $true)][string] $SignTool,
+        [Parameter(Mandatory = $true)][object] $CatalogCommand,
         [Parameter(Mandatory = $true)][object[]] $Packages
     )
 
-    $root = Join-Path ([IO.Path]::GetTempPath()) ('psh-package-catalogs-' + [Guid]::NewGuid().ToString('N'))
-    [void][IO.Directory]::CreateDirectory($root)
-    $ownedDirectories = New-Object System.Collections.Generic.List[string]
-    try {
-        foreach ($package in $Packages) {
-            $directory = Join-Path $root ([IO.Path]::GetFileNameWithoutExtension([string]$package.Name))
-            [void][IO.Directory]::CreateDirectory($directory)
-            $ownedDirectories.Add($directory)
-            $manifestPath = Join-Path $directory 'package.manifest.json'
-            $catalogPath = Join-Path $directory 'package.manifest.cat'
-            [IO.File]::WriteAllBytes($manifestPath, [byte[]]$package.ManifestBytes)
+    $statuses = New-Object System.Collections.Generic.List[object]
+    foreach ($package in $Packages) {
+        $catalogPath = Join-Path ([IO.Path]::GetTempPath()) ('psh-package-catalog-' + [Guid]::NewGuid().ToString('N') + '.cat')
+        $catalogPath = Assert-PshLifecycleNoReparseAncestors -Path $catalogPath -Description 'temporary package catalog'
+        if ([IO.File]::Exists($catalogPath) -or [IO.Directory]::Exists($catalogPath)) {
+            Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId 'PshReleasePackageCatalogPath' -Message "Temporary package catalog path already exists: $catalogPath"
+        }
+        try {
             [IO.File]::WriteAllBytes($catalogPath, [byte[]]$package.CatalogBytes)
-            Invoke-PshReleaseCatalogMemberVerification -SignTool $SignTool -CatalogPath $catalogPath -MemberPath $manifestPath -Description "package catalog '$($package.Name)'"
+            $status = Invoke-PshReleaseCatalogMembershipVerification -CatalogCommand $CatalogCommand -CatalogPath $catalogPath -Members @(
+                [pscustomobject]@{ Name = 'package.manifest.json'; Bytes = [byte[]]$package.ManifestBytes }
+            ) -ErrorId 'PshReleasePackageCatalogMembership' -Description "package catalog '$($package.Name)'"
+            $statuses.Add([pscustomobject][ordered]@{ package = [string]$package.Name; status = [string]$status })
         }
-    }
-    finally {
-        foreach ($directory in @($ownedDirectories.ToArray())) {
-            foreach ($name in @('package.manifest.json', 'package.manifest.cat')) {
-                $path = Join-Path $directory $name
-                if ([IO.File]::Exists($path)) { try { [IO.File]::Delete($path) } catch { } }
+        finally {
+            $entry = Get-PshLifecyclePathEntry -Path $catalogPath -Description 'temporary package catalog'
+            if ([bool]$entry.Exists) {
+                if (-not [bool]$entry.IsRegularFile -or [bool]$entry.IsReparsePoint) {
+                    Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId 'PshReleasePackageCatalogCleanupUnsafe' -Message "Temporary package catalog changed to an unsafe entry: $catalogPath"
+                }
+                try { [IO.File]::Delete($catalogPath) }
+                catch { Throw-PshReleaseArtifactError -ExitCode 3 -ErrorId 'PshReleasePackageCatalogCleanup' -Message "Unable to remove temporary package catalog: $catalogPath" -InnerException $_.Exception }
             }
-            if ([IO.Directory]::Exists($directory)) { try { [IO.Directory]::Delete($directory, $false) } catch { } }
         }
-        if ([IO.Directory]::Exists($root)) { try { [IO.Directory]::Delete($root, $false) } catch { } }
     }
+    return $statuses.ToArray()
 }
 
 function Write-PshReleaseArtifactReport {
@@ -488,6 +553,16 @@ $ReleaseAssetsRoot = Resolve-PshReleaseArtifactDirectory -Path $ReleaseAssetsRoo
 $Version = Assert-PshLifecycleSemVer -Value $Version -Description 'release version'
 if ($Version -ceq '0.0.1-test') {
     Throw-PshReleaseArtifactError -ExitCode 5 -ErrorId 'PshReleaseTestVersion' -Message 'Synthetic test version must never be verified as a public release.'
+}
+$fileCatalogCommand = $null
+if ($Mode -ceq 'Release') {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        Throw-PshReleaseArtifactError -ExitCode 4 -ErrorId 'PshReleaseCatalogVerificationUnavailable' -Message 'Release mode requires Windows Test-FileCatalog membership verification.'
+    }
+    $fileCatalogCommand = Get-Command -Name Test-FileCatalog -CommandType Cmdlet -ErrorAction SilentlyContinue
+    if ($null -eq $fileCatalogCommand) {
+        Throw-PshReleaseArtifactError -ExitCode 4 -ErrorId 'PshReleaseCatalogVerificationUnavailable' -Message 'Test-FileCatalog is unavailable on this Windows runtime.'
+    }
 }
 
 $contentSpecs = @(
@@ -565,15 +640,18 @@ for ($i = 0; $i -lt $contentSpecs.Count; $i++) {
     }
 }
 
-$phase = 'static-verified-signatures-deferred'
+$phase = 'static-verified-catalog-membership-deferred'
 $code = 4
-$signTool = Resolve-PshReleaseSignTool -RequestedPath $SignToolPath
-if ($Mode -ceq 'Release' -and $null -ne $signTool) {
+$releaseAuthenticodeStatus = $null
+$packageAuthenticodeStatuses = @()
+if ($Mode -ceq 'Release') {
     $catalogPath = Resolve-PshReleaseArtifactFile -Path (Join-Path $ReleaseAssetsRoot $catalogName) -Description 'release catalog'
-    Invoke-PshReleaseCatalogMemberVerification -SignTool $signTool -CatalogPath $catalogPath -MemberPath $indexPath -Description 'release index catalog membership'
-    Invoke-PshReleaseCatalogMemberVerification -SignTool $signTool -CatalogPath $catalogPath -MemberPath $checksumPath -Description 'SHA256SUMS catalog membership'
-    Test-PshReleasePackageCatalogs -SignTool $signTool -Packages $packageVerifications.ToArray()
-    $phase = 'release-catalogs-verified'
+    $releaseAuthenticodeStatus = Invoke-PshReleaseCatalogMembershipVerification -CatalogCommand $fileCatalogCommand -CatalogPath $catalogPath -Members @(
+        [pscustomobject]@{ Name = $indexName; SourcePath = $indexPath },
+        [pscustomobject]@{ Name = 'SHA256SUMS'; SourcePath = $checksumPath }
+    ) -ErrorId 'PshReleaseCatalogMembership' -Description 'release catalog'
+    $packageAuthenticodeStatuses = @(Test-PshReleasePackageCatalogSet -CatalogCommand $fileCatalogCommand -Packages $packageVerifications.ToArray())
+    $phase = 'release-catalog-membership-verified'
     $code = 0
 }
 
@@ -589,7 +667,14 @@ $result = [pscustomobject][ordered]@{
     packageCount = $packageVerifications.Count
     indexSha256 = [string](Get-PshReleaseArtifactFileState -Path $indexPath).Sha256
     checksumsSha256 = [string](Get-PshReleaseArtifactFileState -Path $checksumPath).Sha256
-    signaturesVerified = $code -eq 0
+    catalogMembershipVerified = ($Mode -ceq 'Release' -and $code -eq 0)
+    authenticodeStatus = if ($Mode -cne 'Release') { $null } else {
+        [pscustomobject][ordered]@{
+            informationalOnly = $true
+            releaseCatalog = [string]$releaseAuthenticodeStatus
+            packageCatalogs = $packageAuthenticodeStatuses
+        }
+    }
 }
 if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
     Write-PshReleaseArtifactReport -Path $ReportPath -Value $result

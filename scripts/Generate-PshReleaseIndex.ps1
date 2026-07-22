@@ -299,38 +299,78 @@ function Confirm-PshReleaseCatalogForFinalize {
     )
 
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-        Throw-PshReleaseIndexBuildError -ExitCode 4 -ErrorId 'PshReleaseCatalogVerificationUnavailable' -Message 'Final release catalog verification requires Windows Authenticode and file-catalog APIs.'
+        Throw-PshReleaseIndexBuildError -ExitCode 4 -ErrorId 'PshReleaseCatalogVerificationUnavailable' -Message 'Final release catalog verification requires Windows Test-FileCatalog membership verification.'
     }
-    $signatureCommand = Get-Command Get-AuthenticodeSignature -CommandType Cmdlet -ErrorAction SilentlyContinue
     $catalogCommand = Get-Command Test-FileCatalog -CommandType Cmdlet -ErrorAction SilentlyContinue
-    if ($null -eq $signatureCommand -or $null -eq $catalogCommand) {
-        Throw-PshReleaseIndexBuildError -ExitCode 4 -ErrorId 'PshReleaseCatalogVerificationUnavailable' -Message 'Required Windows catalog verification commands are unavailable.'
+    if ($null -eq $catalogCommand) {
+        Throw-PshReleaseIndexBuildError -ExitCode 4 -ErrorId 'PshReleaseCatalogVerificationUnavailable' -Message 'Test-FileCatalog is unavailable on this Windows runtime.'
     }
-    $CatalogPath = Resolve-PshReleaseIndexFile -Path $CatalogPath -Description 'externally signed release catalog'
+    $CatalogPath = Resolve-PshReleaseIndexFile -Path $CatalogPath -Description 'release catalog'
     $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('psh-release-catalog-' + [Guid]::NewGuid().ToString('N'))
-    [void][IO.Directory]::CreateDirectory($temporaryRoot)
+    $temporaryRoot = Assert-PshLifecycleNoReparseAncestors -Path $temporaryRoot -Description 'release catalog verification root'
+    if ([IO.File]::Exists($temporaryRoot) -or [IO.Directory]::Exists($temporaryRoot)) {
+        Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseCatalogVerificationRoot' -Message "Release catalog verification root already exists: $temporaryRoot"
+    }
     $indexCopy = Join-Path $temporaryRoot ([IO.Path]::GetFileName($IndexPath))
     $checksumCopy = Join-Path $temporaryRoot 'SHA256SUMS'
     try {
+        [void][IO.Directory]::CreateDirectory($temporaryRoot)
+        $rootEntry = Get-PshLifecyclePathEntry -Path $temporaryRoot -Description 'release catalog verification root'
+        if (-not [bool]$rootEntry.IsDirectory -or [bool]$rootEntry.IsReparsePoint) {
+            Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseCatalogVerificationRoot' -Message "Release catalog verification root is unsafe: $temporaryRoot"
+        }
         [IO.File]::Copy($IndexPath, $indexCopy, $false)
         [IO.File]::Copy($ChecksumPath, $checksumCopy, $false)
-        $signature = & $signatureCommand -FilePath $CatalogPath -ErrorAction Stop
-        if ([string]$signature.Status -cne 'Valid' -or $null -eq $signature.SignerCertificate) {
-            Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseCatalogSignature' -Message "Release catalog Authenticode signature is invalid: $($signature.Status)"
+        try { $validationResults = @(& $catalogCommand -CatalogFilePath $CatalogPath -Path $temporaryRoot -Detailed -ErrorAction Stop) }
+        catch { Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseCatalogMembership' -Message 'Release catalog membership verification failed.' -InnerException $_.Exception }
+        $statusResults = @($validationResults | Where-Object { $null -ne $_ -and $null -ne $_.PSObject.Properties['Status'] })
+        if ($statusResults.Count -eq 1) { $validation = $statusResults[0] }
+        elseif ($validationResults.Count -eq 1) { $validation = $validationResults[0] }
+        else {
+            Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseCatalogMembership' -Message "Release catalog membership verification returned an ambiguous result set (raw=$($validationResults.Count), status=$($statusResults.Count))."
         }
-        $validation = & $catalogCommand -CatalogFilePath $CatalogPath -Path $temporaryRoot -Detailed -ErrorAction Stop
-        $status = if ($null -ne $validation.PSObject.Properties['Status']) { [string]$validation.Status } else { [string]$validation }
+        $status = if ($null -ne $validation -and $null -ne $validation.PSObject.Properties['Status']) { [string]$validation.Status } else { [string]$validation }
         if ($status -cne 'ValidationPassed') {
             Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseCatalogMembership' -Message "Release catalog does not cover the exact index/checksum set: $status"
         }
     }
     finally {
-        foreach ($path in @($indexCopy, $checksumCopy)) {
-            if ([IO.File]::Exists($path)) { try { [IO.File]::Delete($path) } catch { } }
+        $rootEntry = Get-PshLifecyclePathEntry -Path $temporaryRoot -Description 'release catalog verification root'
+        if ([bool]$rootEntry.Exists) {
+            if (-not [bool]$rootEntry.IsDirectory -or [bool]$rootEntry.IsReparsePoint) {
+                Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseCatalogCleanupUnsafe' -Message "Release catalog verification root changed to an unsafe entry: $temporaryRoot"
+            }
+            try { $children = @(Get-ChildItem -LiteralPath $temporaryRoot -Force) }
+            catch { Throw-PshReleaseIndexBuildError -ExitCode 3 -ErrorId 'PshReleaseCatalogCleanupInspect' -Message "Unable to inspect release catalog verification root: $temporaryRoot" -InnerException $_.Exception }
+            foreach ($child in $children) {
+                if ($child.PSIsContainer -or (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or [string]$child.Name -cnotin @([IO.Path]::GetFileName($IndexPath), 'SHA256SUMS')) {
+                    Throw-PshReleaseIndexBuildError -ExitCode 5 -ErrorId 'PshReleaseCatalogCleanupUnsafe' -Message "Release catalog verification root contains an unexpected entry: $($child.FullName)"
+                }
+            }
+            try {
+                foreach ($path in @($indexCopy, $checksumCopy)) {
+                    if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) }
+                }
+                [IO.Directory]::Delete($temporaryRoot, $false)
+            }
+            catch { Throw-PshReleaseIndexBuildError -ExitCode 3 -ErrorId 'PshReleaseCatalogCleanup' -Message "Unable to remove release catalog verification root: $temporaryRoot" -InnerException $_.Exception }
         }
-        if ([IO.Directory]::Exists($temporaryRoot)) { try { [IO.Directory]::Delete($temporaryRoot, $false) } catch { } }
     }
     return $CatalogPath
+}
+
+function Get-PshReleaseCatalogAuthenticodeStatus {
+    param([Parameter(Mandatory = $true)][string] $CatalogPath)
+
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return 'Unavailable' }
+    $signatureCommand = Get-Command Get-AuthenticodeSignature -CommandType Cmdlet -ErrorAction SilentlyContinue
+    if ($null -eq $signatureCommand) { return 'Unavailable' }
+    try {
+        $signature = & $signatureCommand -FilePath $CatalogPath -ErrorAction Stop
+        if ($null -eq $signature -or $null -eq $signature.PSObject.Properties['Status']) { return 'Unknown' }
+        return [string]$signature.Status
+    }
+    catch { return 'InspectionFailed' }
 }
 
 $RepositoryRoot = Resolve-PshReleaseIndexDirectory -Path $RepositoryRoot -Description 'repository root'
@@ -446,11 +486,11 @@ $catalogPath = $null
 $unsignedCatalogPath = $null
 if ($Finalize) {
     if ([string]::IsNullOrWhiteSpace($ReleaseCatalogPath)) {
-        Throw-PshReleaseIndexBuildError -ExitCode 4 -ErrorId 'PshReleaseCatalogRequired' -Message 'Finalize requires an externally signed release catalog.'
+        Throw-PshReleaseIndexBuildError -ExitCode 4 -ErrorId 'PshReleaseCatalogRequired' -Message 'Finalize requires a release catalog covering the release index and SHA256SUMS.'
     }
     $verifiedCatalog = Confirm-PshReleaseCatalogForFinalize -CatalogPath $ReleaseCatalogPath -IndexPath $indexPath -ChecksumPath $checksumPath
-    Copy-PshReleaseIndexFile -Source $verifiedCatalog -Destination $catalogDestination -Description 'verified release catalog'
-    $phase = 'finalized-with-verified-catalog'
+    Copy-PshReleaseIndexFile -Source $verifiedCatalog -Destination $catalogDestination -Description 'membership-verified release catalog'
+    $phase = 'finalized-with-verified-catalog-membership'
     $code = 0
     $catalogPath = $catalogDestination
 }
@@ -474,6 +514,8 @@ $result = [pscustomobject][ordered]@{
     index = [pscustomobject][ordered]@{ name = $indexName; length = $indexState.Length; sha256 = $indexState.Sha256 }
     checksums = [pscustomobject][ordered]@{ name = 'SHA256SUMS'; length = $checksumState.Length; sha256 = $checksumState.Sha256 }
     catalog = if ($null -eq $catalogPath) { $null } else { [pscustomobject][ordered]@{ name = $catalogName; sha256 = [string](Get-PshReleaseIndexFileState -Path $catalogPath).Sha256 } }
+    catalogMembershipVerified = [bool]$Finalize
+    authenticodeStatus = if ($null -eq $catalogPath) { $null } else { Get-PshReleaseCatalogAuthenticodeStatus -CatalogPath $catalogPath }
     unsignedCatalogPath = $unsignedCatalogPath
     packages = $packageRecords.ToArray()
 }

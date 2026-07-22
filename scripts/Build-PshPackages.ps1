@@ -574,6 +574,72 @@ function New-PshBuildZip {
     finally { $stream.Dispose() }
 }
 
+function Invoke-PshBuildCatalogVerificationCleanup {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $entry = Get-PshLifecyclePathEntry -Path $Path -Description 'package catalog verification root'
+    if (-not [bool]$entry.Exists) { return }
+    if (-not [bool]$entry.IsDirectory -or [bool]$entry.IsReparsePoint) {
+        Throw-PshPackageBuildError -ExitCode 5 -ErrorId 'PshPackageBuildCatalogCleanupUnsafe' -Message "Package catalog verification root changed to an unsafe entry: $Path"
+    }
+    try { $children = @(Get-ChildItem -LiteralPath $Path -Force) }
+    catch { Throw-PshPackageBuildError -ExitCode 3 -ErrorId 'PshPackageBuildCatalogCleanupInspect' -Message "Unable to inspect package catalog verification root: $Path" -InnerException $_.Exception }
+    foreach ($child in $children) {
+        if ($child.PSIsContainer -or (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or [string]$child.Name -cne 'package.manifest.json') {
+            Throw-PshPackageBuildError -ExitCode 5 -ErrorId 'PshPackageBuildCatalogCleanupUnsafe' -Message "Package catalog verification root contains an unexpected entry: $($child.FullName)"
+        }
+    }
+    try {
+        $manifestCopy = Join-Path $Path 'package.manifest.json'
+        if ([IO.File]::Exists($manifestCopy)) { [IO.File]::Delete($manifestCopy) }
+        [IO.Directory]::Delete($Path, $false)
+    }
+    catch { Throw-PshPackageBuildError -ExitCode 3 -ErrorId 'PshPackageBuildCatalogCleanup' -Message "Unable to remove package catalog verification root: $Path" -InnerException $_.Exception }
+}
+
+function Confirm-PshBuildPackageCatalogMembership {
+    param(
+        [Parameter(Mandatory = $true)][object] $CatalogCommand,
+        [Parameter(Mandatory = $true)][string] $CatalogPath,
+        [Parameter(Mandatory = $true)][string] $ManifestPath,
+        [Parameter(Mandatory = $true)][string] $PackageName
+    )
+
+    $CatalogPath = Resolve-PshBuildInputFile -Path $CatalogPath -Description "package catalog '$PackageName'"
+    if (([IO.FileInfo]$CatalogPath).Length -le 0) {
+        Throw-PshPackageBuildError -ExitCode 5 -ErrorId 'PshPackageBuildCatalogEmpty' -Message "Package catalog is empty: $CatalogPath"
+    }
+    $ManifestPath = Resolve-PshBuildInputFile -Path $ManifestPath -Description "package manifest '$PackageName'"
+    $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('psh-package-catalog-' + [Guid]::NewGuid().ToString('N'))
+    $temporaryRoot = Assert-PshLifecycleNoReparseAncestors -Path $temporaryRoot -Description 'package catalog verification root'
+    if ([IO.File]::Exists($temporaryRoot) -or [IO.Directory]::Exists($temporaryRoot)) {
+        Throw-PshPackageBuildError -ExitCode 5 -ErrorId 'PshPackageBuildCatalogVerificationRoot' -Message "Package catalog verification root already exists: $temporaryRoot"
+    }
+    try {
+        [void][IO.Directory]::CreateDirectory($temporaryRoot)
+        $rootEntry = Get-PshLifecyclePathEntry -Path $temporaryRoot -Description 'package catalog verification root'
+        if (-not [bool]$rootEntry.IsDirectory -or [bool]$rootEntry.IsReparsePoint) {
+            Throw-PshPackageBuildError -ExitCode 5 -ErrorId 'PshPackageBuildCatalogVerificationRoot' -Message "Package catalog verification root is unsafe: $temporaryRoot"
+        }
+        $manifestCopy = Join-Path $temporaryRoot 'package.manifest.json'
+        [IO.File]::Copy($ManifestPath, $manifestCopy, $false)
+        try { $validationResults = @(& $CatalogCommand -CatalogFilePath $CatalogPath -Path $temporaryRoot -Detailed -ErrorAction Stop) }
+        catch { Throw-PshPackageBuildError -ExitCode 5 -ErrorId 'PshPackageBuildCatalogMembership' -Message "Package catalog membership verification failed for '$PackageName'." -InnerException $_.Exception }
+        $statusResults = @($validationResults | Where-Object { $null -ne $_ -and $null -ne $_.PSObject.Properties['Status'] })
+        if ($statusResults.Count -eq 1) { $validation = $statusResults[0] }
+        elseif ($validationResults.Count -eq 1) { $validation = $validationResults[0] }
+        else {
+            Throw-PshPackageBuildError -ExitCode 5 -ErrorId 'PshPackageBuildCatalogMembership' -Message "Package catalog membership verification returned an ambiguous result set for '$PackageName' (raw=$($validationResults.Count), status=$($statusResults.Count))."
+        }
+        $status = if ($null -ne $validation -and $null -ne $validation.PSObject.Properties['Status']) { [string]$validation.Status } else { [string]$validation }
+        if ($status -cne 'ValidationPassed') {
+            Throw-PshPackageBuildError -ExitCode 5 -ErrorId 'PshPackageBuildCatalogMembership' -Message "Package catalog does not cover exactly package.manifest.json for '$PackageName': $status"
+        }
+    }
+    finally { Invoke-PshBuildCatalogVerificationCleanup -Path $temporaryRoot }
+    return $CatalogPath
+}
+
 $RepositoryRoot = Resolve-PshBuildInputDirectory -Path $RepositoryRoot -Description 'repository root'
 $Version = Assert-PshLifecycleSemVer -Value $Version -Description 'package version'
 if ($Version -ceq '0.0.1-test') {
@@ -587,6 +653,21 @@ $resolvedInputs = [ordered]@{
     Bootstrapper = Resolve-PshBuildInputFile -Path $BootstrapperPath -Description 'AnyCPU bootstrapper'
     ReleaseNotes = Resolve-PshBuildInputFile -Path $ReleaseNotesPath -Description 'English release notes'
     ReleaseNotesZhCn = Resolve-PshBuildInputFile -Path $ReleaseNotesZhCnPath -Description 'Simplified Chinese release notes'
+}
+$packageCatalogRootResolved = $null
+$fileCatalogCommand = $null
+if ($Finalize) {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        Throw-PshPackageBuildError -ExitCode 4 -ErrorId 'PshPackageBuildCatalogVerificationUnavailable' -Message 'Final package ZIP creation requires Windows Test-FileCatalog membership verification.'
+    }
+    $fileCatalogCommand = Get-Command -Name Test-FileCatalog -CommandType Cmdlet -ErrorAction SilentlyContinue
+    if ($null -eq $fileCatalogCommand) {
+        Throw-PshPackageBuildError -ExitCode 4 -ErrorId 'PshPackageBuildCatalogVerificationUnavailable' -Message 'Test-FileCatalog is unavailable on this Windows runtime.'
+    }
+    if ([string]::IsNullOrWhiteSpace($PackageCatalogRoot)) {
+        Throw-PshPackageBuildError -ExitCode 4 -ErrorId 'PshPackageBuildCatalogRequired' -Message 'Final package ZIP creation requires PackageCatalogRoot with package manifest catalogs.'
+    }
+    $packageCatalogRootResolved = Resolve-PshBuildInputDirectory -Path $PackageCatalogRoot -Description 'package catalog root'
 }
 $embeddedInstaller = New-PshBuildEmbeddedInstaller -TemplatePath $resolvedInputs.OnlineInstaller -Repository $RepositoryRoot
 $requiredRepositoryInputs = @(
@@ -684,13 +765,7 @@ foreach ($slot in @($slots.ToArray())) {
     $zipSha256 = $null
     $catalogSha256 = $null
     if ($Finalize) {
-        if ([string]::IsNullOrWhiteSpace($PackageCatalogRoot)) {
-            Throw-PshPackageBuildError -ExitCode 4 -ErrorId 'PshPackageBuildCatalogRequired' -Message 'Final package ZIP creation requires PackageCatalogRoot with externally created package catalogs.'
-        }
-        $catalogPath = Resolve-PshBuildInputFile -Path (Join-Path $PackageCatalogRoot ($baseName + '.manifest.cat')) -Description "package catalog '$baseName'"
-        if (([IO.FileInfo]$catalogPath).Length -le 0) {
-            Throw-PshPackageBuildError -ExitCode 5 -ErrorId 'PshPackageBuildCatalogEmpty' -Message "Package catalog is empty: $catalogPath"
-        }
+        $catalogPath = Confirm-PshBuildPackageCatalogMembership -CatalogCommand $fileCatalogCommand -CatalogPath (Join-Path $packageCatalogRootResolved ($baseName + '.manifest.cat')) -ManifestPath $manifestPath -PackageName $baseName
         $catalogSha256 = Get-PshBuildHash -Path $catalogPath
         $zipPath = Join-Path $packagesRoot ($baseName + '.zip')
         New-PshBuildZip -PackageRoot $packageRoot -CatalogPath $catalogPath -Destination $zipPath
@@ -731,10 +806,11 @@ $buildState = [pscustomobject][ordered]@{
     product = 'Psh'
     version = $Version
     sourceCommit = $SourceCommit
-    phase = if ($Finalize) { 'finalized-with-external-catalogs' } else { 'pre-sign' }
+    phase = if ($Finalize) { 'finalized-with-verified-catalog-membership' } else { 'pre-sign' }
     code = if ($Finalize) { 0 } else { 4 }
     reproducibilityScope = 'pre-sign-staging-file-manifests'
-    postSigningByteReproducible = $false
+    postCatalogByteReproducible = $false
+    catalogMembershipVerified = [bool]$Finalize
     commonBootstrapperSha256 = $bootstrapperSha256
     onlineInstaller = [pscustomobject][ordered]@{
         templateSha256 = [string]$embeddedInstaller.TemplateSha256

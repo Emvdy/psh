@@ -63,7 +63,8 @@ function Assert-PshGoal5PackageFailure {
     param(
         [Parameter(Mandatory = $true)][scriptblock] $Action,
         [Parameter(Mandatory = $true)][string] $Label,
-        [int] $ExitCode = 5
+        [int] $ExitCode = 5,
+        [AllowNull()][string] $ErrorId
     )
 
     $failed = $false
@@ -72,6 +73,9 @@ function Assert-PshGoal5PackageFailure {
         $failed = $true
         $metadata = Get-PshGoal5FailureMetadata -ErrorRecord $_
         Assert-PshGoal5PackageBuild ($metadata.ExitCode -eq $ExitCode) "$Label used exit code $($metadata.ExitCode), expected $ExitCode."
+        if (-not [string]::IsNullOrWhiteSpace($ErrorId)) {
+            Assert-PshGoal5PackageBuild ([string]$metadata.ErrorId -ceq $ErrorId) "$Label used error id '$($metadata.ErrorId)', expected '$ErrorId'."
+        }
     }
     Assert-PshGoal5PackageBuild $failed "$Label unexpectedly succeeded."
 }
@@ -92,6 +96,26 @@ function Write-PshGoal5Text {
     $parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
     if (-not [IO.Directory]::Exists($parent)) { [void][IO.Directory]::CreateDirectory($parent) }
     [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding($false)))
+}
+
+function Invoke-PshGoal5FileCatalogCreation {
+    param(
+        [Parameter(Mandatory = $true)][object] $CatalogCommand,
+        [Parameter(Mandatory = $true)][object[]] $Members,
+        [Parameter(Mandatory = $true)][string] $ContentRoot,
+        [Parameter(Mandatory = $true)][string] $CatalogPath
+    )
+
+    [void](New-PshGoal5Directory -Path $ContentRoot)
+    foreach ($member in $Members) {
+        $source = [IO.Path]::GetFullPath([string]$member.SourcePath)
+        $name = [string]$member.Name
+        Assert-PshGoal5PackageBuild ([IO.File]::Exists($source) -and [IO.Path]::GetFileName($name) -ceq $name) "Catalog member is missing or unsafe: $name"
+        [IO.File]::Copy($source, (Join-Path $ContentRoot $name), $false)
+    }
+    [void](& $CatalogCommand -Path $ContentRoot -CatalogFilePath $CatalogPath -CatalogVersion 2.0 -ErrorAction Stop)
+    Assert-PshGoal5PackageBuild ([IO.File]::Exists($CatalogPath) -and ([IO.FileInfo]$CatalogPath).Length -gt 0) "New-FileCatalog did not create a non-empty catalog: $CatalogPath"
+    return $CatalogPath
 }
 
 function New-PshGoal5PeFixture {
@@ -319,12 +343,50 @@ foreach ($package in @($firstBuild.packages)) {
 }
 Assert-PshGoal5PackageBuild ([string]$firstBuild.onlineInstaller.embeddedSha256 -ceq [string]$secondBuild.onlineInstaller.embeddedSha256) 'Embedded online installer hash changed across deterministic builds.'
 
+$runningOnWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+if (-not $runningOnWindows) {
+    $nonWindowsFinalParameters = @{} + $baseBuildParameters
+    $nonWindowsFinalParameters.OutputRoot = Join-Path $workRoot 'non-windows-finalize'
+    $nonWindowsFinalParameters.Finalize = $true
+    $nonWindowsFinalParameters.PackageCatalogRoot = Join-Path $workRoot 'not-created-catalog-root'
+    Assert-PshGoal5PackageFailure -Label 'non-Windows package catalog finalization' -ExitCode 4 -ErrorId 'PshPackageBuildCatalogVerificationUnavailable' -Action {
+        & $buildScript @nonWindowsFinalParameters
+    }
+    Assert-PshGoal5PackageFailure -Label 'non-Windows release artifact catalog verification' -ExitCode 4 -ErrorId 'PshReleaseCatalogVerificationUnavailable' -Action {
+        & $artifactScript -ReleaseAssetsRoot $preSignRoot -Version $version -SourceCommit $commit -RepositoryRoot $RepositoryRoot -Mode Release
+    }
+    $nonWindowsReport = [pscustomobject][ordered]@{
+        schemaVersion = 1
+        product = 'Psh'
+        version = $version
+        sourceCommit = $commit
+        assertions = $script:Goal5PackageBuildAssertions + 2
+        phase = 'non-windows-catalog-verification-unavailable'
+        code = 4
+        deterministicPackages = 3
+    }
+    $nonWindowsReportPath = Join-Path $reportRoot 'package-build-report.json'
+    Write-PshGoal5Text -Path $nonWindowsReportPath -Text ((ConvertTo-PshCanonicalJson -InputObject $nonWindowsReport) + "`n")
+    Write-Output ("Goal 5 package build passed non-Windows catalog boundaries ({0} assertions); reports: {1}" -f $script:Goal5PackageBuildAssertions, $reportRoot)
+    return
+}
+
+$catalogCommand = Get-Command -Name New-FileCatalog -CommandType Cmdlet -ErrorAction Stop
+$catalogSourceRoot = Join-Path $workRoot 'catalog source build'
+$catalogSourceParameters = @{} + $baseBuildParameters
+$catalogSourceParameters.OutputRoot = $catalogSourceRoot
+$catalogSourceParameters.IncludeTestFixtures = $true
+$catalogSourceBuild = @(& $buildScript @catalogSourceParameters)[-1]
+Assert-PshGoal5PackageBuild ([int]$catalogSourceBuild.code -eq 4 -and [string]$catalogSourceBuild.phase -ceq 'pre-sign') 'Catalog source build did not return the pre-sign handoff.'
+Assert-PshGoal5PackageBuild (@($catalogSourceBuild.packages).Count -eq 6) 'Catalog source build did not create six package manifests.'
 $catalogRoot = New-PshGoal5Directory -Path (Join-Path $workRoot ($unicodeExternal + ' package catalogs'))
-foreach ($name in @(
-        "psh-$version-core", "psh-$version-full-win-x64", "psh-$version-full-win-arm64",
-        'psh-0.0.1-test-core', 'psh-0.0.1-test-full-win-x64', 'psh-0.0.1-test-full-win-arm64'
-    )) {
-    Write-PshGoal5Text -Path (Join-Path $catalogRoot ($name + '.manifest.cat')) -Text "external catalog fixture for $name`n"
+$catalogInputRoot = New-PshGoal5Directory -Path (Join-Path $workRoot 'package catalog inputs')
+foreach ($package in @($catalogSourceBuild.packages)) {
+    $name = [string]$package.name
+    $manifestPath = Join-Path $catalogSourceRoot (Join-Path ([string]$package.stagingRelativePath) 'package.manifest.json')
+    [void](Invoke-PshGoal5FileCatalogCreation -CatalogCommand $catalogCommand -Members @(
+            [pscustomobject]@{ Name = 'package.manifest.json'; SourcePath = $manifestPath }
+        ) -ContentRoot (Join-Path $catalogInputRoot $name) -CatalogPath (Join-Path $catalogRoot ($name + '.manifest.cat')))
 }
 $finalRoot = Join-Path $workRoot ('finalized build ' + $unicodeContains + ' fixtures')
 $finalParameters = @{} + $baseBuildParameters
@@ -333,6 +395,7 @@ $finalParameters.IncludeTestFixtures = $true
 $finalParameters.Finalize = $true
 $finalParameters.PackageCatalogRoot = $catalogRoot
 $finalBuild = @(& $buildScript @finalParameters)[-1]
+Assert-PshGoal5PackageBuild ([int]$finalBuild.code -eq 0 -and [string]$finalBuild.phase -ceq 'finalized-with-verified-catalog-membership' -and [bool]$finalBuild.catalogMembershipVerified) 'Finalized fixture build did not verify package catalog membership.'
 Assert-PshGoal5PackageBuild (@($finalBuild.packages).Count -eq 6) 'Finalized fixture build did not create six internal package slots.'
 Assert-PshGoal5PackageBuild (@($finalBuild.packages | Where-Object { [bool]$_.testOnly }).Count -eq 3) 'Finalized fixture build did not mark three synthetic package slots testOnly.'
 $releaseRoot = Join-Path $finalRoot 'release-assets'
@@ -345,18 +408,9 @@ Assert-PshGoal5PackageBuild ([int]$indexBuild.code -eq 4 -and [string]$indexBuil
 Assert-PshGoal5PackageBuild (-not [IO.File]::Exists((Join-Path $releaseRoot "psh-release-$version.cat"))) 'Deferred index generation fabricated a release catalog.'
 $indexDocument = Read-PshReleaseIndex -Path (Join-Path $releaseRoot "psh-release-$version.json")
 Assert-PshGoal5PackageBuild (@($indexDocument.assets | Where-Object { [string]$_.name -match '0\.0\.1-test' -or ($null -ne $_.package -and [bool]$_.package.testOnly) }).Count -eq 0) 'Synthetic package metadata entered the public release index.'
-if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-    $externalReleaseCatalog = Join-Path $fixtureRoot "psh-release-$version.external.cat"
-    Write-PshGoal5Text -Path $externalReleaseCatalog -Text "external signed catalog placeholder`n"
-    Assert-PshGoal5PackageFailure -Label 'non-Windows release catalog finalization' -ExitCode 4 -Action {
-        & $indexScript -ReleaseAssetsRoot $releaseRoot -Version $version -SourceCommit $commit -RepositoryRoot $RepositoryRoot -Finalize -ReleaseCatalogPath $externalReleaseCatalog
-    }
-    Assert-PshGoal5PackageBuild (-not [IO.File]::Exists((Join-Path $releaseRoot "psh-release-$version.cat"))) 'Non-Windows finalization published an unverified release catalog.'
-}
-
 $artifactReportPath = Join-Path $reportRoot 'release-artifacts-report.json'
 $artifactResult = @(& $artifactScript -ReleaseAssetsRoot $releaseRoot -Version $version -SourceCommit $commit -RepositoryRoot $RepositoryRoot -Mode BuildStage -ReportPath $artifactReportPath)[-1]
-Assert-PshGoal5PackageBuild ([int]$artifactResult.code -eq 4 -and [string]$artifactResult.phase -ceq 'static-verified-signatures-deferred') 'Build-stage release artifact verification did not return code 4 deferred state.'
+Assert-PshGoal5PackageBuild ([int]$artifactResult.code -eq 4 -and [string]$artifactResult.phase -ceq 'static-verified-catalog-membership-deferred' -and -not [bool]$artifactResult.catalogMembershipVerified) 'Build-stage release artifact verification did not return the catalog-membership-deferred state.'
 Assert-PshGoal5PackageBuild ([int]$artifactResult.packageCount -eq 3 -and [int]$artifactResult.assetCount -eq 12) 'Build-stage release artifact verification counted the wrong assets or packages.'
 Assert-PshGoal5PackageBuild ([IO.File]::Exists($artifactReportPath) -and ([IO.FileInfo]$artifactReportPath).Length -gt 0) 'Release artifact verification report is missing or empty.'
 
@@ -424,6 +478,19 @@ New-PshGoal5ZipMutation -Path $wrongArchitectureZip -Overrides $overrides
 Update-PshGoal5ReleaseMetadata -Root $wrongArchitectureRoot -Version $version -AssetName $x64Name -ManifestBytes $newManifestBytes
 Assert-PshGoal5PackageFailure -Label 'wrong native tool architecture' -Action { & $artifactScript -ReleaseAssetsRoot $wrongArchitectureRoot -Version $version -SourceCommit $commit -RepositoryRoot $RepositoryRoot -Mode BuildStage }
 
+$releaseCatalogPath = Join-Path $fixtureRoot "psh-release-$version.external.cat"
+[void](Invoke-PshGoal5FileCatalogCreation -CatalogCommand $catalogCommand -Members @(
+        [pscustomobject]@{ Name = "psh-release-$version.json"; SourcePath = (Join-Path $releaseRoot "psh-release-$version.json") },
+        [pscustomobject]@{ Name = 'SHA256SUMS'; SourcePath = (Join-Path $releaseRoot 'SHA256SUMS') }
+    ) -ContentRoot (Join-Path $workRoot 'release catalog input') -CatalogPath $releaseCatalogPath)
+$finalIndexBuild = @(& $indexScript -ReleaseAssetsRoot $releaseRoot -Version $version -SourceCommit $commit -RepositoryRoot $RepositoryRoot -Finalize -ReleaseCatalogPath $releaseCatalogPath)[-1]
+Assert-PshGoal5PackageBuild ([int]$finalIndexBuild.code -eq 0 -and [string]$finalIndexBuild.phase -ceq 'finalized-with-verified-catalog-membership' -and [bool]$finalIndexBuild.catalogMembershipVerified) 'Release index finalization did not verify exact unsigned catalog membership.'
+$finalArtifactReportPath = Join-Path $reportRoot 'release-artifacts-final-report.json'
+$finalArtifactResult = @(& $artifactScript -ReleaseAssetsRoot $releaseRoot -Version $version -SourceCommit $commit -RepositoryRoot $RepositoryRoot -Mode Release -ReportPath $finalArtifactReportPath)[-1]
+Assert-PshGoal5PackageBuild ([int]$finalArtifactResult.code -eq 0 -and [string]$finalArtifactResult.phase -ceq 'release-catalog-membership-verified' -and [bool]$finalArtifactResult.catalogMembershipVerified) 'Release artifact verification did not verify release and package catalog membership.'
+Assert-PshGoal5PackageBuild ([int]$finalArtifactResult.assetCount -eq 13 -and [int]$finalArtifactResult.packageCount -eq 3) 'Final release artifact verification did not enforce the exact 13-asset/3-package contract.'
+Assert-PshGoal5PackageBuild ([bool]$finalArtifactResult.authenticodeStatus.informationalOnly) 'Release artifact verification did not report Authenticode as informational only.'
+
 $packageReport = [pscustomobject][ordered]@{
     schemaVersion = 1
     product = 'Psh'
@@ -437,6 +504,9 @@ $packageReport = [pscustomobject][ordered]@{
     publicPackages = 3
     indexPhase = [string]$indexBuild.phase
     artifactPhase = [string]$artifactResult.phase
+    finalIndexPhase = [string]$finalIndexBuild.phase
+    finalArtifactPhase = [string]$finalArtifactResult.phase
+    catalogMembershipVerified = [bool]$finalArtifactResult.catalogMembershipVerified
     negativeCases = @('tamper', 'missing', 'extra', 'duplicate', 'zip-slip', 'reparse', 'wrong-architecture')
 }
 $packageReportPath = Join-Path $reportRoot 'package-build-report.json'
