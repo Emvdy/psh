@@ -40,6 +40,256 @@ function Get-PshGoal1RelativePath {
     return $fullPath.Substring($prefix.Length).Replace([IO.Path]::DirectorySeparatorChar, '/').Replace([IO.Path]::AltDirectorySeparatorChar, '/')
 }
 
+function Assert-PshGoal1ShellPolicyTokenBoundary {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Remediation
+    )
+
+    $remediationCount = 0
+    $searchOffset = 0
+    while ($searchOffset -lt $Text.Length) {
+        $matchOffset = $Text.IndexOf($Remediation, $searchOffset, [StringComparison]::Ordinal)
+        if ($matchOffset -lt 0) { break }
+        $remediationCount++
+        $searchOffset = $matchOffset + $Remediation.Length
+    }
+    Assert-PshCondition ($remediationCount -eq 5) 'The install.sh reviewed execution-policy remediation count changed.'
+
+    $collapsed = [regex]::Replace($Text.Replace($Remediation, ''), '\s', '')
+    foreach ($separator in @(
+            [string][char]39,
+            [string][char]34,
+            [string][char]96,
+            [string][char]92,
+            '+',
+            '(',
+            ')')) {
+        $collapsed = $collapsed.Replace($separator, '')
+    }
+    Assert-PshCondition ($collapsed.IndexOf('Set-ExecutionPolicy', [StringComparison]::OrdinalIgnoreCase) -lt 0) 'The install.sh text contains a composed execution-policy token outside reviewed remediations.'
+}
+
+function Get-PshGoal1LockedParentShellPowerShellScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Marker
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $reader = New-Object IO.StringReader($Text)
+    try {
+        while ($true) {
+            $line = $reader.ReadLine()
+            if ($null -eq $line) { break }
+            [void]$lines.Add($line)
+        }
+    }
+    finally {
+        $reader.Dispose()
+    }
+
+    $launchLine = '    "$powershell_path" -NoLogo -NoProfile -NonInteractive -Command ' + [char]92
+    $openLine = "    '"
+    $markerLine = '$flowMarker = "' + $Marker + '"'
+    $startLine = '$ErrorActionPreference = "Stop"'
+    $exitLine = 'exit $exitCode'
+    $closeLine = "'" + ' ' + [char]92
+    $redirectLine = '    </dev/null'
+    $launchIndices = New-Object System.Collections.Generic.List[int]
+    $markerIndices = New-Object System.Collections.Generic.List[int]
+    $closeIndices = New-Object System.Collections.Generic.List[int]
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ([string]$lines[$index] -ceq $launchLine) { [void]$launchIndices.Add($index) }
+        if ([string]$lines[$index] -ceq $markerLine) { [void]$markerIndices.Add($index) }
+        if ([string]$lines[$index] -ceq $closeLine -and
+            $index + 1 -lt $lines.Count -and [string]$lines[$index + 1] -ceq $redirectLine) {
+            [void]$closeIndices.Add($index)
+        }
+    }
+
+    Assert-PshCondition ($launchIndices.Count -eq 1) "Embedded install.sh PowerShell launch is missing or duplicated: $Marker"
+    $launchIndex = [int]$launchIndices[0]
+    Assert-PshCondition ($launchIndex + 2 -lt $lines.Count -and
+        [string]$lines[$launchIndex + 1] -ceq $openLine -and
+        [string]$lines[$launchIndex + 2] -ceq $startLine) "Embedded install.sh PowerShell opening boundary is invalid: $Marker"
+    Assert-PshCondition ($markerIndices.Count -eq 1) "Embedded install.sh PowerShell marker is missing or duplicated: $Marker"
+    $markerIndex = [int]$markerIndices[0]
+    Assert-PshCondition ($markerIndex -gt $launchIndex + 2) "Embedded install.sh PowerShell marker is outside the literal payload: $Marker"
+    Assert-PshCondition ($closeIndices.Count -eq 1) "Embedded install.sh PowerShell closing boundary is missing or duplicated: $Marker"
+    $closeIndex = [int]$closeIndices[0]
+    $tailIndex = $closeIndex - 1
+    Assert-PshCondition ($tailIndex -gt $markerIndex -and [string]$lines[$tailIndex] -ceq $exitLine) "Embedded install.sh PowerShell tail is invalid: $Marker"
+
+    $singleQuoteLines = New-Object System.Collections.Generic.List[int]
+    $exitMentions = New-Object System.Collections.Generic.List[int]
+    for ($index = $launchIndex + 2; $index -le $tailIndex; $index++) {
+        $lineText = [string]$lines[$index]
+        if ($lineText.IndexOf([char]39) -ge 0) {
+            [void]$singleQuoteLines.Add($index)
+        }
+        if ($lineText.IndexOf($exitLine, [StringComparison]::Ordinal) -ge 0) {
+            [void]$exitMentions.Add($index)
+        }
+    }
+    Assert-PshCondition ($singleQuoteLines.Count -eq 0) "Embedded install.sh PowerShell payload contains a shell literal quote: $Marker"
+    Assert-PshCondition ($exitMentions.Count -eq 1 -and [int]$exitMentions[0] -eq $tailIndex) "Embedded install.sh PowerShell exit marker is duplicated or appears before the literal closing boundary: $Marker"
+
+    $scriptLines = New-Object System.Collections.Generic.List[string]
+    for ($index = $launchIndex + 2; $index -le $tailIndex; $index++) {
+        [void]$scriptLines.Add([string]$lines[$index])
+    }
+    return [string]::Join("`n", $scriptLines.ToArray())
+}
+
+function Get-PshGoal1InstallShellPowerShellPayloads {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text
+    )
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $reader = New-Object IO.StringReader($Text)
+    try {
+        while ($true) {
+            $line = $reader.ReadLine()
+            if ($null -eq $line) { break }
+            [void]$lines.Add($line)
+        }
+    }
+    finally {
+        $reader.Dispose()
+    }
+
+    $quote = [string][char]39
+    $conversionLine = 'powershell_windows_path="$(to_windows_path "$powershell_path")" || fail_json 3 ' +
+        $quote + 'PshShellPath' + $quote + ' ' + $quote + 'Unable to convert the Windows PowerShell path.' + $quote
+    $cleanupLaunchLine = '            "$powershell_path" -NoLogo -NoProfile -NonInteractive -Command ' + $quote
+    $tempLaunchLine = '    temporary_fields="$("$powershell_path" -NoLogo -NoProfile -NonInteractive -Command ' + $quote
+    $metadataLaunchLine = '        "$powershell_path" -NoLogo -NoProfile -NonInteractive -Command ' + [char]92
+    $lockedLaunchLine = '    "$powershell_path" -NoLogo -NoProfile -NonInteractive -Command ' + [char]92
+    $expectedReferenceLines = [ordered]@{
+        conversion = $conversionLine
+        cleanup = $cleanupLaunchLine
+        temp = $tempLaunchLine
+        metadata = $metadataLaunchLine
+        locked = $lockedLaunchLine
+    }
+    $allowedReferenceLines = @($expectedReferenceLines.Values)
+    $referenceCount = 0
+    $launchHead = '-NoLogo -NoProfile -NonInteractive -Command'
+    $launchHeadCount = 0
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $lineText = [string]$lines[$index]
+        $lineReferences = [regex]::Matches(
+            $lineText,
+            '\$(?:powershell_path|\{powershell_path\})',
+            [Text.RegularExpressions.RegexOptions]::CultureInvariant
+        ).Count
+        if ($lineReferences -gt 0) {
+            $referenceCount += $lineReferences
+            Assert-PshCondition ($lineReferences -eq 1 -and $allowedReferenceLines -ccontains $lineText) 'The install.sh powershell_path reference inventory changed.'
+        }
+        $searchOffset = 0
+        while ($searchOffset -lt $lineText.Length) {
+            $launchOffset = $lineText.IndexOf($launchHead, $searchOffset, [StringComparison]::Ordinal)
+            if ($launchOffset -lt 0) { break }
+            $launchHeadCount++
+            $searchOffset = $launchOffset + $launchHead.Length
+        }
+    }
+    Assert-PshCondition ($referenceCount -eq 5) 'The install.sh powershell_path reference inventory must contain exactly five occurrences.'
+    Assert-PshCondition ($launchHeadCount -eq 4) 'The install.sh PowerShell launch inventory must contain exactly four command heads.'
+
+    $referenceIndices = @{}
+    foreach ($name in @($expectedReferenceLines.Keys)) {
+        $matches = New-Object System.Collections.Generic.List[int]
+        for ($index = 0; $index -lt $lines.Count; $index++) {
+            if ([string]$lines[$index] -ceq [string]$expectedReferenceLines[$name]) {
+                [void]$matches.Add($index)
+            }
+        }
+        Assert-PshCondition ($matches.Count -eq 1) "The install.sh $name powershell_path reference is missing or duplicated."
+        $referenceIndices[$name] = [int]$matches[0]
+    }
+
+    $cleanupIndex = [int]$referenceIndices['cleanup']
+    $cleanupMarkerLine = '$flowMarker = "PshShellCleanupRoot"'
+    $cleanupCloseLine = $quote + ' </dev/null || cleanup_failed=1'
+    $cleanupCloseIndices = New-Object System.Collections.Generic.List[int]
+    $cleanupMarkerIndices = New-Object System.Collections.Generic.List[int]
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ([string]$lines[$index] -ceq $cleanupCloseLine) { [void]$cleanupCloseIndices.Add($index) }
+        if ([string]$lines[$index] -ceq $cleanupMarkerLine) { [void]$cleanupMarkerIndices.Add($index) }
+    }
+    Assert-PshCondition ($cleanupIndex + 2 -lt $lines.Count -and
+        [string]$lines[$cleanupIndex + 1] -ceq '$ErrorActionPreference = "Stop"' -and
+        [string]$lines[$cleanupIndex + 2] -ceq $cleanupMarkerLine -and
+        $cleanupMarkerIndices.Count -eq 1) 'The install.sh cleanup PowerShell opening boundary is invalid.'
+    Assert-PshCondition ($cleanupCloseIndices.Count -eq 1 -and
+        [int]$cleanupCloseIndices[0] -gt $cleanupIndex + 2 -and
+        [string]$lines[[int]$cleanupCloseIndices[0] - 1] -ceq 'catch { exit 1 }') 'The install.sh cleanup PowerShell closing boundary is invalid.'
+    $cleanupLines = New-Object System.Collections.Generic.List[string]
+    for ($index = $cleanupIndex + 1; $index -lt [int]$cleanupCloseIndices[0]; $index++) {
+        $lineText = [string]$lines[$index]
+        Assert-PshCondition ($lineText.IndexOf([char]39) -lt 0) 'The install.sh cleanup PowerShell payload contains a shell literal quote.'
+        [void]$cleanupLines.Add($lineText)
+    }
+
+    $tempIndex = [int]$referenceIndices['temp']
+    $tempMarkerLine = '$flowMarker = "PshShellTempRoot"'
+    $tempCloseLine = $quote + ')"'
+    $tempCloseIndices = New-Object System.Collections.Generic.List[int]
+    $tempMarkerIndices = New-Object System.Collections.Generic.List[int]
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ([string]$lines[$index] -ceq $tempCloseLine) { [void]$tempCloseIndices.Add($index) }
+        if ([string]$lines[$index] -ceq $tempMarkerLine) { [void]$tempMarkerIndices.Add($index) }
+    }
+    Assert-PshCondition ($tempIndex + 2 -lt $lines.Count -and
+        [string]$lines[$tempIndex + 1] -ceq '$ErrorActionPreference = "Stop"' -and
+        [string]$lines[$tempIndex + 2] -ceq $tempMarkerLine -and
+        $tempMarkerIndices.Count -eq 1) 'The install.sh TEMP PowerShell opening boundary is invalid.'
+    Assert-PshCondition ($tempCloseIndices.Count -eq 1 -and
+        [int]$tempCloseIndices[0] -gt $tempIndex + 2 -and
+        [string]$lines[[int]$tempCloseIndices[0] - 2] -ceq '    throw' -and
+        [string]$lines[[int]$tempCloseIndices[0] - 1] -ceq '}') 'The install.sh TEMP PowerShell closing boundary is invalid.'
+    $tempLines = New-Object System.Collections.Generic.List[string]
+    for ($index = $tempIndex + 1; $index -lt [int]$tempCloseIndices[0]; $index++) {
+        $lineText = [string]$lines[$index]
+        Assert-PshCondition ($lineText.IndexOf([char]39) -lt 0) 'The install.sh TEMP PowerShell payload contains a shell literal quote.'
+        [void]$tempLines.Add($lineText)
+    }
+
+    $metadataIndex = [int]$referenceIndices['metadata']
+    $metadataEnvironmentLine = '    metadata_fields="$(PSH_SHELL_RELEASE_METADATA_PATH="$release_metadata_windows_path" PSH_SHELL_REQUESTED_TAG="$requested_tag" ' + [char]92
+    Assert-PshCondition ($metadataIndex -gt 0 -and [string]$lines[$metadataIndex - 1] -ceq $metadataEnvironmentLine -and
+        $metadataIndex + 1 -lt $lines.Count) 'The install.sh metadata PowerShell launch boundary is invalid.'
+    $metadataLine = [string]$lines[$metadataIndex + 1]
+    $metadataPrefix = '        ' + $quote
+    $metadataSuffix = $quote + ')"'
+    $metadataQuoteCount = 0
+    foreach ($character in $metadataLine.ToCharArray()) {
+        if ($character -eq [char]39) { $metadataQuoteCount++ }
+    }
+    Assert-PshCondition ($metadataQuoteCount -eq 2 -and
+        $metadataLine.StartsWith($metadataPrefix, [StringComparison]::Ordinal) -and
+        $metadataLine.EndsWith($metadataSuffix, [StringComparison]::Ordinal) -and
+        $metadataLine.Length -gt $metadataPrefix.Length + $metadataSuffix.Length) 'The install.sh metadata PowerShell shell wrapper is invalid.'
+    $metadataScript = $metadataLine.Substring(
+        $metadataPrefix.Length,
+        $metadataLine.Length - $metadataPrefix.Length - $metadataSuffix.Length
+    )
+    Assert-PshCondition ($metadataScript.StartsWith('$ErrorActionPreference="Stop";', [StringComparison]::Ordinal) -and
+        $metadataScript.IndexOf([char]39) -lt 0) 'The install.sh metadata PowerShell payload is invalid.'
+
+    $lockedScript = Get-PshGoal1LockedParentShellPowerShellScript -Text $Text -Marker 'PshShellLockedParent'
+    return @(
+        [pscustomobject][ordered]@{ Label = 'cleanup'; Text = [string]::Join("`n", $cleanupLines.ToArray()) },
+        [pscustomobject][ordered]@{ Label = 'temp'; Text = [string]::Join("`n", $tempLines.ToArray()) },
+        [pscustomobject][ordered]@{ Label = 'metadata'; Text = $metadataScript },
+        [pscustomobject][ordered]@{ Label = 'locked-parent'; Text = $lockedScript }
+    )
+}
+
 function Test-PshGoal1AllowedPolicyRemediationMatch {
     param(
         [Parameter(Mandatory = $true)][object]$Match,
@@ -62,13 +312,13 @@ function Test-PshGoal1AllowedPolicyRemediationMatch {
         }
         'src/install/install.sh' {
             if ($line -ceq ('policy_remediation=' + $singleQuotedRemediation)) { return $true }
-            $embeddedAssignment = '$remediation="' + $Remediation + '";'
-            $allLines = [IO.File]::ReadAllLines([string]$Match.Path)
-            $previousLine = if ([int]$Match.LineNumber -gt 1) { ([string]$allLines[[int]$Match.LineNumber - 2]).Trim() } else { '' }
-            return ($previousLine -ceq '"$powershell_path" -NoLogo -NoProfile -NonInteractive -Command \' -and
-                $line -cmatch '\A''\$ErrorActionPreference="Stop";.*''\s*\\\z' -and
-                $line.IndexOf($embeddedAssignment, [StringComparison]::Ordinal) -ge 0 -and
-                [regex]::Matches($line, [regex]::Escape($Remediation)).Count -eq 1)
+            $allowedParentRemediationLines = @(
+                ('catch { Throw-PshShellParentFailure 4 "PshExecutionPolicyProbe" "Dependency" "Unable to determine the effective PowerShell execution policy." "' + $Remediation + '" }'),
+                ('catch { Throw-PshShellParentFailure 4 "PshExecutionPolicyProbe" "Dependency" ([string]$_.Exception.Message) "' + $Remediation + '" }'),
+                ('catch { Throw-PshShellParentFailure 4 "PshExecutionPolicyProbe" "Dependency" "Unable to inspect the installer Authenticode status required by execution policy." "' + $Remediation + '" }'),
+                ('Throw-PshShellParentFailure 4 "PshExecutionPolicy" "Dependency" "PowerShell execution policy does not allow this installer workflow." "' + $Remediation + '"')
+            )
+            return $allowedParentRemediationLines -ccontains $line
         }
     }
     return $false
@@ -385,8 +635,8 @@ foreach ($pattern in $unsafePatterns) {
 }
 
 # Goal 5 entrypoints may print this exact read-only remediation. Every literal
-# occurrence is pinned to a reviewed entrypoint assignment; executable
-# PowerShell, including the install.sh preflight payload, is checked by AST.
+# occurrence is pinned to a reviewed assignment or locked-parent failure site;
+# executable PowerShell, including the install.sh parent payload, is checked by AST.
 $policyRemediation = 'Set-ExecutionPolicy -Scope CurrentUser RemoteSigned'
 $policyLiteralMatches = @(
     $sourceFiles | ForEach-Object {
@@ -398,7 +648,7 @@ $unexpectedPolicyLiteralMatches = @(
         -not (Test-PshGoal1AllowedPolicyRemediationMatch -Match $_ -Root $RepositoryRoot -Remediation $policyRemediation)
     }
 )
-Assert-PshCondition ($policyLiteralMatches.Count -eq 5 -and $unexpectedPolicyLiteralMatches.Count -eq 0) 'Goal 1 source contains an execution-policy mutation or an unapproved policy diagnostic.'
+Assert-PshCondition ($policyLiteralMatches.Count -eq 8 -and $unexpectedPolicyLiteralMatches.Count -eq 0) 'Goal 1 source contains an execution-policy mutation or an unapproved policy diagnostic.'
 
 $policyCommandFindings = New-Object System.Collections.Generic.List[string]
 foreach ($powerShellSource in @($sourceFiles | Where-Object { $_.Extension -in @('.ps1', '.psm1') })) {
@@ -409,20 +659,117 @@ foreach ($powerShellSource in @($sourceFiles | Where-Object { $_.Extension -in @
     foreach ($finding in @(Get-PshGoal1PowerShellMutationFindingsFromAst -Ast $ast -Label $powerShellSource.FullName)) { $policyCommandFindings.Add($finding) }
 }
 
-$shellPolicyMatch = @($policyLiteralMatches | Where-Object {
+$shellPolicyMatches = @($policyLiteralMatches | Where-Object {
         (Get-PshGoal1RelativePath -Root $RepositoryRoot -Path ([string]$_.Path)) -ceq 'src/install/install.sh' -and
-        ([string]$_.Line).Contains('$remediation="')
+        ([string]$_.Line).Trim() -cne ('policy_remediation=' + "'$policyRemediation'")
     })
-Assert-PshCondition ($shellPolicyMatch.Count -eq 1) 'The install.sh PowerShell policy preflight was not uniquely identified.'
-$shellPolicyLine = ([string]$shellPolicyMatch[0].Line).Trim()
-$shellPolicyLastQuote = $shellPolicyLine.LastIndexOf("'")
-Assert-PshCondition ($shellPolicyLine.StartsWith("'", [StringComparison]::Ordinal) -and $shellPolicyLastQuote -gt 0) 'The install.sh PowerShell policy preflight has an invalid shell literal boundary.'
-$shellPolicyScript = $shellPolicyLine.Substring(1, $shellPolicyLastQuote - 1)
-$shellPolicyTokens = $null
-$shellPolicyParseErrors = $null
-$shellPolicyAst = [System.Management.Automation.Language.Parser]::ParseInput($shellPolicyScript, [ref]$shellPolicyTokens, [ref]$shellPolicyParseErrors)
-Assert-PshCondition (@($shellPolicyParseErrors).Count -eq 0) 'The install.sh PowerShell policy preflight could not be parsed.'
-foreach ($finding in @(Get-PshGoal1PowerShellMutationFindingsFromAst -Ast $shellPolicyAst -Label 'src/install/install.sh:policy-preflight')) { $policyCommandFindings.Add($finding) }
+Assert-PshCondition ($shellPolicyMatches.Count -eq 4) 'The install.sh locked-parent policy remediation sites were not exactly identified.'
+$shellPath = Join-Path $RepositoryRoot 'src/install/install.sh'
+$shellText = [IO.File]::ReadAllText($shellPath)
+Assert-PshGoal1ShellPolicyTokenBoundary -Text $shellText -Remediation $policyRemediation
+$shellPowerShellPayloads = @(Get-PshGoal1InstallShellPowerShellPayloads -Text $shellText)
+$expectedShellPayloadLabels = @('cleanup', 'temp', 'metadata', 'locked-parent')
+Assert-PshCondition ($shellPowerShellPayloads.Count -eq 4 -and
+    (@($shellPowerShellPayloads | ForEach-Object { [string]$_.Label }) -join '|') -ceq ($expectedShellPayloadLabels -join '|')) 'The install.sh PowerShell payload inventory changed.'
+$earlyEndFixtureLines = @(
+    ('    "$powershell_path" -NoLogo -NoProfile -NonInteractive -Command ' + [char]92),
+    "    '",
+    '$ErrorActionPreference = "Stop"',
+    '$flowMarker = "PshShellLockedParent"',
+    '# exit $exitCode',
+    '& ("Set-" + "ExecutionPolicy") -Scope CurrentUser RemoteSigned',
+    'exit $exitCode',
+    ("'" + ' ' + [char]92),
+    '    </dev/null'
+)
+$earlyEndFixture = [string]::Join("`n", $earlyEndFixtureLines)
+$earlyEndFailure = $null
+try {
+    [void](Get-PshGoal1LockedParentShellPowerShellScript -Text $earlyEndFixture -Marker 'PshShellLockedParent')
+}
+catch {
+    $earlyEndFailure = $_
+}
+Assert-PshCondition ($null -ne $earlyEndFailure -and
+    [string]$earlyEndFailure.Exception.Message -like '*exit marker is duplicated or appears before the literal closing boundary*') 'An early commented exit marker allowed a later composed policy mutation to escape install.sh payload extraction.'
+$shellEscapeFixtureLines = @(
+    ('    "$powershell_path" -NoLogo -NoProfile -NonInteractive -Command ' + [char]92),
+    "    '",
+    '$ErrorActionPreference = "Stop"',
+    '$flowMarker = "PshShellLockedParent"',
+    "'",
+    '"$powershell_path" -NoLogo -NoProfile -NonInteractive -Command "& (\"Set-\" + \"ExecutionPolicy\") -Scope CurrentUser RemoteSigned"',
+    "'",
+    'exit $exitCode',
+    ("'" + ' ' + [char]92),
+    '    </dev/null'
+)
+$shellEscapeFixture = [string]::Join("`n", $shellEscapeFixtureLines)
+$shellEscapeFailure = $null
+try {
+    [void](Get-PshGoal1LockedParentShellPowerShellScript -Text $shellEscapeFixture -Marker 'PshShellLockedParent')
+}
+catch {
+    $shellEscapeFailure = $_
+}
+Assert-PshCondition ($null -ne $shellEscapeFailure -and
+    [string]$shellEscapeFailure.Exception.Message -like '*payload contains a shell literal quote*') 'A shell literal close-command-reopen sequence escaped install.sh payload extraction.'
+$findPowerShellLaunchFixture = $shellText + "`n" +
+    '"$(find_powershell)" -NoProfile -NonInteractive -Command "& (\"Set-\" + \"ExecutionPolicy\") -Scope CurrentUser RemoteSigned"' + "`n"
+$findPowerShellTokenFailure = $null
+try {
+    Assert-PshGoal1ShellPolicyTokenBoundary -Text $findPowerShellLaunchFixture -Remediation $policyRemediation
+}
+catch {
+    $findPowerShellTokenFailure = $_
+}
+Assert-PshCondition ($null -ne $findPowerShellTokenFailure -and
+    [string]$findPowerShellTokenFailure.Exception.Message -like '*composed execution-policy token outside reviewed remediations*') 'A find_powershell external composed policy launch escaped the install.sh token boundary.'
+$parameterFallbackFixture = $shellText + "`n" +
+    '"${powershell_path:-$(find_powershell)}" -NoProfile -NonInteractive -Command "& (\"Set-\" + \"ExecutionPolicy\") -Scope CurrentUser RemoteSigned"' + "`n"
+$parameterFallbackFailure = $null
+try {
+    Assert-PshGoal1ShellPolicyTokenBoundary -Text $parameterFallbackFixture -Remediation $policyRemediation
+}
+catch {
+    $parameterFallbackFailure = $_
+}
+Assert-PshCondition ($null -ne $parameterFallbackFailure -and
+    [string]$parameterFallbackFailure.Exception.Message -like '*composed execution-policy token outside reviewed remediations*') 'A parameter-fallback external composed policy launch escaped the install.sh token boundary.'
+$externalLaunchFixture = $shellText + "`n" +
+    '"${powershell_path}" -NoLogo -NoProfile -NonInteractive -Command "& (\"Set-\" + \"ExecutionPolicy\") -Scope CurrentUser RemoteSigned"' + "`n"
+$externalLaunchTokenFailure = $null
+try {
+    Assert-PshGoal1ShellPolicyTokenBoundary -Text $externalLaunchFixture -Remediation $policyRemediation
+}
+catch {
+    $externalLaunchTokenFailure = $_
+}
+Assert-PshCondition ($null -ne $externalLaunchTokenFailure -and
+    [string]$externalLaunchTokenFailure.Exception.Message -like '*composed execution-policy token outside reviewed remediations*') 'A parameter-expanded external composed policy launch escaped the install.sh token boundary.'
+$externalLaunchFailure = $null
+try {
+    [void](Get-PshGoal1InstallShellPowerShellPayloads -Text $externalLaunchFixture)
+}
+catch {
+    $externalLaunchFailure = $_
+}
+Assert-PshCondition ($null -ne $externalLaunchFailure -and
+    [string]$externalLaunchFailure.Exception.Message -like '*powershell_path reference inventory changed*') 'An extra payload-external PowerShell launch escaped the install.sh reference inventory.'
+
+foreach ($shellPowerShellPayload in $shellPowerShellPayloads) {
+    $shellPayloadTokens = $null
+    $shellPayloadParseErrors = $null
+    $shellPayloadAst = [System.Management.Automation.Language.Parser]::ParseInput(
+        [string]$shellPowerShellPayload.Text,
+        [ref]$shellPayloadTokens,
+        [ref]$shellPayloadParseErrors
+    )
+    Assert-PshCondition (@($shellPayloadParseErrors).Count -eq 0) "The install.sh $($shellPowerShellPayload.Label) PowerShell payload could not be parsed."
+    foreach ($finding in @(Get-PshGoal1PowerShellMutationFindingsFromAst -Ast $shellPayloadAst -Label ("src/install/install.sh:" + [string]$shellPowerShellPayload.Label))) {
+        $policyCommandFindings.Add($finding)
+    }
+}
 
 $policyFixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('psh-goal1-policy-fixtures-' + [Guid]::NewGuid().ToString('N'))
 try {
@@ -433,14 +780,25 @@ try {
     [IO.File]::WriteAllText((Join-Path $policyFixtureRoot 'src/bootstrapper/Program.cs'), ('private const string PolicyRemediation = "' + $policyRemediation + '";' + "`n"), $fixtureEncoding)
     [IO.File]::WriteAllText((Join-Path $policyFixtureRoot 'src/install/install.ps1'), ('$script:PshOnlinePolicyRemediation = ' + "'$policyRemediation'" + "`n"), $fixtureEncoding)
     [IO.File]::WriteAllText((Join-Path $policyFixtureRoot 'src/install/install-offline.ps1'), ('$script:PshOfflinePolicyRemediation = ' + "'$policyRemediation'" + "`n"), $fixtureEncoding)
-    $allowedShellFixture = ('policy_remediation=' + "'$policyRemediation'" + "`n" +
-        '"$powershell_path" -NoLogo -NoProfile -NonInteractive -Command \' + "`n" +
-        '    ''$ErrorActionPreference="Stop";$remediation="' + $policyRemediation + '";[Console]::Error.WriteLine($remediation)'' \' + "`n")
+    $allowedShellFixtureLines = @(
+        ('policy_remediation=' + "'$policyRemediation'"),
+        ('catch { Throw-PshShellParentFailure 4 "PshExecutionPolicyProbe" "Dependency" "Unable to determine the effective PowerShell execution policy." "' + $policyRemediation + '" }'),
+        ('catch { Throw-PshShellParentFailure 4 "PshExecutionPolicyProbe" "Dependency" ([string]$_.Exception.Message) "' + $policyRemediation + '" }'),
+        ('catch { Throw-PshShellParentFailure 4 "PshExecutionPolicyProbe" "Dependency" "Unable to inspect the installer Authenticode status required by execution policy." "' + $policyRemediation + '" }'),
+        ('Throw-PshShellParentFailure 4 "PshExecutionPolicy" "Dependency" "PowerShell execution policy does not allow this installer workflow." "' + $policyRemediation + '"')
+    )
+    $allowedShellFixture = [string]::Join("`n", $allowedShellFixtureLines) + "`n"
     [IO.File]::WriteAllText((Join-Path $policyFixtureRoot 'src/install/install.sh'), $allowedShellFixture, $fixtureEncoding)
     $allowedFixtureFiles = @(Get-ChildItem -LiteralPath (Join-Path $policyFixtureRoot 'src') -Recurse -File)
     $allowedFixtureMatches = @($allowedFixtureFiles | ForEach-Object { Select-String -LiteralPath $_.FullName -SimpleMatch 'Set-ExecutionPolicy' })
-    Assert-PshCondition ($allowedFixtureMatches.Count -eq 5 -and
+    Assert-PshCondition ($allowedFixtureMatches.Count -eq 8 -and
         @($allowedFixtureMatches | Where-Object { -not (Test-PshGoal1AllowedPolicyRemediationMatch -Match $_ -Root $policyFixtureRoot -Remediation $policyRemediation) }).Count -eq 0) 'The exact read-only remediation fixture was not allowed.'
+    $unapprovedShellMatch = [pscustomobject]@{
+        Path = Join-Path $policyFixtureRoot 'src/install/install.sh'
+        Line = 'Throw-PshShellParentFailure 4 "PshExecutionPolicy" "Dependency" "Unreviewed diagnostic." "' + $policyRemediation + '"'
+        LineNumber = 99
+    }
+    Assert-PshCondition (-not (Test-PshGoal1AllowedPolicyRemediationMatch -Match $unapprovedShellMatch -Root $policyFixtureRoot -Remediation $policyRemediation)) 'An unreviewed install.sh policy remediation site was allowed.'
 
     $rejectedPolicyFixtures = @(
         @{ Name = 'direct-policy.ps1'; Text = 'Set-ExecutionPolicy -Scope CurrentUser RemoteSigned' },
