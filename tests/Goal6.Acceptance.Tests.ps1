@@ -53,37 +53,16 @@ Describe 'Goal 6 fixed Goal 1-5 acceptance matrix' {
         $script:Goal6Utf8 = New-Object Text.UTF8Encoding($false, $true)
         $script:Goal6EnginePath = [string](Get-Process -Id $PID -ErrorAction Stop).Path
         $script:Goal6AcceptanceTimeoutMilliseconds = 900000
+        $processHarnessPath = Join-Path $script:Goal6RepositoryRoot 'tests/TestHelpers/Goal6ProcessHarness.ps1'
         if ([string]::IsNullOrWhiteSpace($script:Goal6EnginePath) -or -not [IO.File]::Exists($script:Goal6EnginePath)) {
             throw 'Unable to resolve the current PowerShell executable.'
         }
+        if (-not [IO.File]::Exists($processHarnessPath)) { throw "Required Goal 6 process harness is missing: $processHarnessPath" }
+        if ($null -eq (Get-Command -Name Get-CimInstance -ErrorAction SilentlyContinue)) { throw 'Goal 6 process cleanup requires Get-CimInstance.' }
+        . $processHarnessPath
         foreach ($requiredGoldenRoot in @($script:Goal6Batch1GoldenRoot, $script:Goal6Batch2GoldenRoot, $script:Goal6Batch4GoldenRoot)) {
             if (-not [IO.Directory]::Exists($requiredGoldenRoot)) {
                 throw "Required GNU golden directory is missing: $requiredGoldenRoot"
-            }
-        }
-
-        function Invoke-PshGoal6AcceptanceProcessTreeTermination {
-            param([Parameter(Mandatory = $true)][Diagnostics.Process] $Process)
-
-            $taskKillPath = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { $null } else { Join-Path $env:SystemRoot 'System32/taskkill.exe' }
-            if (-not [string]::IsNullOrWhiteSpace($taskKillPath) -and [IO.File]::Exists($taskKillPath)) {
-                $oldPreference = $ErrorActionPreference
-                try {
-                    $ErrorActionPreference = 'Continue'
-                    & $taskKillPath /PID ([string]$Process.Id) /T /F 2>&1 | Microsoft.PowerShell.Core\Out-Null
-                }
-                catch { [void]$_.Exception.Message }
-                finally {
-                    $ErrorActionPreference = $oldPreference
-                    $global:LASTEXITCODE = 0
-                }
-            }
-            try {
-                if (-not $Process.HasExited) { $Process.Kill() }
-            }
-            catch { [void]$_.Exception.Message }
-            if (-not $Process.WaitForExit(5000)) {
-                throw "Timed-out acceptance child process $($Process.Id) could not be terminated."
             }
         }
 
@@ -127,19 +106,15 @@ exit 0
 '@
                 $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
                 $process = $null
-                $timedOut = $false
-                $exitCode = $null
+                $completion = $null
                 try {
                     [Environment]::SetEnvironmentVariable('PSH_GOAL6_CHILD_CONFIG', $childConfigPath, 'Process')
-                    $process = Start-Process -FilePath $script:Goal6EnginePath -ArgumentList @(
-                        '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand
-                    ) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru -ErrorAction Stop
-                    if (-not $process.WaitForExit($script:Goal6AcceptanceTimeoutMilliseconds)) {
-                        $timedOut = $true
-                        Invoke-PshGoal6AcceptanceProcessTreeTermination -Process $process
+                    foreach ($streamPath in @($stdoutPath, $stderrPath)) {
+                        if ([IO.File]::Exists($streamPath)) { [IO.File]::Delete($streamPath) }
                     }
-                    [void]$process.WaitForExit()
-                    $exitCode = if ($timedOut) { 124 } else { [int]$process.ExitCode }
+                    $started = Start-PshGoal6RedirectedProcess -FilePath $script:Goal6EnginePath -Arguments ("-NoLogo -NoProfile -NonInteractive -EncodedCommand $encodedCommand")
+                    $process = $started.Process
+                    $completion = Complete-PshGoal6BoundedProcess -Process $process -TimeoutMilliseconds $script:Goal6AcceptanceTimeoutMilliseconds -StdoutPath $stdoutPath -StderrPath $stderrPath -StdoutTask $started.StdoutTask -StderrTask $started.StderrTask -ArtifactRoot $caseRoot -Label "Acceptance child '$Name'"
                 }
                 finally {
                     [Environment]::SetEnvironmentVariable('PSH_GOAL6_CHILD_CONFIG', $oldChildConfig, 'Process')
@@ -150,10 +125,14 @@ exit 0
                 $logText = "[stdout]`n$stdoutText`n[stderr]`n$stderrText"
                 if (-not $logText.EndsWith("`n", [StringComparison]::Ordinal)) { $logText += "`n" }
                 [IO.File]::WriteAllText($logPath, $logText, $script:Goal6Utf8)
+                if ($null -eq $completion) { throw "Acceptance child '$Name' returned no bounded process result; log: $logPath" }
+                if (-not [bool]$completion.CleanupSucceeded) {
+                    throw ("Acceptance child '$Name' process cleanup failed; log: $logPath; " + (@($completion.CleanupErrors) -join '; '))
+                }
                 $lines = @($logText.Replace("`r`n", "`n").Replace("`r", "`n").Split("`n"))
                 return [pscustomobject][ordered]@{
-                    ExitCode = $exitCode
-                    TimedOut = $timedOut
+                    ExitCode = [int]$completion.ExitCode
+                    TimedOut = [bool]$completion.TimedOut
                     DeferredOrSkipped = $logText -match '(?im)^\s*(?:skip(?:ped)?|defer(?:red)?)(?:\s*:|\b)'
                     LogPath = $logPath
                     StdoutPath = $stdoutPath

@@ -19,7 +19,11 @@ param(
     [string] $GoldenRoot,
 
     [Parameter(Mandatory = $true)]
-    [string] $ReportRoot
+    [string] $ReportRoot,
+
+    [Parameter()]
+    [ValidateSet('AMD64', 'ARM64')]
+    [string] $ExpectedArchitecture
 )
 
 Set-StrictMode -Version 2.0
@@ -30,11 +34,43 @@ $GoldenRoot = [IO.Path]::GetFullPath($GoldenRoot)
 $ReportRoot = [IO.Path]::GetFullPath($ReportRoot)
 if (-not [IO.Directory]::Exists($RepositoryRoot)) { throw "RepositoryRoot is missing: $RepositoryRoot" }
 if (-not [IO.Directory]::Exists($GoldenRoot)) { throw "GoldenRoot is missing: $GoldenRoot" }
+if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'Goal 6 Pester requires Windows.' }
 foreach ($name in @('batch1', 'batch2', 'batch4')) {
     $path = Join-Path $GoldenRoot $name
     if (-not [IO.Directory]::Exists($path)) { throw "Required GNU golden directory is missing: $path" }
 }
 [void][IO.Directory]::CreateDirectory($ReportRoot)
+
+function ConvertTo-PshGoal6ArchitectureName {
+    param([Parameter(Mandatory = $true)][string] $Value)
+
+    switch -Regex ($Value) {
+        '\A(?:AMD64|X64|X86_64)\z' { return 'AMD64' }
+        '\A(?:ARM64|ARM64EC|AARCH64)\z' { return 'ARM64' }
+        '\A(?:X86|I386|I686)\z' { return 'X86' }
+        default { return $Value.ToUpperInvariant() }
+    }
+}
+
+$architectureSource = 'RuntimeInformation'
+try {
+    $processArchitecture = ConvertTo-PshGoal6ArchitectureName -Value ([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString())
+    $osArchitecture = ConvertTo-PshGoal6ArchitectureName -Value ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString())
+}
+catch {
+    $architectureSource = 'EnvironmentFallback'
+    $processArchitecture = ConvertTo-PshGoal6ArchitectureName -Value ([string]$env:PROCESSOR_ARCHITECTURE)
+    $osArchitectureValue = if (-not [string]::IsNullOrWhiteSpace([string]$env:PROCESSOR_ARCHITEW6432)) { [string]$env:PROCESSOR_ARCHITEW6432 } else { [string]$env:PROCESSOR_ARCHITECTURE }
+    $osArchitecture = ConvertTo-PshGoal6ArchitectureName -Value $osArchitectureValue
+}
+$expectedNativeArchitecture = if ($PSBoundParameters.ContainsKey('ExpectedArchitecture')) { ConvertTo-PshGoal6ArchitectureName -Value $ExpectedArchitecture } else { $osArchitecture }
+if ($expectedNativeArchitecture -cnotin @('AMD64', 'ARM64')) {
+    throw "Goal 6 supports only native AMD64 or ARM64 Windows runners; found OS architecture '$osArchitecture'."
+}
+if (-not [Environment]::Is64BitProcess -or $processArchitecture -cne $expectedNativeArchitecture -or $osArchitecture -cne $expectedNativeArchitecture) {
+    throw "Goal 6 requires a native 64-bit $expectedNativeArchitecture PowerShell process; process=$processArchitecture; os=$osArchitecture; Is64BitProcess=$([Environment]::Is64BitProcess)."
+}
+$ExpectedArchitecture = $expectedNativeArchitecture
 
 [Version] $requestedVersion = $PesterVersion
 $loadedPester = @(Get-Module -Name Pester)
@@ -81,6 +117,7 @@ $utf8 = New-Object Text.UTF8Encoding($false, $true)
 $oldRepositoryRoot = [Environment]::GetEnvironmentVariable('PSH_GOAL6_REPOSITORY_ROOT', 'Process')
 $oldGoldenRoot = [Environment]::GetEnvironmentVariable('PSH_GOAL6_GOLDEN_ROOT', 'Process')
 $oldReportRoot = [Environment]::GetEnvironmentVariable('PSH_GOAL6_REPORT_ROOT', 'Process')
+$oldExpectedArchitecture = [Environment]::GetEnvironmentVariable('PSH_GOAL6_EXPECTED_ARCHITECTURE', 'Process')
 $startedUtc = [DateTime]::UtcNow
 $result = $null
 $invocationFailure = $null
@@ -88,6 +125,7 @@ try {
     [Environment]::SetEnvironmentVariable('PSH_GOAL6_REPOSITORY_ROOT', $RepositoryRoot, 'Process')
     [Environment]::SetEnvironmentVariable('PSH_GOAL6_GOLDEN_ROOT', $GoldenRoot, 'Process')
     [Environment]::SetEnvironmentVariable('PSH_GOAL6_REPORT_ROOT', $ReportRoot, 'Process')
+    [Environment]::SetEnvironmentVariable('PSH_GOAL6_EXPECTED_ARCHITECTURE', $ExpectedArchitecture, 'Process')
 
     $configuration = New-PesterConfiguration
     $configuration.Run.Path = $testPaths
@@ -124,7 +162,13 @@ finally {
         runtime = [pscustomobject][ordered]@{
             version = [string]$PSVersionTable.PSVersion
             edition = if ($null -ne $PSVersionTable.PSObject.Properties['PSEdition']) { [string]$PSVersionTable.PSEdition } else { 'Desktop' }
-            processArchitecture = if ([string]::IsNullOrWhiteSpace([string]$env:PROCESSOR_ARCHITEW6432)) { [string]$env:PROCESSOR_ARCHITECTURE } else { [string]$env:PROCESSOR_ARCHITEW6432 }
+            is64BitProcess = [Environment]::Is64BitProcess
+            expectedArchitecture = $ExpectedArchitecture
+            processArchitecture = $processArchitecture
+            osArchitecture = $osArchitecture
+            architectureSource = $architectureSource
+            processorArchitecture = [string]$env:PROCESSOR_ARCHITECTURE
+            processorArchitectureW6432 = [string]$env:PROCESSOR_ARCHITEW6432
         }
         startedUtc = $startedUtc.ToString('o')
         finishedUtc = $finishedUtc.ToString('o')
@@ -143,6 +187,7 @@ finally {
     [Environment]::SetEnvironmentVariable('PSH_GOAL6_REPOSITORY_ROOT', $oldRepositoryRoot, 'Process')
     [Environment]::SetEnvironmentVariable('PSH_GOAL6_GOLDEN_ROOT', $oldGoldenRoot, 'Process')
     [Environment]::SetEnvironmentVariable('PSH_GOAL6_REPORT_ROOT', $oldReportRoot, 'Process')
+    [Environment]::SetEnvironmentVariable('PSH_GOAL6_EXPECTED_ARCHITECTURE', $oldExpectedArchitecture, 'Process')
 }
 
 if ($null -ne $invocationFailure) { throw $invocationFailure }
