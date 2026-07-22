@@ -85,6 +85,166 @@ function New-PshGoal6QualityZip {
     finally { $stream.Dispose() }
 }
 
+function New-PshGoal6QualityRepeatedBytes {
+    param(
+        [Parameter(Mandatory = $true)][int]$Count,
+        [Parameter(Mandatory = $true)][byte]$Value
+    )
+
+    $bytes = New-Object byte[] $Count
+    for ($index = 0; $index -lt $bytes.Length; $index++) { $bytes[$index] = $Value }
+    return ,$bytes
+}
+
+function Write-PshGoal6QualityExtraField {
+    param(
+        [Parameter(Mandatory = $true)][IO.BinaryWriter]$Writer,
+        [Parameter(Mandatory = $true)][uint16]$HeaderId,
+        [Parameter(Mandatory = $true)][byte[]]$Data
+    )
+
+    $Writer.Write($HeaderId)
+    $Writer.Write([uint16]$Data.Length)
+    $Writer.Write($Data)
+}
+
+function New-PshGoal6QualityTimestampExtras {
+    param(
+        [Parameter(Mandatory = $true)][byte]$TimeByte,
+        [byte]$NonTimeByte = 0x33,
+        [byte]$CentralFlags = 0x07,
+        [switch]$MalformedExtendedLength,
+        [switch]$MalformedNtfsFileTimeLength
+    )
+
+    $localStream = New-Object IO.MemoryStream
+    $centralStream = New-Object IO.MemoryStream
+    $localWriter = New-Object IO.BinaryWriter($localStream)
+    $centralWriter = New-Object IO.BinaryWriter($centralStream)
+    try {
+        $localExtended = New-Object byte[] 13
+        $localExtended[0] = 0x07
+        for ($index = 1; $index -lt $localExtended.Length; $index++) { $localExtended[$index] = $TimeByte }
+        Write-PshGoal6QualityExtraField -Writer $localWriter -HeaderId 0x5455 -Data $localExtended
+
+        $centralExtended = New-Object byte[] 5
+        $centralExtended[0] = $CentralFlags
+        for ($index = 1; $index -lt $centralExtended.Length; $index++) { $centralExtended[$index] = $TimeByte }
+        Write-PshGoal6QualityExtraField -Writer $centralWriter -HeaderId 0x5455 -Data $centralExtended
+
+        foreach ($writer in @($localWriter, $centralWriter)) {
+            $ntfsStream = New-Object IO.MemoryStream
+            $ntfsWriter = New-Object IO.BinaryWriter($ntfsStream)
+            try {
+                $ntfsWriter.Write([byte[]]@(0x10, 0x20, 0x30, 0x40))
+                $ntfsWriter.Write([uint16]0x0001)
+                $ntfsWriter.Write([uint16]$(if ($MalformedNtfsFileTimeLength) { 23 } else { 24 }))
+                $ntfsWriter.Write((New-PshGoal6QualityRepeatedBytes -Count 24 -Value $TimeByte))
+                $ntfsWriter.Write([uint16]0x0002)
+                $ntfsWriter.Write([uint16]2)
+                $ntfsWriter.Write([byte[]]@($NonTimeByte, 0x44))
+                $ntfsWriter.Flush()
+                Write-PshGoal6QualityExtraField -Writer $writer -HeaderId 0x000A -Data $ntfsStream.ToArray()
+            }
+            finally { $ntfsWriter.Dispose(); $ntfsStream.Dispose() }
+        }
+
+        $localUnix1 = New-Object byte[] 12
+        for ($index = 0; $index -lt 8; $index++) { $localUnix1[$index] = $TimeByte }
+        [Array]::Copy([byte[]]@(0x34, 0x12, 0x78, 0x56), 0, $localUnix1, 8, 4)
+        Write-PshGoal6QualityExtraField -Writer $localWriter -HeaderId 0x5855 -Data $localUnix1
+        Write-PshGoal6QualityExtraField -Writer $centralWriter -HeaderId 0x5855 -Data (New-PshGoal6QualityRepeatedBytes -Count 8 -Value $TimeByte)
+
+        $pkwareUnix = New-Object byte[] 14
+        for ($index = 0; $index -lt 8; $index++) { $pkwareUnix[$index] = $TimeByte }
+        [Array]::Copy([byte[]]@(0x11, 0x11, 0x22, 0x22, 0x55, 0x66), 0, $pkwareUnix, 8, 6)
+        Write-PshGoal6QualityExtraField -Writer $localWriter -HeaderId 0x000D -Data $pkwareUnix
+
+        Write-PshGoal6QualityExtraField -Writer $localWriter -HeaderId 0xCAFE -Data ([byte[]]@($NonTimeByte, 0x77, 0x88))
+        Write-PshGoal6QualityExtraField -Writer $centralWriter -HeaderId 0xCAFE -Data ([byte[]]@($NonTimeByte, 0x77, 0x88))
+        $localWriter.Flush()
+        $centralWriter.Flush()
+        [byte[]]$localBytes = $localStream.ToArray()
+        [byte[]]$centralBytes = $centralStream.ToArray()
+        if ($MalformedExtendedLength) {
+            $localBytes[2] = 12
+            $localBytes[3] = 0
+        }
+        return [pscustomobject]@{
+            local = $localBytes
+            central = $centralBytes
+        }
+    }
+    finally {
+        $centralWriter.Dispose()
+        $localWriter.Dispose()
+        $centralStream.Dispose()
+        $localStream.Dispose()
+    }
+}
+
+function Set-PshGoal6QualityUInt16 {
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [Parameter(Mandatory = $true)][int]$Offset,
+        [Parameter(Mandatory = $true)][uint16]$Value
+    )
+
+    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Bytes, $Offset, 2)
+}
+
+function Set-PshGoal6QualityUInt32 {
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [Parameter(Mandatory = $true)][int]$Offset,
+        [Parameter(Mandatory = $true)][uint32]$Value
+    )
+
+    [Array]::Copy([BitConverter]::GetBytes($Value), 0, $Bytes, $Offset, 4)
+}
+
+function Add-PshGoal6QualityZipExtras {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Parameter(Mandatory = $true)][byte[]]$LocalExtra,
+        [Parameter(Mandatory = $true)][byte[]]$CentralExtra
+    )
+
+    [byte[]]$source = [IO.File]::ReadAllBytes($SourcePath)
+    $eocdOffset = $source.Length - 22
+    Assert-PshGoal6Quality ([BitConverter]::ToUInt32($source, $eocdOffset) -eq 0x06054B50) 'Raw ZIP fixture is missing its expected EOCD record.'
+    $centralOffset = [int][BitConverter]::ToUInt32($source, $eocdOffset + 16)
+    $centralSize = [int][BitConverter]::ToUInt32($source, $eocdOffset + 12)
+    Assert-PshGoal6Quality ([BitConverter]::ToUInt32($source, $centralOffset) -eq 0x02014B50) 'Raw ZIP fixture is missing its expected central header.'
+    $localOffset = [int][BitConverter]::ToUInt32($source, $centralOffset + 42)
+    $localNameLength = [int][BitConverter]::ToUInt16($source, $localOffset + 26)
+    $localExtraLength = [int][BitConverter]::ToUInt16($source, $localOffset + 28)
+    $centralNameLength = [int][BitConverter]::ToUInt16($source, $centralOffset + 28)
+    $centralExtraLength = [int][BitConverter]::ToUInt16($source, $centralOffset + 30)
+    $localInsertOffset = $localOffset + 30 + $localNameLength + $localExtraLength
+    $centralInsertOffset = $centralOffset + 46 + $centralNameLength + $centralExtraLength
+
+    $stream = New-Object IO.MemoryStream
+    try {
+        $stream.Write($source, 0, $localInsertOffset)
+        $stream.Write($LocalExtra, 0, $LocalExtra.Length)
+        $stream.Write($source, $localInsertOffset, $centralInsertOffset - $localInsertOffset)
+        $stream.Write($CentralExtra, 0, $CentralExtra.Length)
+        $stream.Write($source, $centralInsertOffset, $source.Length - $centralInsertOffset)
+        [byte[]]$patched = $stream.ToArray()
+    }
+    finally { $stream.Dispose() }
+
+    Set-PshGoal6QualityUInt16 -Bytes $patched -Offset ($localOffset + 28) -Value ([uint16]($localExtraLength + $LocalExtra.Length))
+    $newCentralOffset = $centralOffset + $LocalExtra.Length
+    Set-PshGoal6QualityUInt16 -Bytes $patched -Offset ($newCentralOffset + 30) -Value ([uint16]($centralExtraLength + $CentralExtra.Length))
+    $newEocdOffset = $eocdOffset + $LocalExtra.Length + $CentralExtra.Length
+    Set-PshGoal6QualityUInt32 -Bytes $patched -Offset ($newEocdOffset + 12) -Value ([uint32]($centralSize + $CentralExtra.Length))
+    Set-PshGoal6QualityUInt32 -Bytes $patched -Offset ($newEocdOffset + 16) -Value ([uint32]$newCentralOffset)
+    [IO.File]::WriteAllBytes($DestinationPath, $patched)
+}
+
 try {
     [void][IO.Directory]::CreateDirectory($testRoot)
     $lockPath = Join-Path $repositoryRootPath 'scripts/goal6/ci-dependencies.lock.json'
@@ -99,6 +259,34 @@ try {
     Assert-PshGoal6Quality ($analyzerGateText -match '\bIncludeSuppressed\b' -and $analyzerGateText -match '\bIsSuppressed\b' -and $analyzerGateText -match '\bSuppressMessage(Attribute)?\b') 'The analyzer gate no longer includes and audits suppressed diagnostics and attributes.'
     $secretGateText = Get-PshGoal6StrictText -Path (Join-Path $repositoryRootPath 'scripts/goal6/Invoke-Goal6SecretScan.ps1')
     Assert-PshGoal6Quality ($secretGateText -match [regex]::Escape('--log-opts=--all') -and $secretGateText -match '\bAssert-PshGoal6RemoteRefCoverage\b') 'The secret gate no longer explicitly scans all refs after remote parity validation.'
+    Assert-PshGoal6Quality ($secretGateText -match '\bGITLEAKS_CONFIG\b' -and $secretGateText -match '\bGITLEAKS_CONFIG_TOML\b' -and $secretGateText -match [regex]::Escape('--gitleaks-ignore-path')) 'The secret gate no longer rejects inherited gitleaks configuration or fixes the ignore root.'
+
+    $secretScriptPath = Join-Path $repositoryRootPath 'scripts/goal6/Invoke-Goal6SecretScan.ps1'
+    $zeroRuleConfigPath = Join-Path $testRoot 'zero-rule-gitleaks.toml'
+    Write-PshGoal6Text -Path $zeroRuleConfigPath -Text "title = 'zero rules'`n"
+    $gitleaksEnvironmentNames = @('GITLEAKS_CONFIG', 'GITLEAKS_CONFIG_TOML')
+    $originalGitleaksEnvironment = @{}
+    foreach ($name in $gitleaksEnvironmentNames) { $originalGitleaksEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process) }
+    try {
+        foreach ($name in $gitleaksEnvironmentNames) {
+            foreach ($clearName in $gitleaksEnvironmentNames) { Remove-Item -LiteralPath ("Env:$clearName") -ErrorAction SilentlyContinue }
+            $value = if ($name -ceq 'GITLEAKS_CONFIG') { $zeroRuleConfigPath } else { "title = 'zero rules'`n" }
+            [Environment]::SetEnvironmentVariable($name, $value, [EnvironmentVariableTarget]::Process)
+            $secretReportRoot = Join-Path $testRoot ('secret-env-' + $name.ToLowerInvariant())
+            $secretFailure = $null
+            try { $null = & $secretScriptPath -DependencyRoot (Join-Path $testRoot 'missing-secret-dependencies') -ReportRoot $secretReportRoot -RepositoryRoot $repositoryRootPath }
+            catch { $secretFailure = [string]$_.Exception.Message }
+            Assert-PshGoal6Quality ($secretFailure -match [regex]::Escape($name) -and $secretFailure -match 'unset') "Secret scan did not reject inherited $name before dependency probing."
+            $secretSummary = (Get-PshGoal6StrictText -Path (Join-Path $secretReportRoot 'gitleaks-summary.json')) | ConvertFrom-Json -ErrorAction Stop
+            Assert-PshGoal6Quality ([string]$secretSummary.status -ceq 'failed' -and [string]$secretSummary.error -match [regex]::Escape($name)) "Secret scan summary did not record inherited $name as a failed gate."
+        }
+    }
+    finally {
+        foreach ($name in $gitleaksEnvironmentNames) {
+            if ($null -eq $originalGitleaksEnvironment[$name]) { Remove-Item -LiteralPath ("Env:$name") -ErrorAction SilentlyContinue }
+            else { [Environment]::SetEnvironmentVariable($name, [string]$originalGitleaksEnvironment[$name], [EnvironmentVariableTarget]::Process) }
+        }
+    }
 
     $leafTraversalLock = New-PshGoal6QualityLockCopy -Name 'package-file-name-traversal' -Mutation {
         param($value)
@@ -154,6 +342,33 @@ try {
     Assert-PshGoal6QualityThrows -Action { Complete-PshGoal6DependencyInstall -StagingRoot $stagingRoot -DestinationRoot $destinationRoot -SummaryPath $invalidSummaryPath -Summary ([pscustomobject]@{ status = 'passed' }) } -MessagePattern 'committed dependency directory was rolled back' -Description 'Dependency summary transaction'
     Assert-PshGoal6Quality (-not [IO.Directory]::Exists($stagingRoot) -and -not [IO.Directory]::Exists($destinationRoot)) 'Dependency summary failure left staging or committed dependency bytes behind.'
 
+    $rewriteStagingRoot = Join-Path $testRoot 'rewrite.staging'
+    $rewriteDestinationRoot = Join-Path $testRoot 'rewrite.committed'
+    $rewriteSummaryPath = Join-Path $testRoot 'rewrite-summary.json'
+    [void][IO.Directory]::CreateDirectory($rewriteStagingRoot)
+    [void][IO.File]::WriteAllText((Join-Path $rewriteStagingRoot 'marker.txt'), 'committed bytes')
+    $rewriteSummary = [pscustomobject][ordered]@{ status = 'passed'; error = $null; rollback = $null }
+    $originalJsonWriter = (Get-Command -Name Write-PshGoal6Json -CommandType Function -ErrorAction Stop).ScriptBlock
+    $script:PshGoal6QualityOriginalJsonWriter = $originalJsonWriter
+    $script:PshGoal6QualityJsonWriteCalls = 0
+    try {
+        Set-Item -LiteralPath Function:Write-PshGoal6Json -Value {
+            param([string]$Path, [object]$InputObject)
+            $script:PshGoal6QualityJsonWriteCalls++
+            if ($script:PshGoal6QualityJsonWriteCalls -eq 1) { throw 'controlled first summary write failure' }
+            & $script:PshGoal6QualityOriginalJsonWriter -Path $Path -InputObject $InputObject
+        }
+        Assert-PshGoal6QualityThrows -Action { Complete-PshGoal6DependencyInstall -StagingRoot $rewriteStagingRoot -DestinationRoot $rewriteDestinationRoot -SummaryPath $rewriteSummaryPath -Summary $rewriteSummary } -MessagePattern 'committed dependency directory was rolled back' -Description 'Dependency failed-summary rewrite transaction'
+    }
+    finally {
+        Set-Item -LiteralPath Function:Write-PshGoal6Json -Value $originalJsonWriter
+        Remove-Variable -Name PshGoal6QualityOriginalJsonWriter, PshGoal6QualityJsonWriteCalls -Scope Script -ErrorAction SilentlyContinue
+    }
+    $rewrittenSummary = (Get-PshGoal6StrictText -Path $rewriteSummaryPath) | ConvertFrom-Json -ErrorAction Stop
+    Assert-PshGoal6Quality (-not [IO.Directory]::Exists($rewriteStagingRoot) -and -not [IO.Directory]::Exists($rewriteDestinationRoot)) 'Failed summary rewrite left staging or committed dependency bytes behind.'
+    Assert-PshGoal6Quality ([string]$rewrittenSummary.status -ceq 'failed' -and [string]$rewrittenSummary.error -match 'controlled first summary write failure') 'Rewritten dependency failure summary still claims success or lost the original error.'
+    Assert-PshGoal6Quality ([bool]$rewrittenSummary.rollback.attempted -and [bool]$rewrittenSummary.rollback.succeeded -and $null -eq $rewrittenSummary.rollback.error) 'Rewritten dependency failure summary lost successful rollback facts.'
+
     $firstZip = Join-Path $testRoot 'first.zip'
     $timestampZip = Join-Path $testRoot 'timestamp-only.zip'
     $reorderedZip = Join-Path $testRoot 'reordered.zip'
@@ -168,6 +383,37 @@ try {
     Assert-PshGoal6Quality (@(Compare-PshGoal6ZipArchiveManifest -First $firstManifest -Second $timestampManifest).Count -eq 0) 'Timestamp-only ZIP differences reached the reproducibility diff.'
     $orderDifferences = @(Compare-PshGoal6ZipArchiveManifest -First $firstManifest -Second $reorderedManifest)
     Assert-PshGoal6Quality (@($orderDifferences | Where-Object { [string]$_.kind -ceq 'archive-entry-order' }).Count -gt 0) 'ZIP entry order was not hard-compared.'
+
+    $extraBaseZip = Join-Path $testRoot 'extra-base.zip'
+    $extraFirstZip = Join-Path $testRoot 'extra-first.zip'
+    $extraTimestampZip = Join-Path $testRoot 'extra-timestamp-only.zip'
+    $extraNonTimeZip = Join-Path $testRoot 'extra-nontime.zip'
+    $extraFlagsZip = Join-Path $testRoot 'extra-flags.zip'
+    $extraMalformedZip = Join-Path $testRoot 'extra-malformed.zip'
+    $extraMalformedNtfsZip = Join-Path $testRoot 'extra-malformed-ntfs.zip'
+    New-PshGoal6QualityZip -Path $extraBaseZip -EntryNames @('extra.txt') -Timestamp (New-Object DateTimeOffset(2025, 1, 2, 3, 4, 6, [TimeSpan]::Zero))
+    $extraFirst = New-PshGoal6QualityTimestampExtras -TimeByte 0x11
+    $extraTimestamp = New-PshGoal6QualityTimestampExtras -TimeByte 0x22
+    $extraNonTime = New-PshGoal6QualityTimestampExtras -TimeByte 0x11 -NonTimeByte 0x99
+    $extraFlags = New-PshGoal6QualityTimestampExtras -TimeByte 0x11 -CentralFlags 0x05
+    $extraMalformed = New-PshGoal6QualityTimestampExtras -TimeByte 0x11 -MalformedExtendedLength
+    $extraMalformedNtfs = New-PshGoal6QualityTimestampExtras -TimeByte 0x11 -MalformedNtfsFileTimeLength
+    Add-PshGoal6QualityZipExtras -SourcePath $extraBaseZip -DestinationPath $extraFirstZip -LocalExtra $extraFirst.local -CentralExtra $extraFirst.central
+    Add-PshGoal6QualityZipExtras -SourcePath $extraBaseZip -DestinationPath $extraTimestampZip -LocalExtra $extraTimestamp.local -CentralExtra $extraTimestamp.central
+    Add-PshGoal6QualityZipExtras -SourcePath $extraBaseZip -DestinationPath $extraNonTimeZip -LocalExtra $extraNonTime.local -CentralExtra $extraNonTime.central
+    Add-PshGoal6QualityZipExtras -SourcePath $extraBaseZip -DestinationPath $extraFlagsZip -LocalExtra $extraFlags.local -CentralExtra $extraFlags.central
+    Add-PshGoal6QualityZipExtras -SourcePath $extraBaseZip -DestinationPath $extraMalformedZip -LocalExtra $extraMalformed.local -CentralExtra $extraMalformed.central
+    Add-PshGoal6QualityZipExtras -SourcePath $extraBaseZip -DestinationPath $extraMalformedNtfsZip -LocalExtra $extraMalformedNtfs.local -CentralExtra $extraMalformedNtfs.central
+    $extraFirstManifest = Get-PshGoal6ZipArchiveManifest -ArchivePath $extraFirstZip -DisplayPath 'extra.zip'
+    $extraTimestampManifest = Get-PshGoal6ZipArchiveManifest -ArchivePath $extraTimestampZip -DisplayPath 'extra.zip'
+    $extraNonTimeManifest = Get-PshGoal6ZipArchiveManifest -ArchivePath $extraNonTimeZip -DisplayPath 'extra.zip'
+    $extraFlagsManifest = Get-PshGoal6ZipArchiveManifest -ArchivePath $extraFlagsZip -DisplayPath 'extra.zip'
+    Assert-PshGoal6Quality ([string]$extraFirstManifest.containerSha256Informational -cne [string]$extraTimestampManifest.containerSha256Informational) 'Extra-field timestamp fixture did not change raw ZIP bytes.'
+    Assert-PshGoal6Quality ([string]$extraFirstManifest.timestampNormalizedContainerSha256 -ceq [string]$extraTimestampManifest.timestampNormalizedContainerSha256 -and @(Compare-PshGoal6ZipArchiveManifest -First $extraFirstManifest -Second $extraTimestampManifest).Count -eq 0) 'Standard ZIP extra-field timestamp payloads were not exclusively normalized.'
+    Assert-PshGoal6Quality (@(Compare-PshGoal6ZipArchiveManifest -First $extraFirstManifest -Second $extraNonTimeManifest).Count -gt 0) 'Non-time ZIP extra-field bytes were incorrectly normalized.'
+    Assert-PshGoal6Quality (@(Compare-PshGoal6ZipArchiveManifest -First $extraFirstManifest -Second $extraFlagsManifest).Count -gt 0) 'ZIP extra-field flags were incorrectly normalized.'
+    Assert-PshGoal6QualityThrows -Action { Get-PshGoal6ZipArchiveManifest -ArchivePath $extraMalformedZip -DisplayPath 'extra-malformed.zip' } -MessagePattern 'extended-timestamp extra-field length' -Description 'Malformed ZIP extended-timestamp extra length'
+    Assert-PshGoal6QualityThrows -Action { Get-PshGoal6ZipArchiveManifest -ArchivePath $extraMalformedNtfsZip -DisplayPath 'extra-malformed-ntfs.zip' } -MessagePattern 'NTFS FILETIME attribute length' -Description 'Malformed ZIP NTFS FILETIME length'
 
     $metadataMutation = (($firstManifest | ConvertTo-Json -Depth 20) | ConvertFrom-Json -ErrorAction Stop)
     $metadataMutation.archiveCommentBase64 = 'Y29tbWVudA=='

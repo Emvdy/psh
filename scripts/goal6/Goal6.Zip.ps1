@@ -35,6 +35,104 @@ function Get-PshGoal6ZipByteSliceBase64 {
     return [Convert]::ToBase64String($slice)
 }
 
+function Clear-PshGoal6ZipNormalizedByteRange {
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$NormalizedBytes,
+        [Parameter(Mandatory = $true)][int]$Offset,
+        [Parameter(Mandatory = $true)][int]$Length
+    )
+
+    Assert-PshGoal6Condition ($Offset -ge 0 -and $Length -ge 0 -and [int64]$Offset + [int64]$Length -le $NormalizedBytes.Length) 'ZIP timestamp byte range is outside the archive.'
+    for ($index = $Offset; $index -lt $Offset + $Length; $index++) { $NormalizedBytes[$index] = 0 }
+}
+
+function ConvertTo-PshGoal6ZipNormalizedExtraField {
+    param(
+        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [Parameter(Mandatory = $true)][byte[]]$NormalizedBytes,
+        [Parameter(Mandatory = $true)][int]$Offset,
+        [Parameter(Mandatory = $true)][int]$Length,
+        [Parameter(Mandatory = $true)][ValidateSet('local', 'central')][string]$HeaderKind,
+        [Parameter(Mandatory = $true)][string]$DisplayPath,
+        [Parameter(Mandatory = $true)][int]$EntryIndex
+    )
+
+    $extraEnd = [int64]$Offset + [int64]$Length
+    Assert-PshGoal6Condition ($Offset -ge 0 -and $Length -ge 0 -and $extraEnd -le $Bytes.Length) "ZIP $HeaderKind extra-field range is outside the archive: $DisplayPath entry $EntryIndex"
+    $position = [int64]$Offset
+    while ($position -lt $extraEnd) {
+        Assert-PshGoal6Condition ($position + 4 -le $extraEnd) "ZIP $HeaderKind extra-field header is truncated: $DisplayPath entry $EntryIndex"
+        $fieldOffset = [int]$position
+        $headerId = [BitConverter]::ToUInt16($Bytes, $fieldOffset)
+        $dataLength = [int][BitConverter]::ToUInt16($Bytes, $fieldOffset + 2)
+        $dataOffset = $fieldOffset + 4
+        $fieldEnd = [int64]$dataOffset + [int64]$dataLength
+        $headerIdText = '0x{0:X4}' -f $headerId
+        Assert-PshGoal6Condition ($fieldEnd -le $extraEnd) "ZIP $HeaderKind extra field $headerIdText is truncated: $DisplayPath entry $EntryIndex"
+
+        switch ([int]$headerId) {
+            0x5455 {
+                Assert-PshGoal6Condition ($dataLength -ge 1) "ZIP $HeaderKind extended-timestamp extra field is missing flags: $DisplayPath entry $EntryIndex"
+                $flags = [int]$Bytes[$dataOffset]
+                Assert-PshGoal6Condition (($flags -band 0xF8) -eq 0) "ZIP $HeaderKind extended-timestamp extra field has reserved flags: $DisplayPath entry $EntryIndex"
+                if ($HeaderKind -ceq 'local') {
+                    $expectedLength = 1
+                    foreach ($mask in @(0x01, 0x02, 0x04)) {
+                        if (($flags -band $mask) -ne 0) { $expectedLength += 4 }
+                    }
+                    Assert-PshGoal6Condition ($dataLength -eq $expectedLength) "ZIP local extended-timestamp extra-field length disagrees with its flags: $DisplayPath entry $EntryIndex"
+                    $timestampOffset = $dataOffset + 1
+                    foreach ($mask in @(0x01, 0x02, 0x04)) {
+                        if (($flags -band $mask) -eq 0) { continue }
+                        Clear-PshGoal6ZipNormalizedByteRange -NormalizedBytes $NormalizedBytes -Offset $timestampOffset -Length 4
+                        $timestampOffset += 4
+                    }
+                }
+                else {
+                    $expectedLength = if (($flags -band 0x01) -ne 0) { 5 } else { 1 }
+                    Assert-PshGoal6Condition ($dataLength -eq $expectedLength) "ZIP central extended-timestamp extra-field length disagrees with its flags: $DisplayPath entry $EntryIndex"
+                    if (($flags -band 0x01) -ne 0) { Clear-PshGoal6ZipNormalizedByteRange -NormalizedBytes $NormalizedBytes -Offset ($dataOffset + 1) -Length 4 }
+                }
+            }
+            0x000A {
+                Assert-PshGoal6Condition ($dataLength -ge 8) "ZIP $HeaderKind NTFS extra field is too short: $DisplayPath entry $EntryIndex"
+                $attributePosition = [int64]$dataOffset + 4
+                while ($attributePosition -lt $fieldEnd) {
+                    Assert-PshGoal6Condition ($attributePosition + 4 -le $fieldEnd) "ZIP $HeaderKind NTFS attribute header is truncated: $DisplayPath entry $EntryIndex"
+                    $attributeOffset = [int]$attributePosition
+                    $attributeTag = [BitConverter]::ToUInt16($Bytes, $attributeOffset)
+                    $attributeLength = [int][BitConverter]::ToUInt16($Bytes, $attributeOffset + 2)
+                    $attributeDataOffset = $attributeOffset + 4
+                    $attributeEnd = [int64]$attributeDataOffset + [int64]$attributeLength
+                    Assert-PshGoal6Condition ($attributeEnd -le $fieldEnd) "ZIP $HeaderKind NTFS attribute is truncated: $DisplayPath entry $EntryIndex"
+                    if ($attributeTag -eq 0x0001) {
+                        Assert-PshGoal6Condition ($attributeLength -eq 24) "ZIP $HeaderKind NTFS FILETIME attribute length is not 24 bytes: $DisplayPath entry $EntryIndex"
+                        Clear-PshGoal6ZipNormalizedByteRange -NormalizedBytes $NormalizedBytes -Offset $attributeDataOffset -Length 24
+                    }
+                    $attributePosition = $attributeEnd
+                }
+                Assert-PshGoal6Condition ($attributePosition -eq $fieldEnd) "ZIP $HeaderKind NTFS attribute layout is malformed: $DisplayPath entry $EntryIndex"
+            }
+            0x5855 {
+                if ($HeaderKind -ceq 'local') {
+                    Assert-PshGoal6Condition ($dataLength -eq 8 -or $dataLength -eq 12) "ZIP local Info-ZIP Unix1 extra-field length is not 8 or 12 bytes: $DisplayPath entry $EntryIndex"
+                }
+                else {
+                    Assert-PshGoal6Condition ($dataLength -eq 8) "ZIP central Info-ZIP Unix1 extra-field length is not 8 bytes: $DisplayPath entry $EntryIndex"
+                }
+                Clear-PshGoal6ZipNormalizedByteRange -NormalizedBytes $NormalizedBytes -Offset $dataOffset -Length 8
+            }
+            0x000D {
+                Assert-PshGoal6Condition ($HeaderKind -ceq 'local') "ZIP PKWARE Unix extra field is only valid in a local header: $DisplayPath entry $EntryIndex"
+                Assert-PshGoal6Condition ($dataLength -ge 12) "ZIP local PKWARE Unix extra field is shorter than 12 bytes: $DisplayPath entry $EntryIndex"
+                Clear-PshGoal6ZipNormalizedByteRange -NormalizedBytes $NormalizedBytes -Offset $dataOffset -Length 8
+            }
+        }
+        $position = $fieldEnd
+    }
+    Assert-PshGoal6Condition ($position -eq $extraEnd) "ZIP $HeaderKind extra-field layout is malformed: $DisplayPath entry $EntryIndex"
+}
+
 function Get-PshGoal6ZipArchiveManifest {
     param(
         [Parameter(Mandatory = $true)][string]$ArchivePath,
@@ -97,6 +195,7 @@ function Get-PshGoal6ZipArchiveManifest {
         $extraOffset = $fileNameOffset + $fileNameLength
         $entryCommentOffset = $extraOffset + $extraLength
         for ($timestampOffset = $position + 12; $timestampOffset -le $position + 15; $timestampOffset++) { $normalizedBytes[$timestampOffset] = 0 }
+        ConvertTo-PshGoal6ZipNormalizedExtraField -Bytes $bytes -NormalizedBytes $normalizedBytes -Offset $extraOffset -Length $extraLength -HeaderKind central -DisplayPath $DisplayPath -EntryIndex $index
         $centralEntries.Add([pscustomobject][ordered]@{
                 index = $index
                 path = $null
@@ -112,7 +211,7 @@ function Get-PshGoal6ZipArchiveManifest {
                 internalAttributes = ('0x{0:X4}' -f $internalAttributes)
                 externalAttributes = ('0x{0:X8}' -f $externalAttributes)
                 fileNameBytesBase64 = Get-PshGoal6ZipByteSliceBase64 -Bytes $bytes -Offset $fileNameOffset -Length $fileNameLength
-                centralExtraBase64 = Get-PshGoal6ZipByteSliceBase64 -Bytes $bytes -Offset $extraOffset -Length $extraLength
+                centralExtraBase64 = Get-PshGoal6ZipByteSliceBase64 -Bytes $normalizedBytes -Offset $extraOffset -Length $extraLength
                 entryCommentBase64 = Get-PshGoal6ZipByteSliceBase64 -Bytes $bytes -Offset $entryCommentOffset -Length $entryCommentLength
                 localExtraBase64 = $null
                 localHeaderOffset = [int64]$localHeaderOffset
@@ -136,8 +235,10 @@ function Get-PshGoal6ZipArchiveManifest {
         Assert-PshGoal6Condition ($localFlags -eq [uint16]$metadata.flagsValue -and $localMethod -eq [uint16]$metadata.compressionMethodValue) "ZIP local/central compression flags or method differ: $DisplayPath entry $($metadata.index)"
         $localNameBase64 = Get-PshGoal6ZipByteSliceBase64 -Bytes $bytes -Offset ($localPosition + 30) -Length $localNameLength
         Assert-PshGoal6Condition ($localNameBase64 -ceq [string]$metadata.fileNameBytesBase64) "ZIP local/central entry names differ: $DisplayPath entry $($metadata.index)"
-        $metadata.localExtraBase64 = Get-PshGoal6ZipByteSliceBase64 -Bytes $bytes -Offset ($localPosition + 30 + $localNameLength) -Length $localExtraLength
+        $localExtraOffset = $localPosition + 30 + $localNameLength
         for ($timestampOffset = $localPosition + 10; $timestampOffset -le $localPosition + 13; $timestampOffset++) { $normalizedBytes[$timestampOffset] = 0 }
+        ConvertTo-PshGoal6ZipNormalizedExtraField -Bytes $bytes -NormalizedBytes $normalizedBytes -Offset $localExtraOffset -Length $localExtraLength -HeaderKind local -DisplayPath $DisplayPath -EntryIndex ([int]$metadata.index)
+        $metadata.localExtraBase64 = Get-PshGoal6ZipByteSliceBase64 -Bytes $normalizedBytes -Offset $localExtraOffset -Length $localExtraLength
     }
 
     Add-Type -AssemblyName System.IO.Compression
@@ -209,7 +310,7 @@ function Get-PshGoal6ZipArchiveManifest {
         path = $DisplayPath
         containerSha256Informational = Get-PshGoal6Sha256 -Path $archivePathFull
         timestampNormalizedContainerSha256 = Get-PshGoal6ZipBufferSha256 -Bytes $normalizedBytes
-        timestampNormalization = 'Only the four DOS modification-time/date bytes in every local and central entry header are zeroed.'
+        timestampNormalization = 'DOS modification fields and standard timestamp payloads in 0x5455, 0x000A/0x0001, 0x5855, and 0x000D extra fields are zeroed; all headers, flags, lengths, tags, and non-time bytes are retained.'
         containerMetadataCompared = $true
         archiveCommentBase64 = $archiveCommentBase64
         entries = $entries

@@ -173,13 +173,14 @@ if ([string]::IsNullOrWhiteSpace($SummaryPath)) { $SummaryPath = $destinationRoo
 $summaryPathFull = [IO.Path]::GetFullPath($SummaryPath)
 $stagingRoot = $destinationRootPath + '.staging-' + [Guid]::NewGuid().ToString('N')
 $DependencyId = $DependencyId.ToLowerInvariant()
-$summary = [ordered]@{
+$summary = [pscustomobject][ordered]@{
     schemaVersion = 1
     gate = 'goal6-ci-dependency-install'
     status = 'failed'
     destinationRoot = $destinationRootPath
     dependencies = @()
     error = $null
+    rollback = $null
 }
 
 try {
@@ -201,12 +202,27 @@ try {
     if ([IO.Directory]::Exists($downloadRoot)) { Remove-Item -LiteralPath $downloadRoot -Recurse -Force }
     $summary.status = 'passed'
     $summary.dependencies = $records.ToArray()
-    Complete-PshGoal6DependencyInstall -StagingRoot $stagingRoot -DestinationRoot $destinationRootPath -SummaryPath $summaryPathFull -Summary ([pscustomobject]$summary)
+    Complete-PshGoal6DependencyInstall -StagingRoot $stagingRoot -DestinationRoot $destinationRootPath -SummaryPath $summaryPathFull -Summary $summary
     Write-Output ('Installed and verified {0} Goal 6 CI dependencies at {1}.' -f $records.Count, $destinationRootPath)
 }
 catch {
+    $summary.status = 'failed'
     $summary.error = [string]$_.Exception.Message
-    try { Write-PshGoal6Json -Path $summaryPathFull -InputObject ([pscustomobject]$summary) }
+    if ($null -eq $summary.rollback) {
+        $rollbackFailure = $null
+        $rollbackAttempted = [IO.Directory]::Exists($destinationRootPath)
+        if ($rollbackAttempted) {
+            try { [IO.Directory]::Delete($destinationRootPath, $true) }
+            catch { $rollbackFailure = [string]$_.Exception.Message }
+        }
+        $summary.rollback = [pscustomobject][ordered]@{
+            attempted = $rollbackAttempted
+            succeeded = if ($rollbackAttempted) { $null -eq $rollbackFailure } else { $null }
+            destinationRoot = $destinationRootPath
+            error = $rollbackFailure
+        }
+    }
+    try { Write-PshGoal6Json -Path $summaryPathFull -InputObject $summary }
     catch { Write-Verbose ('Unable to write the dependency failure summary: {0}' -f $_.Exception.Message) }
     if ([IO.Directory]::Exists($stagingRoot)) { Remove-Item -LiteralPath $stagingRoot -Recurse -Force -ErrorAction SilentlyContinue }
     throw

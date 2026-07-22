@@ -28,20 +28,32 @@ function Invoke-PshGoal6GitCapture {
     return @($output | ForEach-Object { [string]$_ })
 }
 
+function Assert-PshGoal6GitleaksEnvironment {
+    foreach ($name in @('GITLEAKS_CONFIG', 'GITLEAKS_CONFIG_TOML')) {
+        $value = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+        Assert-PshGoal6Condition ($null -eq $value) "Secret scan requires environment variable $name to be unset so gitleaks uses the fixed built-in configuration."
+    }
+}
+
 function Invoke-PshGoal6GitleaksScan {
     param(
         [Parameter(Mandatory = $true)][string]$ExecutablePath,
         [Parameter(Mandatory = $true)][ValidateSet('git', 'dir')][string]$Mode,
         [Parameter(Mandatory = $true)][string]$RepositoryRootPath,
+        [Parameter(Mandatory = $true)][string]$IgnoreRootPath,
         [Parameter(Mandatory = $true)][string]$ReportPath,
         [Parameter(Mandatory = $true)][string]$LogPath
     )
 
+    $ignoreRootPathFull = [IO.Path]::GetFullPath($IgnoreRootPath)
+    Assert-PshGoal6Condition ([IO.Directory]::Exists($ignoreRootPathFull)) "Controlled gitleaks ignore root is missing: $ignoreRootPathFull"
+    Assert-PshGoal6Condition (@([IO.Directory]::EnumerateFileSystemEntries($ignoreRootPathFull)).Count -eq 0) "Controlled gitleaks ignore root is not empty: $ignoreRootPathFull"
     $arguments = @(
         $Mode,
         '--no-banner',
         '--redact=100',
         '--ignore-gitleaks-allow',
+        '--gitleaks-ignore-path', $ignoreRootPathFull,
         '--report-format', 'json',
         '--report-path', $ReportPath
     )
@@ -71,6 +83,10 @@ $comparison = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
 Assert-PshGoal6Condition (-not [string]::Equals($reportRootPath.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), $repositoryRootPath, $comparison) -and -not $reportRootPath.StartsWith($repositoryRootPath + [IO.Path]::DirectorySeparatorChar, $comparison)) 'Secret-scan ReportRoot must be outside the repository worktree.'
 Assert-PshGoal6Condition (-not [string]::Equals($dependencyRootPath.TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar), $repositoryRootPath, $comparison) -and -not $dependencyRootPath.StartsWith($repositoryRootPath + [IO.Path]::DirectorySeparatorChar, $comparison)) 'Secret-scan DependencyRoot must be outside the repository worktree.'
 [void][IO.Directory]::CreateDirectory($reportRootPath)
+$ignoreRootPath = Join-Path $reportRootPath 'controlled-empty-ignore-root'
+Assert-PshGoal6Condition (-not [IO.File]::Exists($ignoreRootPath)) "Controlled gitleaks ignore root is a file: $ignoreRootPath"
+if (-not [IO.Directory]::Exists($ignoreRootPath)) { [void][IO.Directory]::CreateDirectory($ignoreRootPath) }
+Assert-PshGoal6Condition (@([IO.Directory]::EnumerateFileSystemEntries($ignoreRootPath)).Count -eq 0) "Controlled gitleaks ignore root is not empty: $ignoreRootPath"
 $summaryPath = Join-Path $reportRootPath 'gitleaks-summary.json'
 $failure = $null
 $version = $null
@@ -78,6 +94,7 @@ $scans = @()
 $remoteRefCoverage = $null
 
 try {
+    Assert-PshGoal6GitleaksEnvironment
     Assert-PshGoal6Condition (-not [IO.File]::Exists((Join-Path $repositoryRootPath '.gitleaksignore'))) 'Repository .gitleaksignore files are not permitted by the no-suppression secret gate.'
     Assert-PshGoal6Condition (-not [IO.File]::Exists((Join-Path $repositoryRootPath '.gitleaks.toml'))) 'Repository gitleaks configuration is not permitted by the built-in-default secret gate.'
     $lock = Read-PshGoal6DependencyLock -RepositoryRoot $repositoryRootPath -LockPath ([IO.Path]::GetFullPath($LockPath))
@@ -117,8 +134,8 @@ try {
     $localTagLines = Invoke-PshGoal6GitCapture -RepositoryRootPath $repositoryRootPath -Arguments @('for-each-ref', '--format=%(objectname) %(refname)', 'refs/tags') -Description 'Enumerate local tag refs'
     $remoteRefCoverage = Assert-PshGoal6RemoteRefCoverage -RemoteLines $remoteLines -LocalBranchLines $localBranchLines -LocalTagLines $localTagLines
 
-    $historyScan = Invoke-PshGoal6GitleaksScan -ExecutablePath $executablePath -Mode git -RepositoryRootPath $repositoryRootPath -ReportPath (Join-Path $reportRootPath 'gitleaks-history.json') -LogPath (Join-Path $reportRootPath 'gitleaks-history.log')
-    $worktreeScan = Invoke-PshGoal6GitleaksScan -ExecutablePath $executablePath -Mode dir -RepositoryRootPath $repositoryRootPath -ReportPath (Join-Path $reportRootPath 'gitleaks-worktree.json') -LogPath (Join-Path $reportRootPath 'gitleaks-worktree.log')
+    $historyScan = Invoke-PshGoal6GitleaksScan -ExecutablePath $executablePath -Mode git -RepositoryRootPath $repositoryRootPath -IgnoreRootPath $ignoreRootPath -ReportPath (Join-Path $reportRootPath 'gitleaks-history.json') -LogPath (Join-Path $reportRootPath 'gitleaks-history.log')
+    $worktreeScan = Invoke-PshGoal6GitleaksScan -ExecutablePath $executablePath -Mode dir -RepositoryRootPath $repositoryRootPath -IgnoreRootPath $ignoreRootPath -ReportPath (Join-Path $reportRootPath 'gitleaks-worktree.json') -LogPath (Join-Path $reportRootPath 'gitleaks-worktree.log')
     $scans = @($historyScan, $worktreeScan)
 }
 catch { $failure = [string]$_.Exception.Message }
@@ -130,7 +147,7 @@ $summary = [pscustomobject][ordered]@{
     status = if ($null -eq $failure -and $badScans.Count -eq 0 -and $scans.Count -eq 2) { 'passed' } else { 'failed' }
     scanner = 'gitleaks'
     scannerVersion = $version
-    scannerConfiguration = 'built-in defaults; no repository config, ignore file, or gitleaks:allow comments'
+    scannerConfiguration = 'built-in defaults; GITLEAKS_CONFIG and GITLEAKS_CONFIG_TOML unset; controlled empty ignore root; no repository config, ignore file, or gitleaks:allow comments'
     historyCoverage = 'gitleaks git --log-opts=--all after exact origin heads/tags parity verification'
     remoteRefCoverage = $remoteRefCoverage
     worktreeCoverage = 'directory scan including tracked and untracked files'

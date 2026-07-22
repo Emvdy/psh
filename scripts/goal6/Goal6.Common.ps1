@@ -410,8 +410,28 @@ function Complete-PshGoal6DependencyInstall {
     }
     catch {
         $summaryFailure = [string]$_.Exception.Message
+        $rollbackFailure = $null
         try { [IO.Directory]::Delete($destinationRootPath, $true) }
-        catch { throw "Dependency install summary failed and committed-directory rollback also failed: summary=$summaryFailure; rollback=$($_.Exception.Message)" }
+        catch { $rollbackFailure = [string]$_.Exception.Message }
+
+        if ($null -eq $Summary.PSObject.Properties['status']) { Add-Member -InputObject $Summary -MemberType NoteProperty -Name status -Value 'failed' }
+        else { $Summary.status = 'failed' }
+        if ($null -eq $Summary.PSObject.Properties['error']) { Add-Member -InputObject $Summary -MemberType NoteProperty -Name error -Value $summaryFailure }
+        else { $Summary.error = $summaryFailure }
+        $rollback = [pscustomobject][ordered]@{
+            attempted = $true
+            succeeded = ($null -eq $rollbackFailure)
+            destinationRoot = $destinationRootPath
+            error = $rollbackFailure
+        }
+        if ($null -eq $Summary.PSObject.Properties['rollback']) { Add-Member -InputObject $Summary -MemberType NoteProperty -Name rollback -Value $rollback }
+        else { $Summary.rollback = $rollback }
+
+        $failureSummaryFailure = $null
+        try { Write-PshGoal6Json -Path ([IO.Path]::GetFullPath($SummaryPath)) -InputObject $Summary }
+        catch { $failureSummaryFailure = [string]$_.Exception.Message }
+        if ($null -ne $rollbackFailure) { throw "Dependency install summary failed and committed-directory rollback also failed: summary=$summaryFailure; rollback=$rollbackFailure; failure-summary=$failureSummaryFailure" }
+        if ($null -ne $failureSummaryFailure) { throw "Dependency install summary failed; committed dependency directory was rolled back, but the failed summary could not be written: summary=$summaryFailure; failure-summary=$failureSummaryFailure" }
         throw "Dependency install summary failed; committed dependency directory was rolled back: $summaryFailure"
     }
 }
