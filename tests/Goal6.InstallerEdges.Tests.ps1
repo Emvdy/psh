@@ -72,6 +72,15 @@ Describe 'Goal 6 installer edge matrix' {
         foreach ($requiredPath in @($script:Goal6InstallScript, $script:Goal6LifecycleScript, $script:Goal6ProcessHarnessScript, $script:Goal6EnginePath)) {
             if (-not [IO.File]::Exists($requiredPath)) { throw "Required Goal 6 installer input is missing: $requiredPath" }
         }
+        $installScriptText = [IO.File]::ReadAllText($script:Goal6InstallScript, $script:Goal6Utf8)
+        foreach ($primaryMetadataName in @('PshExitCode', 'PshErrorKind', 'PshErrorId')) {
+            $primaryOverwrite = '$failure.Exception.Data[''{0}''] =' -f $primaryMetadataName
+            if ($installScriptText.Contains($primaryOverwrite)) { throw "Installer rollback diagnostics overwrite primary metadata: $primaryMetadataName" }
+        }
+        foreach ($rollbackMetadataName in @('PshRollbackExitCode', 'PshRollbackErrorKind', 'PshRollbackErrorId', 'PshRollbackIssues')) {
+            $rollbackAssignment = '$failure.Exception.Data[''{0}''] =' -f $rollbackMetadataName
+            if (-not $installScriptText.Contains($rollbackAssignment)) { throw "Installer rollback diagnostics are missing additive metadata: $rollbackMetadataName" }
+        }
         if ($null -eq (Get-Command -Name Get-CimInstance -ErrorAction SilentlyContinue)) { throw 'Goal 6 process cleanup requires Get-CimInstance.' }
         . $script:Goal6ProcessHarnessScript
         . $script:Goal6LifecycleScript
@@ -256,7 +265,8 @@ Describe 'Goal 6 installer edge matrix' {
                 [Parameter(Mandatory = $true)][string] $Label,
                 [Parameter(Mandatory = $true)][int] $ExpectedExitCode,
                 [Parameter(Mandatory = $true)][string] $ExpectedErrorId,
-                [Parameter(Mandatory = $true)][string] $ExpectedMessagePattern
+                [Parameter(Mandatory = $true)][string] $ExpectedMessagePattern,
+                [switch] $ExpectNoRollback
             )
 
             if ([bool]$Result.Succeeded) { throw "$Label unexpectedly installed successfully." }
@@ -269,6 +279,9 @@ Describe 'Goal 6 installer edge matrix' {
             }
             if ([string]$Result.Metadata.Message -cnotmatch $ExpectedMessagePattern) {
                 throw ("$Label returned an unexpected diagnostic: $($Result.Metadata.Message)")
+            }
+            if ($ExpectNoRollback -and $Result.Error.Exception.Data.Contains('PshRollbackIncomplete')) {
+                throw "$Label incorrectly reported rollback diagnostics before any lifecycle mutation."
             }
         }
 
@@ -580,7 +593,7 @@ finally {
                     if ($Scenario -ceq 'wrong-architecture') {
                         [void](Build-PshGoal6InstallerPackage -Root $packageRoot -Edition Full -Architecture $script:Goal6WrongRid)
                         $result = Invoke-PshGoal6PackageInstall -PackageRoot $packageRoot -InstallRoot $installRoot -Edition Full
-                        Assert-PshGoal6InstallFailure -Result $result -Label 'Wrong-architecture package' -ExpectedExitCode 5 -ExpectedErrorId 'PshLifecycle.IntegrityFailure' -ExpectedMessagePattern $script:Goal6WrongArchitectureDiagnostic
+                        Assert-PshGoal6InstallFailure -Result $result -Label 'Wrong-architecture package' -ExpectedExitCode 5 -ExpectedErrorId 'PshLifecycle.IntegrityFailure' -ExpectedMessagePattern $script:Goal6WrongArchitectureDiagnostic -ExpectNoRollback
                         if ([IO.File]::Exists((Join-Path $installRoot 'current.json'))) { throw 'Wrong-architecture package changed the active version.' }
                     }
                     elseif ($Scenario -ceq 'full-missing-tool') {
@@ -588,14 +601,14 @@ finally {
                         $missingToolPath = Join-Path $packageRoot ("payload/Psh/Tools/$($script:Goal6NativeRid)/rg/rg.exe".Replace('/', [IO.Path]::DirectorySeparatorChar))
                         Remove-Item -LiteralPath $missingToolPath -Force -ErrorAction Stop
                         $result = Invoke-PshGoal6PackageInstall -PackageRoot $packageRoot -InstallRoot $installRoot -Edition Full
-                        Assert-PshGoal6InstallFailure -Result $result -Label 'Full package missing rg' -ExpectedExitCode 5 -ExpectedErrorId 'PshPackageFileSet' -ExpectedMessagePattern '\APackage file count does not match its manifest \(actual=[0-9]+, expected=[0-9]+\)\.\z'
+                        Assert-PshGoal6InstallFailure -Result $result -Label 'Full package missing rg' -ExpectedExitCode 5 -ExpectedErrorId 'PshPackageFileSet' -ExpectedMessagePattern '\APackage file count does not match its manifest \(actual=[0-9]+, expected=[0-9]+\)\.\z' -ExpectNoRollback
                         if ([IO.File]::Exists((Join-Path $installRoot 'current.json'))) { throw 'Full missing-tool package changed the active version.' }
                     }
                     elseif ($Scenario -ceq 'corrupted-download') {
                         [void](Build-PshGoal6InstallerPackage -Root $packageRoot -Edition Core -Architecture any)
                         [IO.File]::AppendAllText((Join-Path $packageRoot 'payload/Psh/Psh.psm1'), "# corrupted downloaded byte`n", $script:Goal6Utf8)
                         $result = Invoke-PshGoal6PackageInstall -PackageRoot $packageRoot -InstallRoot $installRoot -Edition Core
-                        Assert-PshGoal6InstallFailure -Result $result -Label 'Corrupted downloaded package' -ExpectedExitCode 5 -ExpectedErrorId 'PshPackageFileMismatch' -ExpectedMessagePattern '\APackage file integrity does not match its manifest: payload/Psh/Psh\.psm1\z'
+                        Assert-PshGoal6InstallFailure -Result $result -Label 'Corrupted downloaded package' -ExpectedExitCode 5 -ExpectedErrorId 'PshPackageFileMismatch' -ExpectedMessagePattern '\APackage file integrity does not match its manifest: payload/Psh/Psh\.psm1\z' -ExpectNoRollback
                         if ([IO.File]::Exists((Join-Path $installRoot 'current.json'))) { throw 'Corrupted package changed the active version.' }
                     }
                     else {

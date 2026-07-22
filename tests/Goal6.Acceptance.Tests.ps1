@@ -100,8 +100,20 @@ $OutputEncoding = $utf8
 $configPath = [Environment]::GetEnvironmentVariable('PSH_GOAL6_CHILD_CONFIG', 'Process')
 if ([string]::IsNullOrWhiteSpace($configPath)) { throw 'PSH_GOAL6_CHILD_CONFIG is required.' }
 $config = [IO.File]::ReadAllText($configPath, $utf8) | ConvertFrom-Json -ErrorAction Stop
-[string[]]$childArguments = @($config.arguments | ForEach-Object { [string]$_ })
-& ([string]$config.testPath) @childArguments
+[string[]]$childArgumentTokens = @($config.arguments | ForEach-Object { [string]$_ })
+if (($childArgumentTokens.Count % 2) -ne 0) { throw 'Goal 6 child arguments must contain name/value pairs.' }
+$childParameters = @{}
+for ($argumentIndex = 0; $argumentIndex -lt $childArgumentTokens.Count; $argumentIndex += 2) {
+    $parameterToken = [string]$childArgumentTokens[$argumentIndex]
+    if (-not $parameterToken.StartsWith('-', [StringComparison]::Ordinal) -or $parameterToken.Length -lt 2) {
+        throw "Goal 6 child parameter name is invalid: $parameterToken"
+    }
+    $parameterName = $parameterToken.Substring(1)
+    if ($parameterName -notmatch '\A[A-Za-z][A-Za-z0-9]*\z') { throw "Goal 6 child parameter name is invalid: $parameterToken" }
+    if ($childParameters.ContainsKey($parameterName)) { throw "Goal 6 child parameter is duplicated: $parameterToken" }
+    $childParameters.Add($parameterName, [string]$childArgumentTokens[$argumentIndex + 1])
+}
+& ([string]$config.testPath) @childParameters
 exit 0
 '@
                 $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
