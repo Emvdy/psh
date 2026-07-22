@@ -16,6 +16,7 @@ if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
 $RepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
 $script:Assertions = 0
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
+$script:Goal5CatalogMembership = @{}
 $script:TestRoot = Join-Path ([IO.Path]::GetTempPath()) ('psh-goal5-online-offline-' + [Guid]::NewGuid().ToString('N'))
 $reportRoot = if ([string]::IsNullOrWhiteSpace($env:PSH_GOAL5_REPORT_ROOT)) {
     Join-Path ([IO.Path]::GetTempPath()) ('psh-goal5-report-' + [Guid]::NewGuid().ToString('N'))
@@ -158,11 +159,16 @@ function New-PshGoal5CatalogForFiles {
 
     $staging = Join-Path $script:TestRoot ('catalog-input-' + [Guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($staging) | Out-Null
+    $members = New-Object System.Collections.Generic.List[object]
     try {
         foreach ($path in $Paths) {
-            Copy-Item -LiteralPath $path -Destination (Join-Path $staging ([IO.Path]::GetFileName($path)))
+            $name = [IO.Path]::GetFileName($path)
+            Copy-Item -LiteralPath $path -Destination (Join-Path $staging $name)
+            [void]$members.Add([pscustomobject][ordered]@{ Name = $name; Sha256 = Get-PshGoal5HashFile -Path $path })
         }
-        return New-PshGoal5Catalog -ContentRoot $staging -CatalogPath $CatalogPath
+        $catalog = New-PshGoal5Catalog -ContentRoot $staging -CatalogPath $CatalogPath
+        $script:Goal5CatalogMembership[(Get-PshGoal5HashFile -Path $catalog)] = $members.ToArray()
+        return $catalog
     }
     finally {
         if ([IO.Directory]::Exists($staging)) { Remove-Item -LiteralPath $staging -Recurse -Force }
@@ -442,6 +448,7 @@ function Set-PshGoal5TrustMocks {
     $script:Goal5ActivePolicy = $script:Goal5Fixture.Policy
     Set-Item -Path Function:\Get-PshProductionPublisherPolicy -Value $script:Goal5PolicyShim
     Set-Item -Path Function:\Invoke-PshWindowsCatalogTrustVerifier -Value $script:Goal5VerifierShim
+    Set-Item -Path Function:\Invoke-PshWindowsCatalogMembershipVerifier -Value $script:Goal5MembershipVerifierShim
 }
 
 $script:Goal5PolicyShim = {
@@ -451,6 +458,36 @@ $script:Goal5VerifierShim = {
     param([Parameter(Mandatory = $true)][object] $Request)
     $script:Goal5VerifierCalls++
     return [pscustomobject][ordered]@{ Trusted = $true; Publisher = [string]$script:Goal5ActivePolicy.publisher }
+}
+$script:Goal5MembershipVerifierShim = {
+    param([Parameter(Mandatory = $true)][object] $Request)
+
+    $script:Goal5MembershipVerifierCalls++
+    $catalogPath = [string](Get-PshLifecycleProperty $Request 'CatalogPath')
+    $contentRoot = [string](Get-PshLifecycleProperty $Request 'ContentRoot')
+    $offline = Get-PshLifecycleProperty $Request 'Offline'
+    if ([string]::IsNullOrWhiteSpace($catalogPath) -or [string]::IsNullOrWhiteSpace($contentRoot) -or
+        $offline -isnot [bool] -or -not [bool]$offline -or -not [IO.File]::Exists($catalogPath) -or
+        -not [IO.Directory]::Exists($contentRoot)) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContent' -Message 'Catalog membership verification received an invalid request.'
+    }
+
+    $catalogSha256 = Get-PshGoal5HashFile -Path $catalogPath
+    if (-not $script:Goal5CatalogMembership.ContainsKey($catalogSha256)) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContent' -Message 'Catalog content validation failed: unregistered catalog bytes.'
+    }
+    $expectedMembers = @($script:Goal5CatalogMembership[$catalogSha256])
+    $contentEntries = @(Get-ChildItem -LiteralPath $contentRoot -Force)
+    if ($contentEntries.Count -ne $expectedMembers.Count -or @($contentEntries | Where-Object { $_.PSIsContainer }).Count -ne 0) {
+        Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContent' -Message 'Catalog content validation failed: member set mismatch.'
+    }
+    foreach ($expectedMember in $expectedMembers) {
+        $matches = @($contentEntries | Where-Object { [string]$_.Name -ceq [string]$expectedMember.Name })
+        if ($matches.Count -ne 1 -or (Get-PshGoal5HashFile -Path $matches[0].FullName) -cne [string]$expectedMember.Sha256) {
+            Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContent' -Message ('Catalog content validation failed: member mismatch for {0}.' -f [string]$expectedMember.Name)
+        }
+    }
+    return [pscustomobject][ordered]@{ Trusted = $true; CatalogMembership = 'verified'; SignatureNotRequired = $true }
 }
 
 function Invoke-PshGoal5OnlineHttpMock {
@@ -540,7 +577,9 @@ $onlineTransportOriginal = (Get-Command Invoke-PshOnlineHttpRequest -CommandType
 $acquisitionTransportOriginal = (Get-Command Invoke-PshAcquisitionHttpRequest -CommandType Function).ScriptBlock
 $policyOriginal = (Get-Command Get-PshProductionPublisherPolicy -CommandType Function).ScriptBlock
 $verifierOriginal = (Get-Command Invoke-PshWindowsCatalogTrustVerifier -CommandType Function).ScriptBlock
+$membershipVerifierOriginal = (Get-Command Invoke-PshWindowsCatalogMembershipVerifier -CommandType Function).ScriptBlock
 $script:Goal5VerifierCalls = 0
+$script:Goal5MembershipVerifierCalls = 0
 $script:Goal5Fixture = New-PshGoal5ReleaseFixture -Root (Join-Path $script:TestRoot 'release')
 $script:Goal5FixturePolicy = $script:Goal5Fixture.Policy
 $script:Goal5OnlineSeen = New-Object 'System.Collections.Generic.List[string]'
@@ -587,6 +626,7 @@ try {
     Assert-PshGoal5Entry (@($script:Goal5OnlineSeen | Where-Object { $_ -match '/latest' }).Count -eq 2) 'Online latest resolution did not retry the GitHub API route exactly once after the 502 fixture.'
     Assert-PshGoal5Entry (@($script:Goal5AcquisitionSeen | Where-Object { $_ -match '/v1\.2\.3/' }).Count -ge 1) 'Package acquisition did not use a fixed-tag URI.'
     Assert-PshGoal5Entry ([string]$coreResult.edition -ceq 'Core') 'Core was not the online default edition.'
+    Assert-PshGoal5Entry ($script:Goal5MembershipVerifierCalls -eq 2 -and $script:Goal5VerifierCalls -eq 0) 'Online hash-policy trust did not use exactly the release and package catalog membership verifiers.'
 
     $script:Goal5OnlineSeen.Clear(); $script:Goal5AcquisitionSeen.Clear()
     Set-PshGoal5OnlineTransportFixture -Fixture $script:Goal5Fixture
@@ -968,5 +1008,6 @@ finally {
     Set-Item -Path Function:\Invoke-PshAcquisitionHttpRequest -Value $acquisitionTransportOriginal -ErrorAction SilentlyContinue
     Set-Item -Path Function:\Get-PshProductionPublisherPolicy -Value $policyOriginal -ErrorAction SilentlyContinue
     Set-Item -Path Function:\Invoke-PshWindowsCatalogTrustVerifier -Value $verifierOriginal -ErrorAction SilentlyContinue
+    Set-Item -Path Function:\Invoke-PshWindowsCatalogMembershipVerifier -Value $membershipVerifierOriginal -ErrorAction SilentlyContinue
     if ([IO.Directory]::Exists($script:TestRoot)) { Remove-Item -LiteralPath $script:TestRoot -Recurse -Force -ErrorAction SilentlyContinue }
 }

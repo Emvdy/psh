@@ -139,13 +139,7 @@ function Copy-PshGoal5ReleaseRoot {
     [void](New-PshGoal5Directory -Path $Destination)
     foreach ($file in @(Get-ChildItem -LiteralPath $Source -Force -File)) {
         $target = Join-Path $Destination $file.Name
-        $linked = $false
-        try {
-            [void](New-Item -ItemType HardLink -Path $target -Target $file.FullName -ErrorAction Stop)
-            $linked = $true
-        }
-        catch { }
-        if (-not $linked) { [IO.File]::Copy($file.FullName, $target, $false) }
+        [IO.File]::Copy($file.FullName, $target, $false)
     }
 }
 
