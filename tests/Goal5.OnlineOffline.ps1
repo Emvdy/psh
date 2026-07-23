@@ -467,6 +467,15 @@ function Set-PshGoal5TrustMocks {
     Set-Item -Path Function:\Get-PshProductionPublisherPolicy -Value $script:Goal5PolicyShim
     Set-Item -Path Function:\Invoke-PshWindowsCatalogTrustVerifier -Value $script:Goal5VerifierShim
     Set-Item -Path Function:\Invoke-PshWindowsCatalogMembershipVerifier -Value $script:Goal5MembershipVerifierShim
+
+    foreach ($mock in @(
+            [pscustomobject]@{ Name = 'Get-PshProductionPublisherPolicy'; ScriptBlock = $script:Goal5PolicyShim },
+            [pscustomobject]@{ Name = 'Invoke-PshWindowsCatalogTrustVerifier'; ScriptBlock = $script:Goal5VerifierShim },
+            [pscustomobject]@{ Name = 'Invoke-PshWindowsCatalogMembershipVerifier'; ScriptBlock = $script:Goal5MembershipVerifierShim }
+        )) {
+        $installed = (Get-Command -Name ([string]$mock.Name) -CommandType Function -ErrorAction Stop).ScriptBlock
+        Assert-PshGoal5Entry (([string]$installed) -ceq ([string]$mock.ScriptBlock)) ("Trust mock was not reinstalled after the real entrypoint reloaded support functions: {0}" -f [string]$mock.Name)
+    }
 }
 
 $script:Goal5PolicyShim = {
@@ -720,12 +729,14 @@ try {
     [IO.File]::AppendAllText($manifestTamper.ManifestPath, " `n", $script:Utf8)
     Set-PshGoal5PackageArchiveEvidence -Package $manifestTamper
     . (Join-Path $manifestTamper.Root 'install-offline.ps1')
+    Set-PshGoal5TrustMocks
     Assert-PshGoal5Failure -Action { Invoke-PshOfflineInstall -Edition Core -Version 0.0.3-test -NonInteractive -ArchivePath $manifestTamper.ArchivePath -ArchiveSha256 $manifestTamper.ArchiveSha256 } -ExitCode 5 -ErrorId 'PshCatalogContent'
 
     $catalogTamper = New-PshGoal5EntryPackage -Root (Join-Path $script:TestRoot 'offline-catalog-tamper') -Version '0.0.4-test' -Edition Core -RealOffline
     [IO.File]::AppendAllText($catalogTamper.CatalogPath, 'tamper', $script:Utf8)
     Set-PshGoal5PackageArchiveEvidence -Package $catalogTamper
     . (Join-Path $catalogTamper.Root 'install-offline.ps1')
+    Set-PshGoal5TrustMocks
     Assert-PshGoal5Failure -Action { Invoke-PshOfflineInstall -Edition Core -Version 0.0.4-test -NonInteractive -ArchivePath $catalogTamper.ArchivePath -ArchiveSha256 $catalogTamper.ArchiveSha256 } -ExitCode 5 -ErrorId 'PshCatalogContent'
 
     $payloadTamper = New-PshGoal5EntryPackage -Root (Join-Path $script:TestRoot 'offline-payload-tamper') -Version '0.0.5-test' -Edition Core -RealOffline
@@ -734,6 +745,7 @@ try {
     $payloadTamperBytes[0] = $payloadTamperBytes[0] -bxor 1
     [IO.File]::WriteAllBytes($payloadTamperPath, $payloadTamperBytes)
     . (Join-Path $payloadTamper.Root 'install-offline.ps1')
+    Set-PshGoal5TrustMocks
     Assert-PshGoal5Failure -Action { Invoke-PshOfflineInstall -Edition Core -Version 0.0.5-test -NonInteractive -ArchivePath $payloadTamper.ArchivePath -ArchiveSha256 $payloadTamper.ArchiveSha256 } -ExitCode 5 -ErrorId 'PshOfflineArchiveEntryHash'
 
     $payloadManifestMismatch = New-PshGoal5EntryPackage -Root (Join-Path $script:TestRoot 'offline-payload-manifest-mismatch') -Version '0.0.5-test.1' -Edition Core -RealOffline
@@ -743,28 +755,33 @@ try {
     [IO.File]::WriteAllBytes($payloadManifestMismatchPath, $payloadManifestMismatchBytes)
     Set-PshGoal5PackageArchiveEvidence -Package $payloadManifestMismatch
     . (Join-Path $payloadManifestMismatch.Root 'install-offline.ps1')
+    Set-PshGoal5TrustMocks
     Assert-PshGoal5Failure -Action { Invoke-PshOfflineInstall -Edition Core -Version 0.0.5-test.1 -NonInteractive -ArchivePath $payloadManifestMismatch.ArchivePath -ArchiveSha256 $payloadManifestMismatch.ArchiveSha256 } -ExitCode 5 -ErrorId 'PshOfflineFileHash'
 
     $archiveExtra = New-PshGoal5EntryPackage -Root (Join-Path $script:TestRoot 'offline-archive-extra') -Version '0.0.5-test.2' -Edition Core -RealOffline
     Write-PshGoal5Text -Path (Join-Path $archiveExtra.Root 'unexpected.txt') -Text 'unexpected'
     . (Join-Path $archiveExtra.Root 'install-offline.ps1')
+    Set-PshGoal5TrustMocks
     Assert-PshGoal5Failure -Action { Invoke-PshOfflineInstall -Edition Core -Version 0.0.5-test.2 -NonInteractive -ArchivePath $archiveExtra.ArchivePath -ArchiveSha256 $archiveExtra.ArchiveSha256 } -ExitCode 5 -ErrorId 'PshOfflineArchivePackageExtraFile'
 
     $archiveMissing = New-PshGoal5EntryPackage -Root (Join-Path $script:TestRoot 'offline-archive-missing') -Version '0.0.5-test.3' -Edition Core -RealOffline
     [IO.File]::Delete((Join-Path $archiveMissing.Root 'payload/Psh/Psh.psm1'))
     . (Join-Path $archiveMissing.Root 'install-offline.ps1')
+    Set-PshGoal5TrustMocks
     Assert-PshGoal5Failure -Action { Invoke-PshOfflineInstall -Edition Core -Version 0.0.5-test.3 -NonInteractive -ArchivePath $archiveMissing.ArchivePath -ArchiveSha256 $archiveMissing.ArchiveSha256 } -ExitCode 5 -ErrorId 'PshOfflineArchivePackageMissingFile'
 
     $missingCatalog = New-PshGoal5EntryPackage -Root (Join-Path $script:TestRoot 'offline-missing-catalog') -Version '0.0.6-test' -Edition Core -RealOffline
     [IO.File]::Delete($missingCatalog.CatalogPath)
     Set-PshGoal5PackageArchiveEvidence -Package $missingCatalog
     . (Join-Path $missingCatalog.Root 'install-offline.ps1')
+    Set-PshGoal5TrustMocks
     Assert-PshGoal5Failure -Action { Invoke-PshOfflineInstall -Edition Core -Version 0.0.6-test -NonInteractive -ArchivePath $missingCatalog.ArchivePath -ArchiveSha256 $missingCatalog.ArchiveSha256 } -ExitCode 5 -ErrorId 'PshOfflineTrustAssetsMissing'
 
     $missingManifest = New-PshGoal5EntryPackage -Root (Join-Path $script:TestRoot 'offline-missing-manifest') -Version '0.0.6-test.1' -Edition Core -RealOffline
     [IO.File]::Delete($missingManifest.ManifestPath)
     Set-PshGoal5PackageArchiveEvidence -Package $missingManifest
     . (Join-Path $missingManifest.Root 'install-offline.ps1')
+    Set-PshGoal5TrustMocks
     Assert-PshGoal5Failure -Action { Invoke-PshOfflineInstall -Edition Core -Version 0.0.6-test.1 -NonInteractive -ArchivePath $missingManifest.ArchivePath -ArchiveSha256 $missingManifest.ArchiveSha256 } -ExitCode 5 -ErrorId 'PshOfflineTrustAssetsMissing'
 
     $wrongRepository = New-PshGoal5EntryPackage -Root (Join-Path $script:TestRoot 'offline-wrong-repository') -Version '0.0.7-test' -Edition Core -RealOffline
@@ -773,6 +790,7 @@ try {
     [void](New-PshGoal5CatalogForFiles -Paths @($wrongRepository.ManifestPath) -CatalogPath $wrongRepository.CatalogPath)
     Set-PshGoal5PackageArchiveEvidence -Package $wrongRepository
     . (Join-Path $wrongRepository.Root 'install-offline.ps1')
+    Set-PshGoal5TrustMocks
     Assert-PshGoal5Failure -Action { Invoke-PshOfflineInstall -Edition Core -Version 0.0.7-test -NonInteractive -ArchivePath $wrongRepository.ArchivePath -ArchiveSha256 $wrongRepository.ArchiveSha256 } -ExitCode 5 -ErrorId 'PshManifestSourceMismatch'
 
     $shellFixture = Join-Path $script:TestRoot ($unicodeChinese + ' ' + $unicodeSpace + '/shell')
