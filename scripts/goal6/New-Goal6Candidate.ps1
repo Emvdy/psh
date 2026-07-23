@@ -76,7 +76,7 @@ function Assert-PshGoal6CandidateOutputPath {
     return $full
 }
 
-function Initialize-PshGoal6CandidateNativeMethods {
+function Initialize-PshGoal6CandidateNativeMethod {
     if ($null -ne ('PshGoal6CandidateNativeMethods' -as [type])) { return }
 
     Add-Type -TypeDefinition @'
@@ -91,7 +91,7 @@ public static class PshGoal6CandidateNativeMethods
 '@
 }
 
-function New-PshGoal6CandidateOwnedDirectory {
+function Initialize-PshGoal6CandidateOwnedDirectory {
     param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][string] $Description)
 
     $parent = [IO.Path]::GetDirectoryName($Path)
@@ -101,7 +101,7 @@ function New-PshGoal6CandidateOwnedDirectory {
     try {
         if (-not [IO.Directory]::Exists($parent)) { [void][IO.Directory]::CreateDirectory($parent) }
         [void](Assert-PshLifecycleNoReparseAncestors -Path $Path -Description $Description)
-        Initialize-PshGoal6CandidateNativeMethods
+        Initialize-PshGoal6CandidateNativeMethod
     }
     catch {
         Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputPath' -Message "Unable to prepare ${Description}: $Path" -InnerException $_.Exception
@@ -117,7 +117,7 @@ function New-PshGoal6CandidateOwnedDirectory {
     }
 }
 
-function New-PshGoal6CandidateUniqueSiblingPath {
+function Get-PshGoal6CandidateUniqueSiblingPath {
     param(
         [Parameter(Mandatory = $true)][string] $DestinationPath,
         [Parameter(Mandatory = $true)][string] $Purpose
@@ -282,7 +282,7 @@ function Invoke-PshGoal6CandidateReportCleanup {
     catch { Invoke-PshGoal6CandidateFailure -ExitCode 3 -ErrorId 'PshGoal6CandidateCleanup' -Message "Unable to remove candidate report: $Path" -InnerException $_.Exception }
 }
 
-function Invoke-PshGoal6CandidateCleanupActions {
+function Invoke-PshGoal6CandidateCleanupAction {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]] $Actions)
 
     $failures = New-Object System.Collections.Generic.List[object]
@@ -411,7 +411,7 @@ function Write-PshGoal6CandidateReportTemp {
         if ($null -ne $stream) {
             $disposeActions.Add([pscustomobject]@{ Label = 'candidate report stream dispose'; Action = { $stream.Dispose() } })
         }
-        $disposeFailures = @(Invoke-PshGoal6CandidateCleanupActions -Actions $disposeActions.ToArray())
+        $disposeFailures = @(Invoke-PshGoal6CandidateCleanupAction -Actions $disposeActions.ToArray())
     }
     if ($null -eq $writeError -and $disposeFailures.Count -gt 0) {
         $writeError = $disposeFailures[0].ErrorRecord
@@ -534,7 +534,7 @@ $reportTempPath = $null
 $reportState = $null
 $assetRecords = $null
 try {
-    New-PshGoal6CandidateOwnedDirectory -Path $WorkingRoot -Description 'candidate working root'
+    Initialize-PshGoal6CandidateOwnedDirectory -Path $WorkingRoot -Description 'candidate working root'
     $workingOwned = $true
     $workingEntry = Get-PshLifecyclePathEntry -Path $WorkingRoot -Description 'candidate working root'
     if (-not [bool]$workingEntry.IsDirectory -or [bool]$workingEntry.IsReparsePoint) {
@@ -610,8 +610,8 @@ try {
         Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateVerification' -Message 'Final build release artifact verification did not pass catalog membership gates.'
     }
 
-    $candidateStagingRoot = New-PshGoal6CandidateUniqueSiblingPath -DestinationPath $CandidateRoot -Purpose 'staging'
-    New-PshGoal6CandidateOwnedDirectory -Path $candidateStagingRoot -Description 'candidate staging root'
+    $candidateStagingRoot = Get-PshGoal6CandidateUniqueSiblingPath -DestinationPath $CandidateRoot -Purpose 'staging'
+    Initialize-PshGoal6CandidateOwnedDirectory -Path $candidateStagingRoot -Description 'candidate staging root'
     $candidateStagingOwned = $true
     $candidateEntry = Get-PshLifecyclePathEntry -Path $candidateStagingRoot -Description 'candidate staging root'
     if (-not [bool]$candidateEntry.IsDirectory -or [bool]$candidateEntry.IsReparsePoint) {
@@ -657,7 +657,7 @@ try {
         assets = $assetRecords.ToArray()
     }
 
-    $reportTempPath = New-PshGoal6CandidateUniqueSiblingPath -DestinationPath $ReportPath -Purpose 'tmp'
+    $reportTempPath = Get-PshGoal6CandidateUniqueSiblingPath -DestinationPath $ReportPath -Purpose 'tmp'
     $reportState = Write-PshGoal6CandidateReportTemp -Path $reportTempPath -Value $report
     $reportTempOwned = $true
 
@@ -712,7 +712,7 @@ catch {
                     Invoke-PshGoal6CandidateReportCleanup -Path $ReportPath -ExpectedState $reportState
                 } })
     }
-    $cleanupFailures = @(Invoke-PshGoal6CandidateCleanupActions -Actions $cleanupActions.ToArray())
+    $cleanupFailures = @(Invoke-PshGoal6CandidateCleanupAction -Actions $cleanupActions.ToArray())
     if ($cleanupFailures.Count -gt 0) {
         $diagnostics = [string]::Join('; ', @($cleanupFailures | ForEach-Object { "[$([string]$_.Label)] $([string]$_.Message)" }))
         $combined = New-Object Exception("$($primaryError.Exception.Message) Cleanup failures: $diagnostics", $primaryError.Exception)

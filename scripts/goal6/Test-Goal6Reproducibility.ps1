@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Goal6.Common.ps1')
 . (Join-Path $PSScriptRoot 'Goal6.Zip.ps1')
 
-function Throw-PshGoal6ReproducibilityError {
+function Invoke-PshGoal6ReproducibilityFailure {
     param(
         [Parameter(Mandatory = $true)][int]$ExitCode,
         [Parameter(Mandatory = $true)][string]$ErrorId,
@@ -33,7 +33,7 @@ function Throw-PshGoal6ReproducibilityError {
     throw $exception
 }
 
-function Get-PshGoal6FailureMetadata {
+function Get-PshGoal6FailureDetail {
     param([AllowNull()][object]$ErrorRecord)
 
     $exitCode = 5
@@ -73,7 +73,7 @@ function Get-PshGoal6OrderedString {
     return $ordered
 }
 
-function Get-PshGoal6ExpectedCandidateNames {
+function Get-PshGoal6ExpectedCandidateName {
     param([Parameter(Mandatory = $true)][string]$PackageVersion)
 
     return @(
@@ -110,22 +110,23 @@ function Assert-PshGoal6CandidateReport {
     Assert-PshGoal6Condition ([string]$Report.phases.finalIndex -ceq 'finalized-with-verified-catalog-membership') 'Candidate final index phase changed.'
     Assert-PshGoal6Condition ([string]$Report.phases.releaseVerification -ceq 'release-catalog-membership-verified') 'Candidate release verification phase changed.'
 
-    $expectedNames = @(Get-PshGoal6ExpectedCandidateNames -PackageVersion $PackageVersion)
+    $expectedNames = @(Get-PshGoal6ExpectedCandidateName -PackageVersion $PackageVersion)
     $reportAssets = @($Report.assets)
     Assert-PshGoal6Condition ($reportAssets.Count -eq $expectedNames.Count) 'Candidate report does not contain exactly 13 asset records.'
     foreach ($expectedName in $expectedNames) {
-        $matches = @($reportAssets | Where-Object { [string]$_.name -ceq $expectedName })
-        Assert-PshGoal6Condition ($matches.Count -eq 1) "Candidate report is missing exact asset record '$expectedName'."
+        $assetMatches = @($reportAssets | Where-Object { [string]$_.name -ceq $expectedName })
+        Assert-PshGoal6Condition ($assetMatches.Count -eq 1) "Candidate report is missing exact asset record '$expectedName'."
         $path = Join-Path $CandidateRoot $expectedName
         Assert-PshGoal6Condition ([IO.File]::Exists($path)) "Candidate asset is missing: $path"
-        Assert-PshGoal6Condition ([int64]$matches[0].length -eq [int64](Get-Item -LiteralPath $path).Length) "Candidate report length mismatches for '$expectedName'."
-        Assert-PshGoal6Condition ([string]$matches[0].sha256 -ceq (Get-PshGoal6Sha256 -Path $path)) "Candidate report SHA256 mismatches for '$expectedName'."
+        Assert-PshGoal6Condition ([int64]$assetMatches[0].length -eq [int64](Get-Item -LiteralPath $path).Length) "Candidate report length mismatches for '$expectedName'."
+        Assert-PshGoal6Condition ([string]$assetMatches[0].sha256 -ceq (Get-PshGoal6Sha256 -Path $path)) "Candidate report SHA256 mismatches for '$expectedName'."
     }
 }
 
 function Invoke-PshGoal6IndependentCandidateBuild {
     param(
         [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)][string]$CandidateWorkingRoot,
         [Parameter(Mandatory = $true)][string]$RepositoryRootPath,
         [Parameter(Mandatory = $true)][string]$PackageVersion,
         [Parameter(Mandatory = $true)][string]$Commit,
@@ -165,7 +166,9 @@ function Invoke-PshGoal6IndependentCandidateBuild {
 
     $candidateRoot = Join-Path $RunRoot 'candidate'
     $candidateReportPath = Join-Path $RunRoot 'candidate-report.json'
-    $candidateWorkingRoot = Join-Path $RunRoot 'candidate-working'
+    $candidateWorkingRootPath = [IO.Path]::GetFullPath($CandidateWorkingRoot)
+    Assert-PshGoal6Condition (-not [IO.File]::Exists($candidateWorkingRootPath) -and -not [IO.Directory]::Exists($candidateWorkingRootPath)) "Shared candidate working root retained state before an independent build: $candidateWorkingRootPath"
+    $script:PshGoal6ReproWorkingRootPreconditionCount++
     $candidateParameters = @{
         CandidateRoot = $candidateRoot
         ReportPath = $candidateReportPath
@@ -175,7 +178,7 @@ function Invoke-PshGoal6IndependentCandidateBuild {
         ReleaseNotesPath = $EnglishReleaseNotes
         ReleaseNotesZhCnPath = $ChineseReleaseNotes
         RepositoryRoot = $RepositoryRootPath
-        WorkingRoot = $candidateWorkingRoot
+        WorkingRoot = $candidateWorkingRootPath
     }
     $candidateOutput = @()
     $script:PshGoal6ReproCandidateDriverInvocations++
@@ -185,6 +188,10 @@ function Invoke-PshGoal6IndependentCandidateBuild {
         Write-PshGoal6Text -Path (Join-Path $RunRoot 'candidate-build.log') -Text ((@($candidateOutput | ForEach-Object { [string]$_ }) -join "`n") + "`n")
         throw
     }
+    finally {
+        Assert-PshGoal6Condition (-not [IO.File]::Exists($candidateWorkingRootPath) -and -not [IO.Directory]::Exists($candidateWorkingRootPath)) "Candidate driver retained state in the shared working root: $candidateWorkingRootPath"
+        $script:PshGoal6ReproWorkingRootCleanupCount++
+    }
     Write-PshGoal6Text -Path (Join-Path $RunRoot 'candidate-build.log') -Text ((@($candidateOutput | ForEach-Object { [string]$_ }) -join "`n") + "`n")
     $candidateResults = @($candidateOutput | Where-Object {
             $null -ne $_ -and $null -ne $_.PSObject.Properties['phase'] -and [string]$_.phase -ceq 'candidate-verified'
@@ -192,7 +199,6 @@ function Invoke-PshGoal6IndependentCandidateBuild {
     Assert-PshGoal6Condition ($candidateResults.Count -eq 1 -and [int]$candidateResults[0].code -eq 0) 'Candidate driver did not return exactly one candidate-verified/code 0 result.'
     Assert-PshGoal6Condition ([IO.Directory]::Exists($candidateRoot)) 'Candidate driver produced no candidate directory.'
     Assert-PshGoal6Condition ([IO.File]::Exists($candidateReportPath)) 'Candidate driver produced no candidate report.'
-    Assert-PshGoal6Condition (-not [IO.File]::Exists($candidateWorkingRoot) -and -not [IO.Directory]::Exists($candidateWorkingRoot)) 'Candidate driver retained its controlled working root.'
     $candidateReport = (Get-PshGoal6StrictText -Path $candidateReportPath) | ConvertFrom-Json -ErrorAction Stop
     Assert-PshGoal6CandidateReport -Report $candidateReport -CandidateRoot $candidateRoot -PackageVersion $PackageVersion
     $script:PshGoal6ReproCandidateVerifiedBuilds++
@@ -212,7 +218,7 @@ function Get-PshGoal6CandidateManifest {
         [Parameter(Mandatory = $true)][string]$PackageVersion
     )
 
-    $expectedNames = @(Get-PshGoal6ExpectedCandidateNames -PackageVersion $PackageVersion)
+    $expectedNames = @(Get-PshGoal6ExpectedCandidateName -PackageVersion $PackageVersion)
     $expected = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
     foreach ($name in $expectedNames) { [void]$expected.Add($name) }
     $rootEntry = Get-Item -LiteralPath $CandidateRoot -Force
@@ -354,7 +360,7 @@ function Invoke-PshGoal6NonWindowsBoundary {
             -WorkingRoot $candidateWorkingRoot
     }
     catch { $boundaryFailure = $_ }
-    $metadata = Get-PshGoal6FailureMetadata -ErrorRecord $boundaryFailure
+    $metadata = Get-PshGoal6FailureDetail -ErrorRecord $boundaryFailure
     $boundaryVerified = $null -ne $boundaryFailure -and [int]$metadata.exitCode -eq 4 -and [string]$metadata.errorId -ceq 'PshGoal6CandidateCatalogUnavailable'
     $outputsAbsent = -not [IO.File]::Exists($candidateRoot) -and -not [IO.Directory]::Exists($candidateRoot) -and
         -not [IO.File]::Exists($candidateReportPath) -and -not [IO.Directory]::Exists($candidateReportPath) -and
@@ -385,9 +391,9 @@ function Invoke-PshGoal6NonWindowsBoundary {
     $summaryPath = Join-Path $OutputRootPath 'reproducibility-summary.json'
     Write-PshGoal6Json -Path $summaryPath -InputObject $summary
     if (-not $boundaryVerified -or -not $outputsAbsent) {
-        Throw-PshGoal6ReproducibilityError -ExitCode 5 -ErrorId 'PshGoal6ReproducibilityBoundary' -Message "Non-Windows candidate boundary did not return clean code 4 evidence. See $summaryPath" -InnerException $(if ($null -eq $boundaryFailure) { $null } else { $boundaryFailure.Exception })
+        Invoke-PshGoal6ReproducibilityFailure -ExitCode 5 -ErrorId 'PshGoal6ReproducibilityBoundary' -Message "Non-Windows candidate boundary did not return clean code 4 evidence. See $summaryPath" -InnerException $(if ($null -eq $boundaryFailure) { $null } else { $boundaryFailure.Exception })
     }
-    Throw-PshGoal6ReproducibilityError -ExitCode 4 -ErrorId 'PshGoal6ReproducibilityCatalogUnavailable' -Message "Reproducibility candidate builds require Windows New-FileCatalog/Test-FileCatalog APIs. Boundary evidence: $summaryPath" -InnerException $boundaryFailure.Exception
+    Invoke-PshGoal6ReproducibilityFailure -ExitCode 4 -ErrorId 'PshGoal6ReproducibilityCatalogUnavailable' -Message "Reproducibility candidate builds require Windows New-FileCatalog/Test-FileCatalog APIs. Boundary evidence: $summaryPath" -InnerException $boundaryFailure.Exception
 }
 
 $repositoryRootPath = [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
@@ -410,25 +416,31 @@ $manifestOne = $null
 $manifestTwo = $null
 $differences = @()
 $failureRecord = $null
+$sharedCandidateWorkingRoot = Join-Path $outputRootPath 'shared-candidate-working'
 $script:PshGoal6ReproBootstrapperInvocations = 0
 $script:PshGoal6ReproBootstrapperBuilds = 0
 $script:PshGoal6ReproCandidateDriverInvocations = 0
 $script:PshGoal6ReproCandidateVerifiedBuilds = 0
+$script:PshGoal6ReproWorkingRootPreconditionCount = 0
+$script:PshGoal6ReproWorkingRootCleanupCount = 0
 
 try {
-    $firstRun = Invoke-PshGoal6IndependentCandidateBuild -RunRoot (Join-Path $outputRootPath 'run-1') -RepositoryRootPath $repositoryRootPath -PackageVersion $Version -Commit $SourceCommit -EnglishReleaseNotes $releaseNotesPathFull -ChineseReleaseNotes $releaseNotesZhCnPathFull -CandidateScriptPath $candidateScriptPath -RequestedMSBuildPath $MSBuildPath
+    Assert-PshGoal6Condition (-not [IO.File]::Exists($sharedCandidateWorkingRoot) -and -not [IO.Directory]::Exists($sharedCandidateWorkingRoot)) "Shared candidate working root already exists: $sharedCandidateWorkingRoot"
+    $firstRun = Invoke-PshGoal6IndependentCandidateBuild -RunRoot (Join-Path $outputRootPath 'run-1') -CandidateWorkingRoot $sharedCandidateWorkingRoot -RepositoryRootPath $repositoryRootPath -PackageVersion $Version -Commit $SourceCommit -EnglishReleaseNotes $releaseNotesPathFull -ChineseReleaseNotes $releaseNotesZhCnPathFull -CandidateScriptPath $candidateScriptPath -RequestedMSBuildPath $MSBuildPath
     $manifestOne = Get-PshGoal6CandidateManifest -RunName 'run-1' -CandidateRoot ([string]$firstRun.candidateRoot) -CandidateReport $firstRun.candidateReport -PackageVersion $Version
     Write-PshGoal6Json -Path (Join-Path $outputRootPath 'build-1.manifest.json') -InputObject $manifestOne
 
-    $secondRun = Invoke-PshGoal6IndependentCandidateBuild -RunRoot (Join-Path $outputRootPath 'run-2') -RepositoryRootPath $repositoryRootPath -PackageVersion $Version -Commit $SourceCommit -EnglishReleaseNotes $releaseNotesPathFull -ChineseReleaseNotes $releaseNotesZhCnPathFull -CandidateScriptPath $candidateScriptPath -RequestedMSBuildPath $MSBuildPath
+    Assert-PshGoal6Condition (-not [IO.File]::Exists($sharedCandidateWorkingRoot) -and -not [IO.Directory]::Exists($sharedCandidateWorkingRoot)) "Shared candidate working root retained state after the first build: $sharedCandidateWorkingRoot"
+    $secondRun = Invoke-PshGoal6IndependentCandidateBuild -RunRoot (Join-Path $outputRootPath 'run-2') -CandidateWorkingRoot $sharedCandidateWorkingRoot -RepositoryRootPath $repositoryRootPath -PackageVersion $Version -Commit $SourceCommit -EnglishReleaseNotes $releaseNotesPathFull -ChineseReleaseNotes $releaseNotesZhCnPathFull -CandidateScriptPath $candidateScriptPath -RequestedMSBuildPath $MSBuildPath
     $manifestTwo = Get-PshGoal6CandidateManifest -RunName 'run-2' -CandidateRoot ([string]$secondRun.candidateRoot) -CandidateReport $secondRun.candidateReport -PackageVersion $Version
     Write-PshGoal6Json -Path (Join-Path $outputRootPath 'build-2.manifest.json') -InputObject $manifestTwo
+    Assert-PshGoal6Condition (-not [IO.File]::Exists($sharedCandidateWorkingRoot) -and -not [IO.Directory]::Exists($sharedCandidateWorkingRoot)) "Shared candidate working root retained state after the second build: $sharedCandidateWorkingRoot"
     $differences = @(Compare-PshGoal6CandidateManifest -First $manifestOne -Second $manifestTwo)
 }
 catch { $failureRecord = $_ }
 
 Write-PshGoal6Json -Path (Join-Path $outputRootPath 'reproducibility-diff.json') -InputObject $differences
-$failureMetadata = Get-PshGoal6FailureMetadata -ErrorRecord $failureRecord
+$failureMetadata = Get-PshGoal6FailureDetail -ErrorRecord $failureRecord
 $passed = $null -eq $failureRecord -and $differences.Count -eq 0 -and $null -ne $manifestOne -and $null -ne $manifestTwo
 $manifestPaths = @(
     if ([IO.File]::Exists((Join-Path $outputRootPath 'build-1.manifest.json'))) { 'build-1.manifest.json' }
@@ -454,6 +466,10 @@ $summary = [pscustomobject][ordered]@{
     candidateAssetContract = 'exact-13-public-assets-before-provenance-attestation'
     bootstrapperBuiltIndependentlyTwice = $script:PshGoal6ReproBootstrapperBuilds -eq 2
     candidateDriverInvokedIndependentlyTwice = $script:PshGoal6ReproCandidateDriverInvocations -eq 2
+    candidateWorkingRootPolicy = 'same-absolute-path-must-not-exist-before-or-after-each-build'
+    candidateWorkingRootPreconditionCount = $script:PshGoal6ReproWorkingRootPreconditionCount
+    candidateWorkingRootCleanupCount = $script:PshGoal6ReproWorkingRootCleanupCount
+    candidateWorkingRootCleanAcrossBothBuilds = $script:PshGoal6ReproWorkingRootPreconditionCount -eq 2 -and $script:PshGoal6ReproWorkingRootCleanupCount -eq 2 -and -not [IO.File]::Exists($sharedCandidateWorkingRoot) -and -not [IO.Directory]::Exists($sharedCandidateWorkingRoot)
     stableFilePolicy = 'Compare the exact candidate asset path set and exact length/SHA256 for every non-ZIP asset. Each ZIP raw SHA256 is recorded but its container comparison excludes only approved timestamp bytes.'
     archivePolicy = 'Zero DOS modification fields and only timestamp payload bytes in standard 0x5455, 0x000A/0x0001, 0x5855, and 0x000D extra fields. Hard-compare entry order, paths, uncompressed SHA256, compressed data, flags, methods, attributes, comments, extra-field structure, flags, lengths, tags, and all non-time bytes.'
     firstAssetCount = if ($null -eq $manifestOne) { 0 } else { @($manifestOne.assetFiles).Count }
@@ -471,6 +487,6 @@ $summaryPath = Join-Path $outputRootPath 'reproducibility-summary.json'
 Write-PshGoal6Json -Path $summaryPath -InputObject $summary
 if ($null -ne $failureRecord) { $PSCmdlet.ThrowTerminatingError($failureRecord) }
 if ($differences.Count -gt 0) {
-    Throw-PshGoal6ReproducibilityError -ExitCode 5 -ErrorId 'PshGoal6ReproducibilityMismatch' -Message "Reproducibility gate found $($differences.Count) candidate difference(s). See $summaryPath"
+    Invoke-PshGoal6ReproducibilityFailure -ExitCode 5 -ErrorId 'PshGoal6ReproducibilityMismatch' -Message "Reproducibility gate found $($differences.Count) candidate difference(s). See $summaryPath"
 }
 Write-Output ('Reproducibility gate passed: two independent candidate-verified builds matched across 13 assets after excluding only approved ZIP timestamp bytes.')

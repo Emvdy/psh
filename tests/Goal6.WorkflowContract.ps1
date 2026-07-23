@@ -81,7 +81,7 @@ function Get-PshGoal6JobBlock {
     return $match.Value
 }
 
-function Get-PshGoal6ActionBlocks {
+function Get-PshGoal6ActionBlock {
     param([Parameter(Mandatory = $true)][string]$Text)
 
     $lines = $Text.Split("`n")
@@ -109,7 +109,7 @@ function Get-PshGoal6ActionBlocks {
     return $blocks.ToArray()
 }
 
-function Get-PshGoal6RunBlocks {
+function Get-PshGoal6RunBlock {
     param([Parameter(Mandatory = $true)][string]$Text)
 
     $lines = $Text.Split("`n")
@@ -159,7 +159,7 @@ $contractErrors = $null
 [void][Management.Automation.Language.Parser]::ParseFile($contractPath, [ref]$contractTokens, [ref]$contractErrors)
 Assert-PshGoal6Workflow (@($contractErrors).Count -eq 0) 'Workflow contract script has PowerShell parser errors.'
 
-$runBlocks = @(Get-PshGoal6RunBlocks -Text $workflowText)
+$runBlocks = @(Get-PshGoal6RunBlock -Text $workflowText)
 Assert-PshGoal6Workflow ($runBlocks.Count -gt 0) 'Workflow contains no explicit run blocks.'
 foreach ($runBlock in @($runBlocks | Where-Object { [string]$_.Shell -in @('powershell', 'pwsh') })) {
     $tokens = $null
@@ -281,6 +281,19 @@ Assert-PshGoal6WorkflowMatch $candidateJob 'goal6-candidate-exact-13' 'canonical
 Assert-PshGoal6WorkflowMatch $candidateJob '(?m)^          name: goal6-candidate-reports\s*$' 'separate candidate report artifact' 1 1
 Assert-PshGoal6WorkflowNoMatch $candidateJob '(?i)attestation-(?:bundle|statement).*goal6-candidate(?:[\x27\x22/\\]|\b)' 'Candidate job must not place provenance evidence in the canonical candidate root.'
 
+$reproducibilityText = Get-PshGoal6StrictText -Path (Join-Path $repositoryRootPath 'scripts/goal6/Test-Goal6Reproducibility.ps1') -Description 'Goal 6 reproducibility gate'
+Assert-PshGoal6WorkflowMatch $reproducibilityText '\$sharedCandidateWorkingRoot\s*=\s*Join-Path \$outputRootPath ''shared-candidate-working''' 'shared deterministic candidate working root' 1 1
+Assert-PshGoal6WorkflowMatch $reproducibilityText '-CandidateWorkingRoot \$sharedCandidateWorkingRoot' 'same candidate working root passed to both independent builds' 2 2
+Assert-PshGoal6WorkflowMatch $reproducibilityText 'RunRoot \(Join-Path \$outputRootPath ''run-[12]''\)' 'independent candidate run roots' 2 2
+Assert-PshGoal6WorkflowMatch $reproducibilityText 'PshGoal6ReproWorkingRootPreconditionCount\+\+' 'per-build shared working-root precondition' 1 1
+Assert-PshGoal6WorkflowMatch $reproducibilityText 'PshGoal6ReproWorkingRootCleanupCount\+\+' 'per-build shared working-root cleanup proof' 1 1
+Assert-PshGoal6WorkflowMatch $reproducibilityText 'same-absolute-path-must-not-exist-before-or-after-each-build' 'retained shared working-root policy evidence' 1 1
+Assert-PshGoal6WorkflowMatch $reproducibilityText "comparison = 'exact-file-sha256'" 'exact SHA256 comparison for every non-ZIP candidate asset' 1 1
+Assert-PshGoal6WorkflowMatch $reproducibilityText "comparison = 'timestamp-normalized-zip'" 'timestamp-only ZIP container normalization' 1 1
+Assert-PshGoal6WorkflowMatch $reproducibilityText 'Compare-PshGoal6ZipArchiveManifest' 'full non-time ZIP comparison' 1 1
+Assert-PshGoal6WorkflowMatch $reproducibilityText '\$differences\s*=\s*@\(Compare-PshGoal6CandidateManifest -First \$manifestOne -Second \$manifestTwo\)' 'final exact 13-asset candidate comparison remains gating' 1 1
+Assert-PshGoal6WorkflowNoMatch $reproducibilityText '(?i)catalog-dependent|non-gating|postCatalogByteReproducible' 'Reproducibility gate must not exempt catalog-dependent candidate bytes.'
+
 $defenderText = Get-PshGoal6StrictText -Path (Join-Path $repositoryRootPath 'scripts/goal6/Invoke-Goal6DefenderScan.ps1') -Description 'Goal 6 Defender gate'
 Assert-PshGoal6WorkflowMatch $defenderText 'defender-asset-inventory\.json' 'mandatory Defender SHA inventory report' 1 -1
 Assert-PshGoal6WorkflowMatch $defenderText "\`$mode = 'hash-only'" 'Defender-unavailable hash-only fallback' 1 1
@@ -332,7 +345,7 @@ $allowedActions = @{
     'actions/upload-artifact' = 'ea165f8d65b6e75b540449e92b4886f43607fa02'
     'actions/attest-build-provenance' = '0f67c3f4856b2e3261c31976d6725780e5e4c373'
 }
-$actionBlocks = @(Get-PshGoal6ActionBlocks -Text $workflowText)
+$actionBlocks = @(Get-PshGoal6ActionBlock -Text $workflowText)
 Assert-PshGoal6Workflow ($actionBlocks.Count -gt 0) 'Workflow uses no actions.'
 foreach ($actionBlock in $actionBlocks) {
     Assert-PshGoal6Workflow ([string]$actionBlock.Uses -match '\A(?<name>[^@]+)@(?<sha>[0-9a-f]{40})\z') "Action is not pinned to a full commit SHA at line $($actionBlock.Line): $($actionBlock.Uses)"

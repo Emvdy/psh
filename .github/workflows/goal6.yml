@@ -490,31 +490,42 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $reproRoot = Join-Path $env:RUNNER_TEMP 'goal6-reproducibility-work'
-          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/goal6/Test-Goal6Reproducibility.ps1') `
-              -OutputRoot $reproRoot `
-              -Version $env:PSH_GOAL6_VERSION `
-              -SourceCommit $env:PSH_SOURCE_COMMIT `
-              -ReleaseNotesPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.md') `
-              -ReleaseNotesZhCnPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.zh-CN.md') `
-              -RepositoryRoot $env:GITHUB_WORKSPACE
           $retainedRoot = Join-Path (Join-Path $env:RUNNER_TEMP 'goal6-candidate-reports') 'reproducibility'
-          [void][IO.Directory]::CreateDirectory($retainedRoot)
-          foreach ($relativePath in @(
-                  'build-1.manifest.json',
-                  'build-2.manifest.json',
-                  'reproducibility-diff.json',
-                  'reproducibility-summary.json',
-                  'run-1/bootstrapper-build.log',
-                  'run-1/candidate-build.log',
-                  'run-1/candidate-report.json',
-                  'run-2/bootstrapper-build.log',
-                  'run-2/candidate-build.log',
-                  'run-2/candidate-report.json')) {
-              $sourcePath = Join-Path $reproRoot $relativePath
-              if (-not [IO.File]::Exists($sourcePath)) { throw "Reproducibility report is missing: $relativePath" }
-              $destinationPath = Join-Path $retainedRoot $relativePath
-              [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destinationPath))
-              [IO.File]::Copy($sourcePath, $destinationPath, $false)
+          $reproReportPaths = @(
+              'build-1.manifest.json',
+              'build-2.manifest.json',
+              'reproducibility-diff.json',
+              'reproducibility-summary.json',
+              'run-1/bootstrapper-build.log',
+              'run-1/candidate-build.log',
+              'run-1/candidate-report.json',
+              'run-2/bootstrapper-build.log',
+              'run-2/candidate-build.log',
+              'run-2/candidate-report.json'
+          )
+          try {
+              & (Join-Path $env:GITHUB_WORKSPACE 'scripts/goal6/Test-Goal6Reproducibility.ps1') `
+                  -OutputRoot $reproRoot `
+                  -Version $env:PSH_GOAL6_VERSION `
+                  -SourceCommit $env:PSH_SOURCE_COMMIT `
+                  -ReleaseNotesPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.md') `
+                  -ReleaseNotesZhCnPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.zh-CN.md') `
+                  -RepositoryRoot $env:GITHUB_WORKSPACE
+          }
+          finally {
+              [void][IO.Directory]::CreateDirectory($retainedRoot)
+              foreach ($relativePath in $reproReportPaths) {
+                  $sourcePath = Join-Path $reproRoot $relativePath
+                  if (-not [IO.File]::Exists($sourcePath)) { continue }
+                  $destinationPath = Join-Path $retainedRoot $relativePath
+                  [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destinationPath))
+                  [IO.File]::Copy($sourcePath, $destinationPath, $false)
+              }
+          }
+          foreach ($relativePath in $reproReportPaths) {
+              if (-not [IO.File]::Exists((Join-Path $retainedRoot $relativePath))) {
+                  throw "Reproducibility report is missing: $relativePath"
+              }
           }
 
       - name: Upload canonical candidate bytes

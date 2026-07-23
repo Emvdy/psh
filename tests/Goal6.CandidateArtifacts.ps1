@@ -79,12 +79,12 @@ function Get-PshGoal6CandidateFunctionDefinition {
     if (@($parseErrors).Count -ne 0) {
         throw "Unable to parse production helper source '$Path': $([string]::Join('; ', @($parseErrors | ForEach-Object { [string]$_.Message })))"
     }
-    $matches = @($ast.FindAll({
+    $functionMatches = @($ast.FindAll({
                 param($node)
                 $node -is [Management.Automation.Language.FunctionDefinitionAst] -and [string]$node.Name -ceq $Name
             }, $true))
-    if ($matches.Count -ne 1) { throw "Production helper '$Name' was found $($matches.Count) times in: $Path" }
-    return [scriptblock]::Create([string]$matches[0].Extent.Text)
+    if ($functionMatches.Count -ne 1) { throw "Production helper '$Name' was found $($functionMatches.Count) times in: $Path" }
+    return [scriptblock]::Create([string]$functionMatches[0].Extent.Text)
 }
 
 function Initialize-PshGoal6CandidateTestDirectory {
@@ -247,15 +247,15 @@ if (-not [IO.Directory]::Exists($ReportRoot)) { [void](Initialize-PshGoal6Candid
 
 foreach ($functionName in @(
         'Invoke-PshGoal6CandidateFailure',
-        'Initialize-PshGoal6CandidateNativeMethods',
-        'New-PshGoal6CandidateOwnedDirectory',
+        'Initialize-PshGoal6CandidateNativeMethod',
+        'Initialize-PshGoal6CandidateOwnedDirectory',
         'Test-PshGoal6CandidateContainedPath',
         'Test-PshGoal6CandidateSamePath',
         'Assert-PshGoal6CandidateOutputIsolation',
         'Move-PshGoal6CandidateDirectoryAtomically',
         'Move-PshGoal6CandidateFileAtomically',
         'Invoke-PshGoal6CandidateTreeCleanup',
-        'Invoke-PshGoal6CandidateCleanupActions',
+        'Invoke-PshGoal6CandidateCleanupAction',
         'Write-PshGoal6CandidateReportTemp'
     )) {
     . (Get-PshGoal6CandidateFunctionDefinition -Path $candidateScript -Name $functionName)
@@ -269,7 +269,7 @@ $atomicContractRoot = Initialize-PshGoal6CandidateTestDirectory -Path (Join-Path
 $candidateReportHelperText = [string](Get-PshGoal6CandidateFunctionDefinition -Path $candidateScript -Name 'Write-PshGoal6CandidateReportTemp')
 $candidateReportDisposeLines = @($candidateReportHelperText -split "`r?`n" | Where-Object { [string]$_ -match '\.Dispose\(\)' })
 Assert-PshGoal6CandidateTest ($candidateReportDisposeLines.Count -eq 1 -and @($candidateReportDisposeLines | Where-Object { [string]$_ -notmatch 'Action\s*=' }).Count -eq 0) 'Candidate report helper has a Dispose call outside independent cleanup actions.'
-Assert-PshGoal6CandidateTest ($candidateReportHelperText.Contains('Invoke-PshGoal6CandidateCleanupActions') -and $candidateReportHelperText.Contains('PshDisposeDiagnostics')) 'Candidate report helper does not aggregate Dispose failures with diagnostics.'
+Assert-PshGoal6CandidateTest ($candidateReportHelperText.Contains('Invoke-PshGoal6CandidateCleanupAction') -and $candidateReportHelperText.Contains('PshDisposeDiagnostics')) 'Candidate report helper does not aggregate Dispose failures with diagnostics.'
 
 $releaseCopyHelperText = [string](Get-PshGoal6CandidateFunctionDefinition -Path $indexScript -Name 'Copy-PshReleaseIndexFile')
 $releaseCopyDisposeLines = @($releaseCopyHelperText -split "`r?`n" | Where-Object { [string]$_ -match '\.Dispose\(\)' })
@@ -296,7 +296,7 @@ Assert-PshGoal6CandidateTest ([string]$indexDiagnosticError.Exception.Data['PshD
 
 if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     $atomicOwnedRoot = Join-Path $atomicContractRoot 'atomic-owned-root'
-    New-PshGoal6CandidateOwnedDirectory -Path $atomicOwnedRoot -Description 'atomic owned root fixture'
+    Initialize-PshGoal6CandidateOwnedDirectory -Path $atomicOwnedRoot -Description 'atomic owned root fixture'
     $atomicOwnedEntries = @(Get-ChildItem -LiteralPath $atomicOwnedRoot -Force)
     Assert-PshGoal6CandidateTest ([IO.Directory]::Exists($atomicOwnedRoot) -and $atomicOwnedEntries.Count -eq 0) 'Atomic owned directory creation did not create one empty directory.'
 
@@ -305,7 +305,7 @@ if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     [IO.File]::WriteAllBytes($ownedRootSentinelPath, [byte[]](21, 22, 23, 24))
     $ownedRootSentinelBefore = Get-PshLifecycleFileSha256 -Path $ownedRootSentinelPath
     Assert-PshGoal6CandidateFailure -Label 'preoccupied atomic owned directory claim' -ExitCode 5 -ErrorId 'PshGoal6CandidateOutputExists' -Action {
-        New-PshGoal6CandidateOwnedDirectory -Path $preoccupiedOwnedRoot -Description 'preoccupied atomic owned root fixture'
+        Initialize-PshGoal6CandidateOwnedDirectory -Path $preoccupiedOwnedRoot -Description 'preoccupied atomic owned root fixture'
     }
     $ownedRootSentinelAfter = Get-PshLifecycleFileSha256 -Path $ownedRootSentinelPath
     Assert-PshGoal6CandidateTest ([int64]$ownedRootSentinelAfter.Length -eq [int64]$ownedRootSentinelBefore.Length -and [string]$ownedRootSentinelAfter.Sha256 -ceq [string]$ownedRootSentinelBefore.Sha256) 'Atomic owned directory claim changed the preoccupied sentinel.'
@@ -382,7 +382,7 @@ Assert-PshGoal6CandidateTest ([IO.Directory]::Exists($cleanupRefusalRoot) -and [
 Assert-PshGoal6CandidateTest ([int64]$cleanupSentinelAfter.Length -eq [int64]$cleanupSentinelBefore.Length -and [string]$cleanupSentinelAfter.Sha256 -ceq [string]$cleanupSentinelBefore.Sha256) 'Cleanup refusal changed the unexpected sentinel bytes.'
 
 $cleanupOrder = New-Object System.Collections.Generic.List[string]
-$cleanupActionFailures = @(Invoke-PshGoal6CandidateCleanupActions -Actions @(
+$cleanupActionFailures = @(Invoke-PshGoal6CandidateCleanupAction -Actions @(
         [pscustomobject]@{ Label = 'first'; Action = { $cleanupOrder.Add('first'); throw 'first cleanup failed' } },
         [pscustomobject]@{ Label = 'second'; Action = { $cleanupOrder.Add('second') } },
         [pscustomobject]@{ Label = 'third'; Action = { $cleanupOrder.Add('third') } }
