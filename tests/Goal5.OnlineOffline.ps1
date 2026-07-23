@@ -122,6 +122,24 @@ function Get-PshGoal5HashFile {
     return Get-PshGoal5HashBytes -Bytes ([IO.File]::ReadAllBytes($Path))
 }
 
+function Get-PshGoal5LockedHashFile {
+    param([Parameter(Mandatory = $true)][string] $Path)
+
+    $stream = $null
+    $sha = $null
+    try {
+        # Snapshot writers retain ReadWrite handles shared for readers. The
+        # reader must reciprocally share Write even though it never writes.
+        $stream = New-Object IO.FileStream($Path, ([IO.FileMode]::Open), ([IO.FileAccess]::Read), ([IO.FileShare]::ReadWrite))
+        $sha = [Security.Cryptography.SHA256]::Create()
+        return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        if ($null -ne $sha) { $sha.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
 function Write-PshGoal5Text {
     param([Parameter(Mandatory = $true)][string] $Path, [Parameter(Mandatory = $true)][AllowEmptyString()][string] $Text)
     $parent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path))
@@ -472,7 +490,7 @@ $script:Goal5MembershipVerifierShim = {
         Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContent' -Message 'Catalog membership verification received an invalid request.'
     }
 
-    $catalogSha256 = Get-PshGoal5HashFile -Path $catalogPath
+    $catalogSha256 = Get-PshGoal5LockedHashFile -Path $catalogPath
     if (-not $script:Goal5CatalogMembership.ContainsKey($catalogSha256)) {
         Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContent' -Message 'Catalog content validation failed: unregistered catalog bytes.'
     }
@@ -483,7 +501,7 @@ $script:Goal5MembershipVerifierShim = {
     }
     foreach ($expectedMember in $expectedMembers) {
         $matches = @($contentEntries | Where-Object { [string]$_.Name -ceq [string]$expectedMember.Name })
-        if ($matches.Count -ne 1 -or (Get-PshGoal5HashFile -Path $matches[0].FullName) -cne [string]$expectedMember.Sha256) {
+        if ($matches.Count -ne 1 -or (Get-PshGoal5LockedHashFile -Path $matches[0].FullName) -cne [string]$expectedMember.Sha256) {
             Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshCatalogContent' -Message ('Catalog content validation failed: member mismatch for {0}.' -f [string]$expectedMember.Name)
         }
     }
@@ -592,6 +610,24 @@ $oldTemp = $null
 $oldTmp = $null
 
 try {
+    $lockedHashPath = Join-Path $script:TestRoot 'locked-membership-hash.bin'
+    $lockedHashBytes = [Text.Encoding]::UTF8.GetBytes('locked membership hash fixture')
+    [IO.File]::WriteAllBytes($lockedHashPath, $lockedHashBytes)
+    $lockedHashStream = $null
+    try {
+        $lockedHashStream = New-Object IO.FileStream($lockedHashPath, ([IO.FileMode]::Open), ([IO.FileAccess]::ReadWrite), ([IO.FileShare]::Read))
+        Assert-PshGoal5Entry ((Get-PshGoal5LockedHashFile -Path $lockedHashPath) -ceq (Get-PshGoal5HashBytes -Bytes $lockedHashBytes)) 'Catalog membership hashing could not read a locked trust snapshot without weakening its writer lock.'
+        $lockedWriteProbe = $null
+        $lockedWriteDenied = $false
+        try { $lockedWriteProbe = New-Object IO.FileStream($lockedHashPath, ([IO.FileMode]::Open), ([IO.FileAccess]::Write), ([IO.FileShare]::ReadWrite)) }
+        catch { $lockedWriteDenied = $true }
+        finally { if ($null -ne $lockedWriteProbe) { $lockedWriteProbe.Dispose() } }
+        Assert-PshGoal5Entry $lockedWriteDenied 'Catalog membership hashing weakened the locked trust snapshot against a new writer.'
+    }
+    finally {
+        if ($null -ne $lockedHashStream) { $lockedHashStream.Dispose() }
+    }
+
     $bashSelectionRegression = Select-PshGoal5ShellApplicationPath -Name bash -CandidatePaths @(
         'C:\Windows\System32\bash.exe',
         'C:\Program Files\Git\usr\bin\bash.exe',
