@@ -503,6 +503,9 @@ jobs:
               'run-2/candidate-build.log',
               'run-2/candidate-report.json'
           )
+          $gateFailure = $null
+          $retentionFailure = $null
+          $retentionDiagnosticAttachmentFailure = $null
           try {
               & (Join-Path $env:GITHUB_WORKSPACE 'scripts/goal6/Test-Goal6Reproducibility.ps1') `
                   -OutputRoot $reproRoot `
@@ -512,16 +515,36 @@ jobs:
                   -ReleaseNotesZhCnPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.zh-CN.md') `
                   -RepositoryRoot $env:GITHUB_WORKSPACE
           }
+          catch {
+              $gateFailure = $_
+              throw
+          }
           finally {
-              [void][IO.Directory]::CreateDirectory($retainedRoot)
-              foreach ($relativePath in $reproReportPaths) {
-                  $sourcePath = Join-Path $reproRoot $relativePath
-                  if (-not [IO.File]::Exists($sourcePath)) { continue }
-                  $destinationPath = Join-Path $retainedRoot $relativePath
-                  [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destinationPath))
-                  [IO.File]::Copy($sourcePath, $destinationPath, $false)
+              try {
+                  [void][IO.Directory]::CreateDirectory($retainedRoot)
+                  foreach ($relativePath in $reproReportPaths) {
+                      $sourcePath = Join-Path $reproRoot $relativePath
+                      if (-not [IO.File]::Exists($sourcePath)) { continue }
+                      $destinationPath = Join-Path $retainedRoot $relativePath
+                      [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destinationPath))
+                      [IO.File]::Copy($sourcePath, $destinationPath, $false)
+                  }
+              }
+              catch {
+                  if ($null -ne $gateFailure) {
+                      $retentionError = $_
+                      try {
+                          $gateFailure.Exception.Data['PshWorkflowRetentionDiagnostics'] = [string]$retentionError.Exception.Message
+                          $gateFailure.Exception.Data['PshWorkflowRetentionErrorId'] = [string]$retentionError.FullyQualifiedErrorId
+                      }
+                      catch { $retentionDiagnosticAttachmentFailure = $_ }
+                  }
+                  else {
+                      $retentionFailure = $_
+                  }
               }
           }
+          if ($null -ne $retentionFailure) { throw $retentionFailure }
           foreach ($relativePath in $reproReportPaths) {
               if (-not [IO.File]::Exists((Join-Path $retainedRoot $relativePath))) {
                   throw "Reproducibility report is missing: $relativePath"

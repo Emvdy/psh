@@ -65,6 +65,44 @@ function Get-PshGoal6FailureDetail {
     }
 }
 
+function Get-PshGoal6FailureDataValue {
+    param(
+        [AllowNull()][object]$ErrorRecord,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $exception = if ($ErrorRecord -is [Management.Automation.ErrorRecord]) {
+        $ErrorRecord.Exception
+    }
+    elseif ($ErrorRecord -is [Exception]) {
+        $ErrorRecord
+    }
+    else {
+        $null
+    }
+    while ($null -ne $exception -and $exception -is [Exception]) {
+        if ($exception.Data.Contains($Name)) { return [string]$exception.Data[$Name] }
+        $exception = $exception.InnerException
+    }
+    return $null
+}
+
+function Add-PshGoal6FailureDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)][Management.Automation.ErrorRecord]$ErrorRecord,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowNull()][object]$Value
+    )
+
+    try {
+        $ErrorRecord.Exception.Data[$Name] = $Value
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
 function Get-PshGoal6OrderedString {
     param([Parameter(Mandatory = $true)][object[]]$Values)
 
@@ -181,18 +219,43 @@ function Invoke-PshGoal6IndependentCandidateBuild {
         WorkingRoot = $candidateWorkingRootPath
     }
     $candidateOutput = @()
+    $candidateFailure = $null
+    $candidateCleanupFailure = $null
+    $candidateLogFailure = $null
     $script:PshGoal6ReproCandidateDriverInvocations++
     try { $candidateOutput = @(& $CandidateScriptPath @candidateParameters 2>&1) }
     catch {
+        $candidateFailure = $_
         $candidateOutput += $_
-        Write-PshGoal6Text -Path (Join-Path $RunRoot 'candidate-build.log') -Text ((@($candidateOutput | ForEach-Object { [string]$_ }) -join "`n") + "`n")
-        throw
     }
     finally {
-        Assert-PshGoal6Condition (-not [IO.File]::Exists($candidateWorkingRootPath) -and -not [IO.Directory]::Exists($candidateWorkingRootPath)) "Candidate driver retained state in the shared working root: $candidateWorkingRootPath"
-        $script:PshGoal6ReproWorkingRootCleanupCount++
+        try {
+            Assert-PshGoal6Condition (-not [IO.File]::Exists($candidateWorkingRootPath) -and -not [IO.Directory]::Exists($candidateWorkingRootPath)) "Candidate driver retained state in the shared working root: $candidateWorkingRootPath"
+            $script:PshGoal6ReproWorkingRootCleanupCount++
+        }
+        catch { $candidateCleanupFailure = $_ }
     }
-    Write-PshGoal6Text -Path (Join-Path $RunRoot 'candidate-build.log') -Text ((@($candidateOutput | ForEach-Object { [string]$_ }) -join "`n") + "`n")
+    try { Write-PshGoal6Text -Path (Join-Path $RunRoot 'candidate-build.log') -Text ((@($candidateOutput | ForEach-Object { [string]$_ }) -join "`n") + "`n") }
+    catch { $candidateLogFailure = $_ }
+    if ($null -ne $candidateFailure) {
+        if ($null -ne $candidateCleanupFailure) {
+            [void](Add-PshGoal6FailureDiagnostic -ErrorRecord $candidateFailure -Name 'PshReproCleanupDiagnostics' -Value ([string]$candidateCleanupFailure.Exception.Message))
+            [void](Add-PshGoal6FailureDiagnostic -ErrorRecord $candidateFailure -Name 'PshReproCleanupErrorId' -Value ([string]$candidateCleanupFailure.FullyQualifiedErrorId))
+        }
+        if ($null -ne $candidateLogFailure) {
+            [void](Add-PshGoal6FailureDiagnostic -ErrorRecord $candidateFailure -Name 'PshReproRetentionDiagnostics' -Value ([string]$candidateLogFailure.Exception.Message))
+            [void](Add-PshGoal6FailureDiagnostic -ErrorRecord $candidateFailure -Name 'PshReproRetentionErrorId' -Value ([string]$candidateLogFailure.FullyQualifiedErrorId))
+        }
+        $PSCmdlet.ThrowTerminatingError($candidateFailure)
+    }
+    if ($null -ne $candidateCleanupFailure) {
+        if ($null -ne $candidateLogFailure) {
+            [void](Add-PshGoal6FailureDiagnostic -ErrorRecord $candidateCleanupFailure -Name 'PshReproRetentionDiagnostics' -Value ([string]$candidateLogFailure.Exception.Message))
+            [void](Add-PshGoal6FailureDiagnostic -ErrorRecord $candidateCleanupFailure -Name 'PshReproRetentionErrorId' -Value ([string]$candidateLogFailure.FullyQualifiedErrorId))
+        }
+        $PSCmdlet.ThrowTerminatingError($candidateCleanupFailure)
+    }
+    if ($null -ne $candidateLogFailure) { $PSCmdlet.ThrowTerminatingError($candidateLogFailure) }
     $candidateResults = @($candidateOutput | Where-Object {
             $null -ne $_ -and $null -ne $_.PSObject.Properties['phase'] -and [string]$_.phase -ceq 'candidate-verified'
         })
@@ -441,6 +504,8 @@ catch { $failureRecord = $_ }
 
 Write-PshGoal6Json -Path (Join-Path $outputRootPath 'reproducibility-diff.json') -InputObject $differences
 $failureMetadata = Get-PshGoal6FailureDetail -ErrorRecord $failureRecord
+$failureCleanupDiagnostic = Get-PshGoal6FailureDataValue -ErrorRecord $failureRecord -Name 'PshReproCleanupDiagnostics'
+$failureRetentionDiagnostic = Get-PshGoal6FailureDataValue -ErrorRecord $failureRecord -Name 'PshReproRetentionDiagnostics'
 $passed = $null -eq $failureRecord -and $differences.Count -eq 0 -and $null -ne $manifestOne -and $null -ne $manifestTwo
 $manifestPaths = @(
     if ([IO.File]::Exists((Join-Path $outputRootPath 'build-1.manifest.json'))) { 'build-1.manifest.json' }
@@ -482,6 +547,8 @@ $summary = [pscustomobject][ordered]@{
     diff = 'reproducibility-diff.json'
     errorId = if ($null -eq $failureRecord) { $null } else { [string]$failureMetadata.errorId }
     error = if ($null -eq $failureRecord) { $null } else { [string]$failureMetadata.message }
+    cleanupDiagnostics = $failureCleanupDiagnostic
+    retentionDiagnostics = $failureRetentionDiagnostic
 }
 $summaryPath = Join-Path $outputRootPath 'reproducibility-summary.json'
 Write-PshGoal6Json -Path $summaryPath -InputObject $summary

@@ -81,6 +81,227 @@ function Get-PshGoal6JobBlock {
     return $match.Value
 }
 
+function Get-PshGoal6StepBlock {
+    param([Parameter(Mandatory = $true)][string]$Text)
+
+    $lines = $Text.Split("`n")
+    $blocks = New-Object Collections.Generic.List[object]
+    for ($index = 0; $index -lt $lines.Length; $index++) {
+        $nameMatch = [regex]::Match($lines[$index], '^(?<indent> +)- name:\s*(?<name>[^#]+?)\s*$')
+        if (-not $nameMatch.Success) { continue }
+        $stepIndent = $nameMatch.Groups['indent'].Length
+        $body = New-Object Collections.Generic.List[string]
+        [void]$body.Add($lines[$index])
+        $bodyIndex = $index + 1
+        for (; $bodyIndex -lt $lines.Length; $bodyIndex++) {
+            $line = $lines[$bodyIndex]
+            if ($line.Length -eq 0) { [void]$body.Add(''); continue }
+            $leading = [regex]::Match($line, '^ *').Value.Length
+            if ($leading -le $stepIndent) { break }
+            [void]$body.Add($line)
+        }
+
+        $stepText = $body.ToArray() -join "`n"
+        $directIndent = ' ' * ($stepIndent + 2)
+        $conditionMatch = [regex]::Match($stepText, "(?m)^$([regex]::Escape($directIndent))if:\s*(?<value>.+?)\s*$")
+        $usesMatch = [regex]::Match($stepText, "(?m)^$([regex]::Escape($directIndent))uses:\s*(?<value>[^\s#]+)")
+        $shellMatch = [regex]::Match($stepText, "(?m)^$([regex]::Escape($directIndent))shell:\s*(?<value>.+?)\s*$")
+        $runMatch = [regex]::Match($stepText, "(?m)^$([regex]::Escape($directIndent))run:\s*\|\s*$")
+        $scriptText = ''
+        if ($runMatch.Success) {
+            $stepLines = $stepText.Split("`n")
+            $runLineIndex = [regex]::Matches($stepText.Substring(0, $runMatch.Index), "`n").Count
+            $scriptLines = New-Object Collections.Generic.List[string]
+            for ($scriptIndex = $runLineIndex + 1; $scriptIndex -lt $stepLines.Length; $scriptIndex++) {
+                $scriptLine = $stepLines[$scriptIndex]
+                if ($scriptLine.Length -eq 0) { [void]$scriptLines.Add(''); continue }
+                $leading = [regex]::Match($scriptLine, '^ *').Value.Length
+                if ($leading -le ($stepIndent + 2)) { break }
+                $remove = [Math]::Min($stepIndent + 4, $leading)
+                [void]$scriptLines.Add($scriptLine.Substring($remove))
+            }
+            $scriptText = $scriptLines.ToArray() -join "`n"
+        }
+        [void]$blocks.Add([pscustomobject]@{
+                Line = $index + 1
+                Name = [string]$nameMatch.Groups['name'].Value
+                Condition = if ($conditionMatch.Success) { [string]$conditionMatch.Groups['value'].Value } else { '' }
+                Uses = if ($usesMatch.Success) { [string]$usesMatch.Groups['value'].Value } else { '' }
+                Shell = if ($shellMatch.Success) { [string]$shellMatch.Groups['value'].Value } else { '' }
+                Script = $scriptText
+                Text = $stepText
+            })
+        $index = $bodyIndex - 1
+    }
+    return $blocks.ToArray()
+}
+
+function Get-PshGoal6FunctionBlock {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$parseErrors)
+    Assert-PshGoal6Workflow (@($parseErrors).Count -eq 0) "PowerShell source containing '$Name' has parser errors."
+    $functionMatches = @($ast.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and [string]$node.Name -ceq $Name
+            }, $true))
+    Assert-PshGoal6Workflow ($functionMatches.Count -eq 1) "Function '$Name' was found $($functionMatches.Count) times."
+    return [string]$functionMatches[0].Extent.Text
+}
+
+function Invoke-PshGoal6PrimaryFailureSmoke {
+    param(
+        [Parameter(Mandatory = $true)][string]$CandidateBuildFunction,
+        [Parameter(Mandatory = $true)][string]$FailureDetailFunction,
+        [Parameter(Mandatory = $true)][string]$FailureDataValueFunction,
+        [Parameter(Mandatory = $true)][string]$FailureDiagnosticFunction,
+        [Parameter(Mandatory = $true)][string]$ReproStepScript
+    )
+
+    $smokeRoot = Join-Path ([IO.Path]::GetTempPath()) ('psh-goal6-primary-smoke-' + [Guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($smokeRoot)
+    try {
+        return & {
+            param($Root, $CandidateFunctionText, $FailureDetailText, $FailureDataValueText, $FailureDiagnosticText, $WorkflowScriptText)
+
+            function Assert-PshGoal6Condition {
+                param([Parameter(Mandatory = $true)][bool]$Condition, [Parameter(Mandatory = $true)][string]$Message)
+                if (-not $Condition) { throw $Message }
+            }
+            function Write-PshGoal6Text {
+                param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Text)
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Path))
+                [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding($false)))
+            }
+
+            . ([scriptblock]::Create($FailureDetailText))
+            . ([scriptblock]::Create($FailureDataValueText))
+            . ([scriptblock]::Create($FailureDiagnosticText))
+            . ([scriptblock]::Create($CandidateFunctionText))
+
+            $utf8 = New-Object Text.UTF8Encoding($false)
+            $candidateFixtureRoot = Join-Path $Root 'candidate'
+            $repositoryFixtureRoot = Join-Path $candidateFixtureRoot 'repository'
+            [void][IO.Directory]::CreateDirectory((Join-Path $repositoryFixtureRoot 'scripts'))
+            [void][IO.Directory]::CreateDirectory((Join-Path $repositoryFixtureRoot 'src/install'))
+            [IO.File]::WriteAllText((Join-Path $repositoryFixtureRoot 'src/install/install.ps1'), "# online`n", $utf8)
+            [IO.File]::WriteAllText((Join-Path $repositoryFixtureRoot 'src/install/install-offline.ps1'), "# offline`n", $utf8)
+            [IO.File]::WriteAllText((Join-Path $repositoryFixtureRoot 'scripts/Build-PshBootstrapper.ps1'), @'
+[CmdletBinding()]
+param(
+    [string]$OnlineScriptPath,
+    [string]$OfflineScriptPath,
+    [string]$OutputPath,
+    [string]$HashSourcePath,
+    [string]$MSBuildPath
+)
+[IO.File]::WriteAllBytes($OutputPath, [byte[]](1, 2, 3, 4))
+'@, $utf8)
+            $candidateDriverPath = Join-Path $candidateFixtureRoot 'candidate-primary.ps1'
+            [IO.File]::WriteAllText($candidateDriverPath, @'
+[CmdletBinding()]
+param(
+    [string]$CandidateRoot,
+    [string]$ReportPath,
+    [string]$Version,
+    [string]$SourceCommit,
+    [string]$BootstrapperPath,
+    [string]$ReleaseNotesPath,
+    [string]$ReleaseNotesZhCnPath,
+    [string]$RepositoryRoot,
+    [string]$WorkingRoot
+)
+[void][IO.Directory]::CreateDirectory($WorkingRoot)
+$exception = New-Object Exception('candidate primary smoke')
+$exception.Data['PshExitCode'] = 3
+$exception.Data['PshErrorId'] = 'PshGoal6CandidateSmokePrimary'
+throw $exception
+'@, $utf8)
+
+            $script:PshGoal6ReproBootstrapperInvocations = 0
+            $script:PshGoal6ReproBootstrapperBuilds = 0
+            $script:PshGoal6ReproCandidateDriverInvocations = 0
+            $script:PshGoal6ReproCandidateVerifiedBuilds = 0
+            $script:PshGoal6ReproWorkingRootPreconditionCount = 0
+            $script:PshGoal6ReproWorkingRootCleanupCount = 0
+            $candidateFailure = $null
+            try {
+                $null = Invoke-PshGoal6IndependentCandidateBuild `
+                    -RunRoot (Join-Path $candidateFixtureRoot 'run') `
+                    -CandidateWorkingRoot (Join-Path $candidateFixtureRoot 'shared-working') `
+                    -RepositoryRootPath $repositoryFixtureRoot `
+                    -PackageVersion '0.1.0' `
+                    -Commit ('a' * 40) `
+                    -EnglishReleaseNotes (Join-Path $candidateFixtureRoot 'RELEASE_NOTES.md') `
+                    -ChineseReleaseNotes (Join-Path $candidateFixtureRoot 'RELEASE_NOTES.zh-CN.md') `
+                    -CandidateScriptPath $candidateDriverPath
+            }
+            catch { $candidateFailure = $_ }
+            $candidateMetadata = Get-PshGoal6FailureDetail -ErrorRecord $candidateFailure
+
+            $workflowFixtureRoot = Join-Path $Root 'workflow'
+            $workspaceRoot = Join-Path $workflowFixtureRoot 'workspace'
+            $runnerTemp = Join-Path $workflowFixtureRoot 'runner-temp'
+            [void][IO.Directory]::CreateDirectory((Join-Path $workspaceRoot 'scripts/goal6'))
+            [void][IO.Directory]::CreateDirectory($runnerTemp)
+            [IO.File]::WriteAllText((Join-Path $workspaceRoot 'scripts/goal6/Test-Goal6Reproducibility.ps1'), @'
+[CmdletBinding()]
+param(
+    [string]$OutputRoot,
+    [string]$Version,
+    [string]$SourceCommit,
+    [string]$ReleaseNotesPath,
+    [string]$ReleaseNotesZhCnPath,
+    [string]$RepositoryRoot
+)
+$exception = New-Object Exception('workflow primary smoke')
+$exception.Data['PshExitCode'] = 5
+$exception.Data['PshErrorId'] = 'PshGoal6WorkflowSmokePrimary'
+throw $exception
+'@, $utf8)
+            [IO.File]::WriteAllText((Join-Path $runnerTemp 'goal6-candidate-reports'), "retention blocker`n", $utf8)
+
+            $environmentNames = @('GITHUB_WORKSPACE', 'RUNNER_TEMP', 'PSH_GOAL6_VERSION', 'PSH_SOURCE_COMMIT')
+            $savedEnvironment = @{}
+            foreach ($environmentName in $environmentNames) {
+                $savedEnvironment[$environmentName] = [Environment]::GetEnvironmentVariable($environmentName, 'Process')
+            }
+            $workflowFailure = $null
+            try {
+                $env:GITHUB_WORKSPACE = $workspaceRoot
+                $env:RUNNER_TEMP = $runnerTemp
+                $env:PSH_GOAL6_VERSION = '0.1.0'
+                $env:PSH_SOURCE_COMMIT = 'b' * 40
+                & ([scriptblock]::Create($WorkflowScriptText))
+            }
+            catch { $workflowFailure = $_ }
+            finally {
+                foreach ($environmentName in $environmentNames) {
+                    [Environment]::SetEnvironmentVariable($environmentName, $savedEnvironment[$environmentName], 'Process')
+                }
+            }
+            $workflowMetadata = Get-PshGoal6FailureDetail -ErrorRecord $workflowFailure
+
+            return [pscustomobject][ordered]@{
+                candidateErrorId = [string]$candidateMetadata.errorId
+                candidateExitCode = [int]$candidateMetadata.exitCode
+                candidateCleanupDiagnostics = Get-PshGoal6FailureDataValue -ErrorRecord $candidateFailure -Name 'PshReproCleanupDiagnostics'
+                workflowErrorId = [string]$workflowMetadata.errorId
+                workflowExitCode = [int]$workflowMetadata.exitCode
+                workflowRetentionDiagnostics = Get-PshGoal6FailureDataValue -ErrorRecord $workflowFailure -Name 'PshWorkflowRetentionDiagnostics'
+            }
+        } $smokeRoot $CandidateBuildFunction $FailureDetailFunction $FailureDataValueFunction $FailureDiagnosticFunction $ReproStepScript
+    }
+    finally {
+        if ([IO.Directory]::Exists($smokeRoot)) { Remove-Item -LiteralPath $smokeRoot -Recurse -Force }
+    }
+}
+
 function Get-PshGoal6ActionBlock {
     param([Parameter(Mandatory = $true)][string]$Text)
 
@@ -281,7 +502,50 @@ Assert-PshGoal6WorkflowMatch $candidateJob 'goal6-candidate-exact-13' 'canonical
 Assert-PshGoal6WorkflowMatch $candidateJob '(?m)^          name: goal6-candidate-reports\s*$' 'separate candidate report artifact' 1 1
 Assert-PshGoal6WorkflowNoMatch $candidateJob '(?i)attestation-(?:bundle|statement).*goal6-candidate(?:[\x27\x22/\\]|\b)' 'Candidate job must not place provenance evidence in the canonical candidate root.'
 
+$candidateSteps = @(Get-PshGoal6StepBlock -Text $candidateJob)
+$reproStepMatches = @($candidateSteps | Where-Object { [string]$_.Name -ceq 'Build two independent real candidates for reproducibility' })
+Assert-PshGoal6Workflow ($reproStepMatches.Count -eq 1) 'Candidate job must contain exactly one structured reproducibility run step.'
+$reproStep = $reproStepMatches[0]
+Assert-PshGoal6Workflow ([string]$reproStep.Shell -ceq 'powershell' -and -not [string]::IsNullOrWhiteSpace([string]$reproStep.Script)) 'Reproducibility step must execute one PowerShell run block.'
+Assert-PshGoal6WorkflowMatch ([string]$reproStep.Script) '(?m)^\$gateFailure = \$null$' 'reproducibility primary failure slot' 1 1
+Assert-PshGoal6WorkflowMatch ([string]$reproStep.Script) '(?m)^\$retentionFailure = \$null$' 'reproducibility retention failure slot' 1 1
+Assert-PshGoal6WorkflowMatch ([string]$reproStep.Script) '(?m)^\$retentionDiagnosticAttachmentFailure = \$null$' 'retention diagnostic attachment failure slot' 1 1
+Assert-PshGoal6WorkflowMatch ([string]$reproStep.Script) '(?ms)^catch \{\n    \$gateFailure = \$_\n    throw\n\}\nfinally \{' 'bare primary rethrow before retention finally' 1 1
+Assert-PshGoal6WorkflowMatch ([string]$reproStep.Script) '(?m)^\s+\$gateFailure\.Exception\.Data\[''PshWorkflowRetentionDiagnostics''\] = \[string\]\$retentionError\.Exception\.Message$' 'retention diagnostic attached to the primary failure' 1 1
+Assert-PshGoal6WorkflowMatch ([string]$reproStep.Script) '(?m)^\s+catch \{ \$retentionDiagnosticAttachmentFailure = \$_ \}$' 'retention diagnostic attachment cannot replace primary failure' 1 1
+Assert-PshGoal6WorkflowMatch ([string]$reproStep.Script) '(?m)^if \(\$null -ne \$retentionFailure\) \{ throw \$retentionFailure \}$' 'retention-only failure escalation' 1 1
+
+$candidateReportUploadMatches = @($candidateSteps | Where-Object { [string]$_.Name -ceq 'Upload candidate reports' })
+Assert-PshGoal6Workflow ($candidateReportUploadMatches.Count -eq 1) 'Candidate job must contain exactly one structured candidate report upload step.'
+$candidateReportUploadStep = $candidateReportUploadMatches[0]
+Assert-PshGoal6Workflow ([string]$candidateReportUploadStep.Condition -ceq '${{ always() }}') 'Candidate report upload step must run with always().'
+Assert-PshGoal6Workflow ([string]$candidateReportUploadStep.Uses -ceq 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02') 'Candidate report upload step must use the pinned upload action.'
+
 $reproducibilityText = Get-PshGoal6StrictText -Path (Join-Path $repositoryRootPath 'scripts/goal6/Test-Goal6Reproducibility.ps1') -Description 'Goal 6 reproducibility gate'
+$candidateBuildFunction = Get-PshGoal6FunctionBlock -Text $reproducibilityText -Name 'Invoke-PshGoal6IndependentCandidateBuild'
+Assert-PshGoal6WorkflowMatch $candidateBuildFunction '(?m)^    \$candidateFailure = \$null$' 'candidate primary failure slot' 1 1
+Assert-PshGoal6WorkflowMatch $candidateBuildFunction '(?m)^    \$candidateCleanupFailure = \$null$' 'candidate cleanup failure slot' 1 1
+Assert-PshGoal6WorkflowMatch $candidateBuildFunction '(?m)^    \$candidateLogFailure = \$null$' 'candidate log retention failure slot' 1 1
+Assert-PshGoal6WorkflowMatch $candidateBuildFunction '(?ms)^    catch \{\n        \$candidateFailure = \$_\n        \$candidateOutput \+= \$_\n    \}\n    finally \{' 'candidate primary capture before cleanup finally' 1 1
+Assert-PshGoal6WorkflowNoMatch $candidateBuildFunction '(?ms)catch \{\s*\$candidateFailure = \$_.*?\n\s*throw\s*\n\s*\}' 'Candidate driver catch must not throw before cleanup diagnostics are attached.'
+Assert-PshGoal6WorkflowMatch $candidateBuildFunction "PshReproCleanupDiagnostics" 'candidate cleanup diagnostic data' 1 -1
+Assert-PshGoal6WorkflowMatch $candidateBuildFunction "PshReproRetentionDiagnostics" 'candidate retention diagnostic data' 1 -1
+Assert-PshGoal6WorkflowMatch $candidateBuildFunction '(?m)^        \$PSCmdlet\.ThrowTerminatingError\(\$candidateFailure\)$' 'same candidate primary ErrorRecord rethrow' 1 1
+Assert-PshGoal6WorkflowMatch $reproducibilityText '(?m)^    cleanupDiagnostics = \$failureCleanupDiagnostic$' 'candidate cleanup diagnostic summary field' 1 1
+Assert-PshGoal6WorkflowMatch $reproducibilityText '(?m)^    retentionDiagnostics = \$failureRetentionDiagnostic$' 'candidate retention diagnostic summary field' 1 1
+$failureDetailFunction = Get-PshGoal6FunctionBlock -Text $reproducibilityText -Name 'Get-PshGoal6FailureDetail'
+$failureDataValueFunction = Get-PshGoal6FunctionBlock -Text $reproducibilityText -Name 'Get-PshGoal6FailureDataValue'
+$failureDiagnosticFunction = Get-PshGoal6FunctionBlock -Text $reproducibilityText -Name 'Add-PshGoal6FailureDiagnostic'
+$primaryFailureSmoke = Invoke-PshGoal6PrimaryFailureSmoke `
+    -CandidateBuildFunction $candidateBuildFunction `
+    -FailureDetailFunction $failureDetailFunction `
+    -FailureDataValueFunction $failureDataValueFunction `
+    -FailureDiagnosticFunction $failureDiagnosticFunction `
+    -ReproStepScript ([string]$reproStep.Script)
+Assert-PshGoal6Workflow ([string]$primaryFailureSmoke.candidateErrorId -ceq 'PshGoal6CandidateSmokePrimary' -and [int]$primaryFailureSmoke.candidateExitCode -eq 3) 'Candidate cleanup failure replaced the injected primary ErrorId or exit code.'
+Assert-PshGoal6Workflow (-not [string]::IsNullOrWhiteSpace([string]$primaryFailureSmoke.candidateCleanupDiagnostics)) 'Candidate cleanup failure was not attached to the injected primary error.'
+Assert-PshGoal6Workflow ([string]$primaryFailureSmoke.workflowErrorId -ceq 'PshGoal6WorkflowSmokePrimary' -and [int]$primaryFailureSmoke.workflowExitCode -eq 5) 'Workflow retention failure replaced the injected gate ErrorId or exit code.'
+Assert-PshGoal6Workflow (-not [string]::IsNullOrWhiteSpace([string]$primaryFailureSmoke.workflowRetentionDiagnostics)) 'Workflow retention failure was not attached to the injected gate error.'
 Assert-PshGoal6WorkflowMatch $reproducibilityText '\$sharedCandidateWorkingRoot\s*=\s*Join-Path \$outputRootPath ''shared-candidate-working''' 'shared deterministic candidate working root' 1 1
 Assert-PshGoal6WorkflowMatch $reproducibilityText '-CandidateWorkingRoot \$sharedCandidateWorkingRoot' 'same candidate working root passed to both independent builds' 2 2
 Assert-PshGoal6WorkflowMatch $reproducibilityText 'RunRoot \(Join-Path \$outputRootPath ''run-[12]''\)' 'independent candidate run roots' 2 2
