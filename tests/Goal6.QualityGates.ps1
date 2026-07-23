@@ -40,6 +40,37 @@ function Assert-PshGoal6QualityThrows {
     Assert-PshGoal6Quality ($failure -match $MessagePattern) "$Description failed with an unexpected message: $failure"
 }
 
+function Invoke-PshGoal6QualityGit {
+    param(
+        [Parameter(Mandatory = $true)][string]$GitPath,
+        [Parameter(Mandatory = $true)][string[]]$ArgumentList,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $oldPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $GitPath @ArgumentList 2>&1)
+        $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    }
+    finally {
+        $ErrorActionPreference = $oldPreference
+    }
+    $global:LASTEXITCODE = 0
+    Assert-PshGoal6Quality ($exitCode -eq 0) "$Description failed with exit code ${exitCode}: $(@($output | ForEach-Object { [string]$_ }) -join ' ')"
+    return ,$output
+}
+
+function Remove-PshGoal6QualityTree {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not [IO.Directory]::Exists($Path)) { return }
+    foreach ($filePath in [IO.Directory]::EnumerateFiles($Path, '*', [IO.SearchOption]::AllDirectories)) {
+        [IO.File]::SetAttributes($filePath, [IO.FileAttributes]::Normal)
+    }
+    [IO.Directory]::Delete($Path, $true)
+}
+
 function New-PshGoal6QualityLockCopy {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
@@ -245,8 +276,18 @@ function Add-PshGoal6QualityZipExtras {
     [IO.File]::WriteAllBytes($DestinationPath, $patched)
 }
 
+$primaryFailure = $null
+$cleanupFailure = $null
 try {
     [void][IO.Directory]::CreateDirectory($testRoot)
+    $cleanupProbeRoot = Join-Path $testRoot 'readonly-cleanup-probe'
+    $cleanupProbePath = Join-Path $cleanupProbeRoot 'readonly.txt'
+    [void][IO.Directory]::CreateDirectory($cleanupProbeRoot)
+    [IO.File]::WriteAllText($cleanupProbePath, 'readonly cleanup probe')
+    [IO.File]::SetAttributes($cleanupProbePath, [IO.FileAttributes]::ReadOnly)
+    Remove-PshGoal6QualityTree -Path $cleanupProbeRoot
+    Assert-PshGoal6Quality (-not [IO.Directory]::Exists($cleanupProbeRoot)) 'Read-only fixture cleanup did not remove its tree.'
+
     $lockPath = Join-Path $repositoryRootPath 'scripts/goal6/ci-dependencies.lock.json'
     $lock = Read-PshGoal6DependencyLock -RepositoryRoot $repositoryRootPath -LockPath $lockPath
     Assert-PshGoal6Quality (@($lock.dependencies).Count -eq 3) 'The CI dependency lock does not contain exactly three dependencies.'
@@ -403,14 +444,11 @@ $global:LASTEXITCODE = 0
         @('-C', $secretSeedRoot, 'config', 'user.email', 'goal6@example.invalid')
     )
     foreach ($arguments in $gitFixtureCommands) {
-        $gitFixtureOutput = @(& $gitCommand.Source @arguments 2>&1)
-        $gitFixtureExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
-        $global:LASTEXITCODE = 0
-        Assert-PshGoal6Quality ($gitFixtureExitCode -eq 0) "Git secret-capture fixture setup failed: $($gitFixtureOutput -join ' ')"
+        $null = Invoke-PshGoal6QualityGit -GitPath $gitCommand.Source -ArgumentList $arguments -Description 'Git secret-capture fixture setup'
     }
     Write-PshGoal6Text -Path (Join-Path $secretSeedRoot 'fixture.txt') -Text "secret capture fixture`n"
     foreach ($arguments in @(
-        @('-C', $secretSeedRoot, 'add', 'fixture.txt'),
+        @('-c', 'core.autocrlf=true', '-c', 'core.safecrlf=warn', '-C', $secretSeedRoot, 'add', 'fixture.txt'),
         @('-C', $secretSeedRoot, 'commit', '-m', 'fixture'),
         @('-C', $secretSeedRoot, 'remote', 'add', 'origin', $secretRemoteRoot),
         @('-C', $secretSeedRoot, 'push', '-u', 'origin', 'main'),
@@ -420,10 +458,7 @@ $global:LASTEXITCODE = 0
         @('clone', $secretRemoteRoot, $secretWorktreeRoot),
         @('-C', $secretWorktreeRoot, 'fetch', 'origin', '+refs/heads/*:refs/remotes/origin/*', '--prune')
     )) {
-        $gitFixtureOutput = @(& $gitCommand.Source @arguments 2>&1)
-        $gitFixtureExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
-        $global:LASTEXITCODE = 0
-        Assert-PshGoal6Quality ($gitFixtureExitCode -eq 0) "Git secret-capture fixture setup failed: $($gitFixtureOutput -join ' ')"
+        $null = Invoke-PshGoal6QualityGit -GitPath $gitCommand.Source -ArgumentList $arguments -Description 'Git secret-capture fixture setup'
     }
 
     $secretFixtureScriptPath = Join-Path $secretFixtureRoot 'Invoke-Goal6SecretScan.ps1'
@@ -587,11 +622,20 @@ $global:LASTEXITCODE = 0
     New-PshGoal6QualityZip -Path $symlinkZip -EntryNames @('link.txt') -Timestamp (New-Object DateTimeOffset(2025, 1, 2, 3, 4, 6, [TimeSpan]::Zero)) -ExternalAttributes $symlinkAttributes
     Assert-PshGoal6QualityThrows -Action { Get-PshGoal6ZipArchiveManifest -ArchivePath $symlinkZip -DisplayPath 'symlink.zip' } -MessagePattern 'symbolic-link entry' -Description 'ZIP symbolic-link semantics'
 
-    Write-Output "Goal 6 quality-gate regression passed: $assertionCount assertions."
-    $global:LASTEXITCODE = 0
 }
+catch { $primaryFailure = $_ }
 finally {
-    if ([IO.Directory]::Exists($testRoot)) { [IO.Directory]::Delete($testRoot, $true) }
+    try { Remove-PshGoal6QualityTree -Path $testRoot }
+    catch { $cleanupFailure = $_ }
 }
 
+if ($null -ne $primaryFailure) {
+    if ($null -ne $cleanupFailure) {
+        Write-Warning ("Goal 6 quality-gate cleanup also failed: {0}" -f $cleanupFailure.Exception.Message)
+    }
+    $PSCmdlet.ThrowTerminatingError($primaryFailure)
+}
+if ($null -ne $cleanupFailure) { $PSCmdlet.ThrowTerminatingError($cleanupFailure) }
+
+Write-Output "Goal 6 quality-gate regression passed: $assertionCount assertions."
 $global:LASTEXITCODE = 0
