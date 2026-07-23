@@ -114,7 +114,7 @@ try {
     $shallowExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
     Assert-PshGoal6Condition ($shallowExitCode -eq 0 -and (($shallowOutput -join '').Trim()) -ceq 'false') 'Secret history scan requires a non-shallow checkout.'
 
-    $remoteUrlOutput = Invoke-PshGoal6GitCapture -RepositoryRootPath $repositoryRootPath -Arguments @('remote', 'get-url', 'origin') -Description 'Resolve origin URL'
+    $remoteUrlOutput = @(Invoke-PshGoal6GitCapture -RepositoryRootPath $repositoryRootPath -Arguments @('remote', 'get-url', 'origin') -Description 'Resolve origin URL')
     Assert-PshGoal6Condition ($remoteUrlOutput.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace([string]$remoteUrlOutput[0])) 'Secret history scan requires exactly one configured origin URL.'
     $remoteLines = @()
     $remoteFailure = $null
@@ -130,8 +130,8 @@ try {
         if ($attempt -lt 4) { Start-Sleep -Seconds 2 }
     }
     Assert-PshGoal6Condition ($null -eq $remoteFailure) "Unable to enumerate origin heads/tags after four attempts: $remoteFailure"
-    $localBranchLines = Invoke-PshGoal6GitCapture -RepositoryRootPath $repositoryRootPath -Arguments @('for-each-ref', '--format=%(objectname) %(refname)', 'refs/remotes/origin') -Description 'Enumerate local origin branch refs'
-    $localTagLines = Invoke-PshGoal6GitCapture -RepositoryRootPath $repositoryRootPath -Arguments @('for-each-ref', '--format=%(objectname) %(refname)', 'refs/tags') -Description 'Enumerate local tag refs'
+    $localBranchLines = @(Invoke-PshGoal6GitCapture -RepositoryRootPath $repositoryRootPath -Arguments @('for-each-ref', '--format=%(objectname) %(refname)', 'refs/remotes/origin') -Description 'Enumerate local origin branch refs')
+    $localTagLines = @(Invoke-PshGoal6GitCapture -RepositoryRootPath $repositoryRootPath -Arguments @('for-each-ref', '--format=%(objectname) %(refname)', 'refs/tags') -Description 'Enumerate local tag refs')
     $remoteRefCoverage = Assert-PshGoal6RemoteRefCoverage -RemoteLines $remoteLines -LocalBranchLines $localBranchLines -LocalTagLines $localTagLines
 
     $historyScan = Invoke-PshGoal6GitleaksScan -ExecutablePath $executablePath -Mode git -RepositoryRootPath $repositoryRootPath -IgnoreRootPath $ignoreRootPath -ReportPath (Join-Path $reportRootPath 'gitleaks-history.json') -LogPath (Join-Path $reportRootPath 'gitleaks-history.log')

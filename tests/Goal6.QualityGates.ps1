@@ -315,6 +315,128 @@ try {
         }
     }
 
+    $secretCaptureRoot = Join-Path $testRoot 'secret-capture-cardinality'
+    $secretFixtureRoot = Join-Path $secretCaptureRoot 'fixture'
+    $secretDependencyRoot = Join-Path $secretCaptureRoot 'dependencies'
+    $secretRemoteRoot = Join-Path $secretCaptureRoot 'origin.git'
+    $secretSeedRoot = Join-Path $secretCaptureRoot 'seed'
+    $secretWorktreeRoot = Join-Path $secretCaptureRoot 'worktree'
+    $secretCaptureReportRoot = Join-Path $secretCaptureRoot 'reports'
+    foreach ($path in @($secretFixtureRoot, $secretDependencyRoot)) { [void][IO.Directory]::CreateDirectory($path) }
+    [IO.File]::Copy($secretScriptPath, (Join-Path $secretFixtureRoot 'Invoke-Goal6SecretScan.ps1'))
+    Write-PshGoal6Text -Path (Join-Path $secretFixtureRoot 'Goal6.Common.ps1') -Text @'
+function Assert-PshGoal6Condition {
+    param([bool]$Condition, [string]$Message)
+    if (-not $Condition) { throw $Message }
+}
+function Write-PshGoal6Text {
+    param([string]$Path, [string]$Text)
+    [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Path))
+    [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding($false)))
+}
+function Get-PshGoal6StrictText {
+    param([string]$Path)
+    return [IO.File]::ReadAllText($Path, (New-Object Text.UTF8Encoding($false, $true)))
+}
+function Write-PshGoal6Json {
+    param([string]$Path, $InputObject)
+    Write-PshGoal6Text -Path $Path -Text (($InputObject | ConvertTo-Json -Depth 20) + "`n")
+}
+function Read-PshGoal6DependencyLock {
+    return [pscustomobject]@{
+        dependencies = @([pscustomobject]@{
+            id = 'gitleaks'
+            version = '8.30.1'
+            package = [pscustomobject]@{
+                installedRelativePath = 'gitleaks-stub.ps1'
+                installedSha256 = 'fixture-sha256'
+                peMachine = 'fixture-machine'
+            }
+        })
+    }
+}
+function Get-PshGoal6Dependency {
+    param($Lock, [string]$Id)
+    return @($Lock.dependencies | Where-Object { [string]$_.id -ceq $Id })[0]
+}
+function Resolve-PshGoal6RelativePath {
+    param([string]$Root, [string]$RelativePath, [string]$Description)
+    return Join-Path $Root $RelativePath
+}
+function Get-PshGoal6Sha256 { return 'fixture-sha256' }
+function Get-PshGoal6PeMachine { return 'fixture-machine' }
+function Assert-PshGoal6RemoteRefCoverage {
+    param(
+        [AllowEmptyCollection()][string[]]$RemoteLines,
+        [AllowEmptyCollection()][string[]]$LocalBranchLines,
+        [AllowEmptyCollection()][string[]]$LocalTagLines
+    )
+    $remoteBranches = @($RemoteLines | Where-Object { $_ -match '\srefs/heads/' })
+    $remoteTags = @($RemoteLines | Where-Object { $_ -match '\srefs/tags/' })
+    $localBranches = @($LocalBranchLines | Where-Object { $_ -match '\srefs/remotes/origin/' -and $_ -notmatch '\srefs/remotes/origin/HEAD$' })
+    if ($remoteBranches.Count -ne $localBranches.Count -or $remoteTags.Count -ne $LocalTagLines.Count) { throw 'fixture remote-ref parity failed' }
+    return [pscustomobject][ordered]@{
+        remoteRefCount = $RemoteLines.Count
+        branchCount = $remoteBranches.Count
+        tagCount = $remoteTags.Count
+        parity = 'exact'
+    }
+}
+'@
+    Write-PshGoal6Text -Path (Join-Path $secretDependencyRoot 'gitleaks-stub.ps1') -Text @'
+$arguments = @($args | ForEach-Object { [string]$_ })
+if ($arguments.Count -eq 1 -and $arguments[0] -ceq 'version') {
+    Write-Output 'gitleaks version 8.30.1'
+    $global:LASTEXITCODE = 0
+    return
+}
+$reportIndex = [Array]::IndexOf($arguments, '--report-path')
+if ($reportIndex -lt 0 -or $reportIndex + 1 -ge $arguments.Count) { throw 'fixture gitleaks invocation omitted --report-path' }
+[IO.File]::WriteAllText($arguments[$reportIndex + 1], "[]`n", (New-Object Text.UTF8Encoding($false)))
+$global:LASTEXITCODE = 0
+'@
+
+    $gitFixtureCommands = @(
+        @('init', '--bare', $secretRemoteRoot),
+        @('init', '-b', 'main', $secretSeedRoot),
+        @('-C', $secretSeedRoot, 'config', 'user.name', 'Goal 6 Fixture'),
+        @('-C', $secretSeedRoot, 'config', 'user.email', 'goal6@example.invalid')
+    )
+    foreach ($arguments in $gitFixtureCommands) {
+        $gitFixtureOutput = @(& $gitCommand.Source @arguments 2>&1)
+        $gitFixtureExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+        $global:LASTEXITCODE = 0
+        Assert-PshGoal6Quality ($gitFixtureExitCode -eq 0) "Git secret-capture fixture setup failed: $($gitFixtureOutput -join ' ')"
+    }
+    Write-PshGoal6Text -Path (Join-Path $secretSeedRoot 'fixture.txt') -Text "secret capture fixture`n"
+    foreach ($arguments in @(
+        @('-C', $secretSeedRoot, 'add', 'fixture.txt'),
+        @('-C', $secretSeedRoot, 'commit', '-m', 'fixture'),
+        @('-C', $secretSeedRoot, 'remote', 'add', 'origin', $secretRemoteRoot),
+        @('-C', $secretSeedRoot, 'push', '-u', 'origin', 'main'),
+        @('-C', $secretSeedRoot, 'branch', 'release'),
+        @('-C', $secretSeedRoot, 'push', 'origin', 'release'),
+        @('--git-dir', $secretRemoteRoot, 'symbolic-ref', 'HEAD', 'refs/heads/main'),
+        @('clone', $secretRemoteRoot, $secretWorktreeRoot),
+        @('-C', $secretWorktreeRoot, 'fetch', 'origin', '+refs/heads/*:refs/remotes/origin/*', '--prune')
+    )) {
+        $gitFixtureOutput = @(& $gitCommand.Source @arguments 2>&1)
+        $gitFixtureExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+        $global:LASTEXITCODE = 0
+        Assert-PshGoal6Quality ($gitFixtureExitCode -eq 0) "Git secret-capture fixture setup failed: $($gitFixtureOutput -join ' ')"
+    }
+
+    $secretFixtureScriptPath = Join-Path $secretFixtureRoot 'Invoke-Goal6SecretScan.ps1'
+    $secretFixtureOutput = @(& $secretFixtureScriptPath -DependencyRoot $secretDependencyRoot -ReportRoot $secretCaptureReportRoot -RepositoryRoot $secretWorktreeRoot -LockPath (Join-Path $secretFixtureRoot 'fixture.lock.json'))
+    $secretFixtureExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    $global:LASTEXITCODE = 0
+    Assert-PshGoal6Quality ($secretFixtureExitCode -eq 0 -and ($secretFixtureOutput -join "`n") -match 'passed for full Git history and worktree scans') 'Secret scan did not survive singleton, empty, and multi-line Git capture output.'
+    $secretCaptureSummary = (Get-PshGoal6StrictText -Path (Join-Path $secretCaptureReportRoot 'gitleaks-summary.json')) | ConvertFrom-Json -ErrorAction Stop
+    Assert-PshGoal6Quality ([string]$secretCaptureSummary.status -ceq 'passed' -and $null -eq $secretCaptureSummary.error) 'Secret scan cardinality regression did not produce a passing summary.'
+    Assert-PshGoal6Quality ([int]$secretCaptureSummary.remoteRefCoverage.remoteRefCount -eq 2 -and [int]$secretCaptureSummary.remoteRefCoverage.branchCount -eq 2 -and [int]$secretCaptureSummary.remoteRefCoverage.tagCount -eq 0 -and [string]$secretCaptureSummary.remoteRefCoverage.parity -ceq 'exact') 'Secret scan did not preserve exact remote-ref coverage for multi-line branches and empty tags.'
+    $secretCaptureScans = @($secretCaptureSummary.scans)
+    Assert-PshGoal6Quality ($secretCaptureScans.Count -eq 2 -and (@($secretCaptureScans | ForEach-Object { [string]$_.mode }) -join '|') -ceq 'git|dir' -and @($secretCaptureScans | Where-Object { [string]$_.status -cne 'passed' -or [int]$_.findingCount -ne 0 }).Count -eq 0) 'Secret scan cardinality regression did not preserve both zero-finding gitleaks scans.'
+
     $leafTraversalLock = New-PshGoal6QualityLockCopy -Name 'package-file-name-traversal' -Mutation {
         param($value)
         $value.dependencies[0].package.fileName = '../escape.zip'
