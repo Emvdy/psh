@@ -577,30 +577,63 @@ try {
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         $processFallbackProbe = & (Get-Module -Name Psh -ErrorAction Stop) {
             $originalFallback = (Get-Command -Name Get-PshWindowsProcessWmiRecord -CommandType Function -ErrorAction Stop).ScriptBlock
+            $originalRecord = (Get-Command -Name Get-PshWindowsProcessRecord -CommandType Function -ErrorAction Stop).ScriptBlock
             $originalCimFunction = Get-Item -LiteralPath Function:Get-CimInstance -ErrorAction SilentlyContinue
             try {
                 $script:PshBatch4CimProbeCalls = 0
+                $script:PshBatch4RecordProbeCalls = 0
                 $script:PshBatch4WmiProbeCalls = 0
+                $script:PshBatch4ProcessProbeEvents = New-Object Collections.Generic.List[string]
+                $script:PshBatch4ProcessProbePhase = ''
+                $script:PshBatch4OriginalProcessRecord = $originalRecord
                 Set-Item -LiteralPath Function:Get-CimInstance -Value {
                     param([string]$ClassName, [string]$Filter, [object]$ErrorAction)
                     $script:PshBatch4CimProbeCalls++
+                    [void]$script:PshBatch4ProcessProbeEvents.Add(('{0}:CIM:{1}:{2}' -f $script:PshBatch4ProcessProbePhase, $ClassName, $Filter))
                     throw 'controlled CIM failure'
                 }
                 Set-Item -LiteralPath Function:Get-PshWindowsProcessWmiRecord -Value {
                     param([int]$ProcessId)
                     $script:PshBatch4WmiProbeCalls++
+                    [void]$script:PshBatch4ProcessProbeEvents.Add(('{0}:System.Management:{1}' -f $script:PshBatch4ProcessProbePhase, $ProcessId))
                     return [pscustomobject]@{
                         CommandLine = 'controlled System.Management fallback command line'
                         ParentProcessId = 424242
                     }
                 }
+                Set-Item -LiteralPath Function:Get-PshWindowsProcessRecord -Value {
+                    param([int]$ProcessId)
+                    $script:PshBatch4RecordProbeCalls++
+                    [void]$script:PshBatch4ProcessProbeEvents.Add(('{0}:record:{1}' -f $script:PshBatch4ProcessProbePhase, $ProcessId))
+                    return & $script:PshBatch4OriginalProcessRecord -ProcessId $ProcessId
+                }
                 $currentProcess = [Diagnostics.Process]::GetCurrentProcess()
                 try {
+                    $script:PshBatch4ProcessProbePhase = 'command-line'
+                    $commandLine = [string](Get-PshProcessCommandLine -Process $currentProcess)
+                    $commandLineCimCalls = [int]$script:PshBatch4CimProbeCalls
+                    $commandLineRecordCalls = [int]$script:PshBatch4RecordProbeCalls
+                    $commandLineWmiCalls = [int]$script:PshBatch4WmiProbeCalls
+                    $commandLineEvents = @($script:PshBatch4ProcessProbeEvents.ToArray())
+
+                    $script:PshBatch4CimProbeCalls = 0
+                    $script:PshBatch4RecordProbeCalls = 0
+                    $script:PshBatch4WmiProbeCalls = 0
+                    $script:PshBatch4ProcessProbeEvents.Clear()
+                    $script:PshBatch4ProcessProbePhase = 'parent'
+                    $parentProcessId = [int](Get-PshProcessParentId -ProcessId $currentProcess.Id)
                     return [pscustomobject]@{
-                        CommandLine = [string](Get-PshProcessCommandLine -Process $currentProcess)
-                        ParentProcessId = [int](Get-PshProcessParentId -ProcessId $currentProcess.Id)
-                        CimCalls = [int]$script:PshBatch4CimProbeCalls
-                        WmiCalls = [int]$script:PshBatch4WmiProbeCalls
+                        ProcessId = [int]$currentProcess.Id
+                        CommandLine = $commandLine
+                        CommandLineCimCalls = $commandLineCimCalls
+                        CommandLineRecordCalls = $commandLineRecordCalls
+                        CommandLineWmiCalls = $commandLineWmiCalls
+                        CommandLineEvents = [string[]]$commandLineEvents
+                        ParentProcessId = $parentProcessId
+                        ParentCimCalls = [int]$script:PshBatch4CimProbeCalls
+                        ParentRecordCalls = [int]$script:PshBatch4RecordProbeCalls
+                        ParentWmiCalls = [int]$script:PshBatch4WmiProbeCalls
+                        ParentEvents = [string[]]@($script:PshBatch4ProcessProbeEvents.ToArray())
                     }
                 }
                 finally { $currentProcess.Dispose() }
@@ -608,12 +641,46 @@ try {
             finally {
                 if ($null -eq $originalCimFunction) { Remove-Item -LiteralPath Function:Get-CimInstance -Force -ErrorAction SilentlyContinue }
                 else { Set-Item -LiteralPath Function:Get-CimInstance -Value $originalCimFunction.ScriptBlock }
+                Set-Item -LiteralPath Function:Get-PshWindowsProcessRecord -Value $originalRecord
                 Set-Item -LiteralPath Function:Get-PshWindowsProcessWmiRecord -Value $originalFallback
-                Remove-Variable -Name PshBatch4CimProbeCalls, PshBatch4WmiProbeCalls -Scope Script -ErrorAction SilentlyContinue
+                Remove-Variable -Name PshBatch4CimProbeCalls, PshBatch4RecordProbeCalls, PshBatch4WmiProbeCalls, PshBatch4ProcessProbeEvents, PshBatch4ProcessProbePhase, PshBatch4OriginalProcessRecord -Scope Script -ErrorAction SilentlyContinue
             }
         }
         Assert-PshBatch4 ([string]$processFallbackProbe.CommandLine -ceq 'controlled System.Management fallback command line' -and [int]$processFallbackProbe.ParentProcessId -eq 424242) 'CIM failure did not fall back to the controlled System.Management process record.'
-        Assert-PshBatch4 ([int]$processFallbackProbe.CimCalls -eq 2 -and [int]$processFallbackProbe.WmiCalls -eq 2) 'Windows process metadata did not attempt CIM before System.Management for command-line and parent lookups.'
+        $expectedCommandLineTail = @(
+            'command-line:record:{0}' -f $processFallbackProbe.ProcessId
+            'command-line:CIM:Win32_Process:ProcessId = {0}' -f $processFallbackProbe.ProcessId
+            'command-line:System.Management:{0}' -f $processFallbackProbe.ProcessId
+        )
+        $expectedParentEvents = @(
+            'parent:record:{0}' -f $processFallbackProbe.ProcessId
+            'parent:CIM:Win32_Process:ProcessId = {0}' -f $processFallbackProbe.ProcessId
+            'parent:System.Management:{0}' -f $processFallbackProbe.ProcessId
+        )
+        $commandLineEvents = @($processFallbackProbe.CommandLineEvents)
+        $commandLineTail = if ($commandLineEvents.Count -ge 3) { @($commandLineEvents[($commandLineEvents.Count - 3)..($commandLineEvents.Count - 1)]) } else { @($commandLineEvents) }
+        $parentEvents = @($processFallbackProbe.ParentEvents)
+        $probeCountsAndOrderAreValid = (
+            [int]$processFallbackProbe.CommandLineCimCalls -ge 1 -and
+            [int]$processFallbackProbe.CommandLineRecordCalls -eq 1 -and
+            [int]$processFallbackProbe.CommandLineWmiCalls -eq 1 -and
+            (Test-PshBatch4StringArray $commandLineTail $expectedCommandLineTail) -and
+            [int]$processFallbackProbe.ParentCimCalls -ge 1 -and
+            [int]$processFallbackProbe.ParentRecordCalls -eq 1 -and
+            [int]$processFallbackProbe.ParentWmiCalls -eq 1 -and
+            (Test-PshBatch4StringArray $parentEvents $expectedParentEvents)
+        )
+        $probeActual = 'command-line CIM={0}, record={1}, System.Management={2}, events=[{3}]; parent CIM={4}, record={5}, System.Management={6}, events=[{7}]' -f @(
+            $processFallbackProbe.CommandLineCimCalls,
+            $processFallbackProbe.CommandLineRecordCalls,
+            $processFallbackProbe.CommandLineWmiCalls,
+            ($commandLineEvents -join ' -> '),
+            $processFallbackProbe.ParentCimCalls,
+            $processFallbackProbe.ParentRecordCalls,
+            $processFallbackProbe.ParentWmiCalls,
+            ($parentEvents -join ' -> ')
+        )
+        Assert-PshBatch4 $probeCountsAndOrderAreValid ('Windows process metadata did not attempt CIM before System.Management for each command-line and parent lookup. Actual: {0}' -f $probeActual)
     }
     foreach ($name in $commandNames) {
         $exported = Get-Command -Name ('Psh\{0}' -f $name) -CommandType Function -ErrorAction Stop
