@@ -72,15 +72,6 @@ Describe 'Goal 6 installer edge matrix' {
         foreach ($requiredPath in @($script:Goal6InstallScript, $script:Goal6LifecycleScript, $script:Goal6ProcessHarnessScript, $script:Goal6EnginePath)) {
             if (-not [IO.File]::Exists($requiredPath)) { throw "Required Goal 6 installer input is missing: $requiredPath" }
         }
-        $installScriptText = [IO.File]::ReadAllText($script:Goal6InstallScript, $script:Goal6Utf8)
-        foreach ($primaryMetadataName in @('PshExitCode', 'PshErrorKind', 'PshErrorId')) {
-            $primaryOverwrite = '$failure.Exception.Data[''{0}''] =' -f $primaryMetadataName
-            if ($installScriptText.Contains($primaryOverwrite)) { throw "Installer rollback diagnostics overwrite primary metadata: $primaryMetadataName" }
-        }
-        foreach ($rollbackMetadataName in @('PshRollbackExitCode', 'PshRollbackErrorKind', 'PshRollbackErrorId', 'PshRollbackIssues')) {
-            $rollbackAssignment = '$failure.Exception.Data[''{0}''] =' -f $rollbackMetadataName
-            if (-not $installScriptText.Contains($rollbackAssignment)) { throw "Installer rollback diagnostics are missing additive metadata: $rollbackMetadataName" }
-        }
         if ($null -eq (Get-Command -Name Get-CimInstance -ErrorAction SilentlyContinue)) { throw 'Goal 6 process cleanup requires Get-CimInstance.' }
         . $script:Goal6ProcessHarnessScript
         . $script:Goal6LifecycleScript
@@ -123,7 +114,8 @@ Describe 'Goal 6 installer edge matrix' {
             param(
                 [Parameter(Mandatory = $true)][string] $Root,
                 [ValidateSet('Core', 'Full')][string] $Edition = 'Core',
-                [ValidateSet('any', 'win-x64', 'win-arm64')][string] $Architecture
+                [ValidateSet('any', 'win-x64', 'win-arm64')][string] $Architecture,
+                [AllowNull()][string] $SetCurrentConflictText
             )
 
             [void][IO.Directory]::CreateDirectory($Root)
@@ -143,6 +135,29 @@ Describe 'Goal 6 installer edge matrix' {
             [void][IO.Directory]::CreateDirectory($payloadInstall)
             foreach ($name in @('bootstrap.ps1', 'config.psd1', 'Set-PshCurrentVersion.ps1')) {
                 Copy-Item -LiteralPath (Join-Path $script:Goal6RepositoryRoot ('src/install/' + $name)) -Destination (Join-Path $payloadInstall $name)
+            }
+            if (-not [string]::IsNullOrWhiteSpace($SetCurrentConflictText)) {
+                Copy-Item -LiteralPath (Join-Path $payloadInstall 'Set-PshCurrentVersion.ps1') -Destination (Join-Path $payloadInstall 'Set-PshCurrentVersion.Real.ps1')
+                $conflictTextBase64 = [Convert]::ToBase64String($script:Goal6Utf8.GetBytes($SetCurrentConflictText))
+                $setCurrentWrapper = @"
+[CmdletBinding(SupportsShouldProcess = `$true, ConfirmImpact = 'Low')]
+param(
+    [Parameter(Mandatory = `$true)][string] `$Version,
+    [string] `$InstallRoot,
+    [AllowNull()][string] `$ExpectedCurrentSha256
+)
+Set-StrictMode -Version 2.0
+`$ErrorActionPreference = 'Stop'
+`$null = @(& (Join-Path `$PSScriptRoot 'Set-PshCurrentVersion.Real.ps1') -Version `$Version -InstallRoot `$InstallRoot -ExpectedCurrentSha256 `$ExpectedCurrentSha256 -Confirm:`$false)
+[IO.File]::WriteAllBytes((Join-Path `$InstallRoot 'ownership.json'), [Convert]::FromBase64String('$conflictTextBase64'))
+`$global:LASTEXITCODE = 3
+`$exception = New-Object System.InvalidOperationException('synthetic primary failure after current-version publication')
+`$exception.Data['PshExitCode'] = 3
+`$exception.Data['PshErrorKind'] = 'RuntimeError'
+`$exception.Data['PshErrorId'] = 'PshLifecycle.SyntheticPrimaryFailure'
+throw `$exception
+"@
+                Write-PshGoal6Text -Path (Join-Path $payloadInstall 'Set-PshCurrentVersion.ps1') -Text $setCurrentWrapper
             }
             if ($Edition -ceq 'Full') {
                 $configPath = Join-Path $payloadInstall 'config.psd1'
@@ -282,6 +297,50 @@ Describe 'Goal 6 installer edge matrix' {
             }
             if ($ExpectNoRollback -and $Result.Error.Exception.Data.Contains('PshRollbackIncomplete')) {
                 throw "$Label incorrectly reported rollback diagnostics before any lifecycle mutation."
+            }
+        }
+
+        function Assert-PshGoal6RollbackIncompleteContract {
+            param([Parameter(Mandatory = $true)][string] $CaseRoot)
+
+            $fixtureRoot = Join-Path $CaseRoot 'rollback-incomplete'
+            $packageRoot = Join-Path $fixtureRoot 'package'
+            $installRoot = Join-Path $fixtureRoot 'install/Psh'
+            $conflictText = '{"external":true}'
+            [void](Build-PshGoal6InstallerPackage -Root $packageRoot -Edition Core -Architecture any -SetCurrentConflictText $conflictText)
+
+            $lastExitCodeVariable = Get-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue
+            $lastExitCodeWasDefined = $null -ne $lastExitCodeVariable
+            $originalLastExitCode = if ($lastExitCodeWasDefined) { [int]$lastExitCodeVariable.Value } else { 0 }
+            try {
+                $global:LASTEXITCODE = 0
+                $result = Invoke-PshGoal6PackageInstall -PackageRoot $packageRoot -InstallRoot $installRoot -Edition Core
+                $observedLastExitCode = [int]$LASTEXITCODE
+                if ([bool]$result.Succeeded) { throw 'Rollback-incomplete fixture unexpectedly installed successfully.' }
+
+                $failureData = $result.Error.Exception.Data
+                if ([int]$failureData['PshExitCode'] -ne 3 -or [string]$failureData['PshErrorKind'] -cne 'RuntimeError' -or [string]$failureData['PshErrorId'] -cne 'PshLifecycle.SyntheticPrimaryFailure') {
+                    throw 'Rollback diagnostics replaced the primary failure contract.'
+                }
+                if ($observedLastExitCode -ne 3) { throw "Rollback diagnostics replaced LASTEXITCODE with $observedLastExitCode." }
+                if ([int]$failureData['PshRollbackExitCode'] -ne 5 -or [string]$failureData['PshRollbackErrorKind'] -cne 'IntegrityFailure' -or [string]$failureData['PshRollbackErrorId'] -cne 'PshLifecycle.RollbackIncomplete') {
+                    throw 'Rollback-incomplete fixture did not report the additive integrity-conflict contract.'
+                }
+                if (-not [bool]$failureData['PshRollbackIncomplete'] -or -not [bool]$failureData['PshRecoveryRequired']) {
+                    throw 'Rollback-incomplete fixture did not require explicit recovery.'
+                }
+
+                $primaryMetadata = Get-PshLifecycleErrorMetadata -ErrorRecord $result.Error
+                if ([int]$primaryMetadata.ExitCode -ne 3 -or [string]$primaryMetadata.Kind -cne 'RuntimeError' -or [string]$primaryMetadata.ErrorId -cne 'PshLifecycle.SyntheticPrimaryFailure') {
+                    throw 'Get-PshLifecycleErrorMetadata returned rollback metadata instead of the primary failure.'
+                }
+                if ([IO.File]::ReadAllText((Join-Path $installRoot 'ownership.json'), $script:Goal6Utf8) -cne $conflictText) {
+                    throw 'Rollback-incomplete fixture did not retain the externally conflicted ownership bytes.'
+                }
+            }
+            finally {
+                if ($lastExitCodeWasDefined) { $global:LASTEXITCODE = $originalLastExitCode }
+                else { Remove-Variable -Name LASTEXITCODE -Scope Global -ErrorAction SilentlyContinue }
             }
         }
 
@@ -624,6 +683,7 @@ finally {
                             $after = [IO.File]::ReadAllBytes($profilePath)
                             if ([Convert]::ToBase64String($before) -cne [Convert]::ToBase64String($after)) { throw 'Profile conflict changed the original profile bytes.' }
                             Assert-PshGoal6NoManagedInstallResidue -InstallRoot $installRoot
+                            Assert-PshGoal6RollbackIncompleteContract -CaseRoot $caseRoot
                         }
                         elseif ($Scenario -ceq 'unicode-space') {
                             Write-PshGoal6Text -Path $profilePath -Text "# original profile`r`n"
