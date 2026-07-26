@@ -577,6 +577,10 @@ Assert-PshGoal5Entry ($lockedParentScript -match 'Get-ExecutionPolicy\s+-ErrorAc
 Assert-PshGoal5Entry ($lockedParentScript -match 'Diagnostics\.ProcessStartInfo' -and $lockedParentScript -match '\$child\.WaitForExit\(\)' -and
     $lockedParentScript.IndexOf('$child.WaitForExit()', [StringComparison]::Ordinal) -lt $lockedParentScript.LastIndexOf('$entryStream.Dispose()', [StringComparison]::Ordinal)) 'Shell locked parent does not retain the entry lock through child completion.'
 Assert-PshGoal5Entry ($lockedParentScript -match 'Append\(\[char\]92,\s*\[int\]' -and $lockedParentScript -notmatch '\(\[string\]\[char\]92\)\s*\*') 'Shell Win32 argument quoting does not use the explicit StringBuilder character repeat overload.'
+$modulePathResetOffset = $shellText.IndexOf("unset PSModulePath`n", [StringComparison]::Ordinal)
+$firstPowerShellLaunchOffset = $shellText.IndexOf('"$powershell_path" -NoLogo -NoProfile -NonInteractive -Command', [StringComparison]::Ordinal)
+Assert-PshGoal5Entry ($modulePathResetOffset -ge 0 -and $modulePathResetOffset -lt $firstPowerShellLaunchOffset -and
+    @([regex]::Matches($shellText, '(?m)^unset PSModulePath$')).Count -eq 1) 'Shell PowerShell launches do not uniformly remove an inherited pwsh PSModulePath before the first child starts.'
 Assert-PshGoal5Entry ($shellText -match 'PshShellTempRoot' -and $shellText -match '\[IO\.Path\]::GetTempPath\(\)' -and $shellText -match 'to_shell_path' -and
     $shellText -match 'PSH_SHELL_RELEASE_METADATA_PATH="\$release_metadata_windows_path"' -and $shellText -match 'PSH_SHELL_ENTRY_PATH="\$entry_windows_path"') 'Shell online flow does not create in Windows TEMP and reuse exact Win32 paths for verification and execution.'
 Assert-PshGoal5Entry ($cleanupScript -match 'PshShellCleanupRoot' -and $cleanupScript -match '\[IO\.File\]::Delete\(' -and
@@ -614,11 +618,14 @@ $script:Goal5AcquisitionSeen = New-Object 'System.Collections.Generic.List[strin
 $script:Goal5OnlineMap = @{}
 $script:Goal5AcquisitionMap = @{}
 $oldArchitecture = $null
-$oldPath = $null
 $oldTemp = $null
 $oldTmp = $null
+$oldBashEnv = [Environment]::GetEnvironmentVariable('BASH_ENV', 'Process')
+$oldBashFixtureBin = [Environment]::GetEnvironmentVariable('PSH_GOAL5_BASH_FIXTURE_BIN', 'Process')
 
 try {
+    [Environment]::SetEnvironmentVariable('BASH_ENV', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('PSH_GOAL5_BASH_FIXTURE_BIN', $null, 'Process')
     $lockedHashPath = Join-Path $script:TestRoot 'locked-membership-hash.bin'
     $lockedHashBytes = [Text.Encoding]::UTF8.GetBytes('locked membership hash fixture')
     [IO.File]::WriteAllBytes($lockedHashPath, $lockedHashBytes)
@@ -893,8 +900,35 @@ case "$url" in
   *) exit 22 ;;
 esac
 '@
-    $oldPath = $env:PATH
-    $env:PATH = "$fakeBin$([IO.Path]::PathSeparator)$oldPath"
+    $fakeBinBashPath = ConvertTo-PshGoal5BashPath -BashPath $bashPath -Path $fakeBin
+    $bashEnvironmentPath = Join-Path $script:TestRoot 'goal5-bash-env.sh'
+    Write-PshGoal5Text -Path $bashEnvironmentPath -Text @'
+if [[ -z "${PSH_GOAL5_BASH_FIXTURE_BIN:-}" ]]; then
+  printf '%s\n' 'PSH_GOAL5_BASH_FIXTURE_BIN is required.' >&2
+  exit 97
+fi
+PATH="$PSH_GOAL5_BASH_FIXTURE_BIN:$PATH"
+export PATH
+'@
+    $bashEnvironmentBashPath = ConvertTo-PshGoal5BashPath -BashPath $bashPath -Path $bashEnvironmentPath
+    [Environment]::SetEnvironmentVariable('PSH_GOAL5_BASH_FIXTURE_BIN', $fakeBinBashPath, 'Process')
+    [Environment]::SetEnvironmentVariable('BASH_ENV', $bashEnvironmentBashPath, 'Process')
+
+    function Assert-PshGoal5BashFixtureCommand {
+        param(
+            [Parameter(Mandatory = $true)][string] $Name,
+            [Parameter(Mandatory = $true)][string] $ExpectedPath
+        )
+
+        & $bashPath -c 'chmod u+x -- "$1"' _ $ExpectedPath
+        Assert-PshGoal5Entry ([int]$LASTEXITCODE -eq 0) ("Unable to make the Bash fixture executable: {0}" -f $Name)
+        $resolved = @(& $bashPath -c 'command -v "$1"' _ $Name)
+        $resolveExit = [int]$LASTEXITCODE
+        $resolvedPath = if ($resolved.Count -eq 1) { ([string]$resolved[0]).TrimEnd("`r", "`n") } else { '' }
+        Assert-PshGoal5Entry ($resolveExit -eq 0 -and $resolved.Count -eq 1 -and $resolvedPath -ceq $ExpectedPath) ("Bash fixture command did not resolve to the controlled path: {0}; actual={1}" -f $Name, $resolvedPath)
+    }
+
+    Assert-PshGoal5BashFixtureCommand -Name 'curl' -ExpectedPath ($fakeBinBashPath + '/curl')
     $oldTemp = $env:TEMP
     $oldTmp = $env:TMP
     $shellWindowsTemp = Join-Path $script:TestRoot ($unicodeChinese + ' ' + $unicodeSpace + ' windows-temp')
@@ -1014,6 +1048,7 @@ esac
 exec "$PSH_FAKE_REAL_POWERSHELL" "$@"
 '@
     $env:PSH_FAKE_REAL_POWERSHELL = $windowsPowerShellBashPath
+    Assert-PshGoal5BashFixtureCommand -Name 'powershell.exe' -ExpectedPath ($fakeBinBashPath + '/powershell.exe')
     $shellChildStartError = Join-Path $script:TestRoot 'shell-child-start-error.log'
     try {
         $ErrorActionPreference = 'SilentlyContinue'
@@ -1032,6 +1067,7 @@ if [[ "$1" == '-u' ]]; then exit 37; fi
 exec "$PSH_FAKE_REAL_CYGPATH" "$@"
 '@
     $env:PSH_FAKE_REAL_CYGPATH = $realCygpathBashPath
+    Assert-PshGoal5BashFixtureCommand -Name 'cygpath' -ExpectedPath ($fakeBinBashPath + '/cygpath')
     $shellMappingError = Join-Path $script:TestRoot 'shell-mapping-error.log'
     try {
         $ErrorActionPreference = 'SilentlyContinue'
@@ -1048,9 +1084,10 @@ exec "$PSH_FAKE_REAL_CYGPATH" "$@"
 }
 finally {
     if ($null -ne $oldArchitecture) { $env:PROCESSOR_ARCHITECTURE = $oldArchitecture } else { Remove-Item Env:PROCESSOR_ARCHITECTURE -ErrorAction SilentlyContinue }
-    if ($null -ne $oldPath) { $env:PATH = $oldPath }
     if ($null -ne $oldTemp) { $env:TEMP = $oldTemp } else { Remove-Item Env:TEMP -ErrorAction SilentlyContinue }
     if ($null -ne $oldTmp) { $env:TMP = $oldTmp } else { Remove-Item Env:TMP -ErrorAction SilentlyContinue }
+    [Environment]::SetEnvironmentVariable('BASH_ENV', $oldBashEnv, 'Process')
+    [Environment]::SetEnvironmentVariable('PSH_GOAL5_BASH_FIXTURE_BIN', $oldBashFixtureBin, 'Process')
     Remove-Item Env:PSH_GOAL5_ENTRY_LOG -ErrorAction SilentlyContinue
     Remove-Item Env:PSH_SHELL_TEST_CHILD_LOG -ErrorAction SilentlyContinue
     Remove-Item Env:PSH_FAKE_CURL_LOG -ErrorAction SilentlyContinue

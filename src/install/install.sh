@@ -169,6 +169,9 @@ to_shell_path() {
 
 powershell_path="$(find_powershell)" || fail_json 4 'PshShellPowerShellMissing' 'Windows PowerShell 5.1 powershell.exe was not found.'
 powershell_windows_path="$(to_windows_path "$powershell_path")" || fail_json 3 'PshShellPath' 'Unable to convert the Windows PowerShell path.'
+# Windows PowerShell reconstructs its edition-specific defaults only when it
+# does not inherit a pwsh-owned module search path.
+unset PSModulePath
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)" || fail_json 3 'PshShellPath' 'Unable to resolve the installer directory.'
 temporary_root=''
