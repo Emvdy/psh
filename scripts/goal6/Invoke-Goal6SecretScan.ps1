@@ -64,7 +64,10 @@ function Invoke-PshGoal6GitleaksScan {
     Write-PshGoal6Text -Path $LogPath -Text ((@($output | ForEach-Object { [string]$_ }) -join "`n") + "`n")
     if (-not [IO.File]::Exists($ReportPath)) { Write-PshGoal6Text -Path $ReportPath -Text "[]`n" }
     $reportText = Get-PshGoal6StrictText -Path $ReportPath
-    try { $report = @($reportText | ConvertFrom-Json -ErrorAction Stop) }
+    try {
+        $parsedReport = ConvertFrom-Json -InputObject $reportText -ErrorAction Stop
+        $report = @($parsedReport | ForEach-Object { $_ })
+    }
     catch { throw "gitleaks $Mode report is invalid JSON: $($_.Exception.Message)" }
     return [pscustomobject][ordered]@{
         mode = $Mode

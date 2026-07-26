@@ -335,6 +335,7 @@ try {
     $secretGateText = Get-PshGoal6StrictText -Path (Join-Path $repositoryRootPath 'scripts/goal6/Invoke-Goal6SecretScan.ps1')
     Assert-PshGoal6Quality ($secretGateText -match [regex]::Escape('--log-opts=--all') -and $secretGateText -match '\bAssert-PshGoal6RemoteRefCoverage\b') 'The secret gate no longer explicitly scans all refs after remote parity validation.'
     Assert-PshGoal6Quality ($secretGateText -match '\bGITLEAKS_CONFIG\b' -and $secretGateText -match '\bGITLEAKS_CONFIG_TOML\b' -and $secretGateText -match [regex]::Escape('--gitleaks-ignore-path')) 'The secret gate no longer rejects inherited gitleaks configuration or fixes the ignore root.'
+    Assert-PshGoal6Quality ($secretGateText -match 'ConvertFrom-Json -InputObject \$reportText' -and $secretGateText -match '\$parsedReport \| ForEach-Object') 'The secret gate no longer normalizes empty JSON arrays across Windows PowerShell and PowerShell 7.'
 
     $secretScriptPath = Join-Path $repositoryRootPath 'scripts/goal6/Invoke-Goal6SecretScan.ps1'
     $zeroRuleConfigPath = Join-Path $testRoot 'zero-rule-gitleaks.toml'
@@ -529,7 +530,7 @@ $global:LASTEXITCODE = 0
             $scanLogText = if ([IO.File]::Exists($scanLogPath)) { (Get-PshGoal6StrictText -Path $scanLogPath).Trim() } else { '<missing>' }
             $scanLogText = ($scanLogText -replace '\r?\n', ' | ')
             if ($scanLogText.Length -gt 512) { $scanLogText = $scanLogText.Substring($scanLogText.Length - 512) }
-            $secretFixtureDiagnostics.Add(('{0}:exit={1},status={2},log={3},tail={4}' -f [string]$scan.mode, [int]$scan.exitCode, [string]$scan.status, $scanLogName, $scanLogText))
+            $secretFixtureDiagnostics.Add(('{0}:exit={1},status={2},findings={3},log={4},tail={5}' -f [string]$scan.mode, [int]$scan.exitCode, [string]$scan.status, [int]$scan.findingCount, $scanLogName, $scanLogText))
         }
     }
     $secretFixtureDiagnosticText = [string]::Join('; ', $secretFixtureDiagnostics.ToArray())
