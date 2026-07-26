@@ -8,6 +8,7 @@ param(
     [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
     [string]$LockPath,
     [string]$InteractiveLockPath,
+    [string]$CatalogBuilderLockPath,
     [string]$NoticesPath,
     [string]$SbomPath,
     [switch]$Check
@@ -377,21 +378,78 @@ function Assert-PshLock {
     }
 }
 
+function Assert-PshCatalogBuilderLock {
+    param(
+        [Parameter(Mandatory = $true)][object]$CatalogLock,
+        [Parameter(Mandatory = $true)][string]$RepositoryRootPath
+    )
+
+    Assert-PshCondition ([int](Get-PshProperty $CatalogLock 'schemaVersion') -eq 1) 'Catalog builder lock schemaVersion must be 1.'
+    $dependency = Get-PshProperty $CatalogLock 'dependency'
+    Assert-PshCondition ($null -ne $dependency) 'Catalog builder lock dependency is missing.'
+    Assert-PshCondition ([string](Get-PshProperty $dependency 'name') -ceq 'dotnet/arcade managed FileCatalog source') 'Catalog builder dependency name changed.'
+    Assert-PshCondition ([string](Get-PshProperty $dependency 'scope') -ceq 'build-time-vendored-source') 'Catalog builder dependency scope changed.'
+    $source = Get-PshProperty $dependency 'source'
+    Assert-PshHttpsPinnedUrl -Url ([string](Get-PshProperty $source 'repository')) -Description 'Catalog builder source repository'
+    $commit = [string](Get-PshProperty $source 'commit')
+    Assert-PshCondition ($commit -match '\A[0-9a-f]{40}\z' -and [string](Get-PshProperty $dependency 'version') -ceq $commit) 'Catalog builder source commit or version is invalid.'
+
+    $license = Get-PshProperty $dependency 'license'
+    Assert-PshCondition ([string](Get-PshProperty $license 'spdxId') -ceq 'MIT') 'Catalog builder license must be MIT.'
+    $licenseRelativePath = [string](Get-PshProperty $license 'retainedPath')
+    $licensePath = Resolve-PshRepositoryPath -RepositoryRootPath $RepositoryRootPath -RelativePath $licenseRelativePath -Description 'Catalog builder retained license'
+    Assert-PshCondition ([IO.File]::Exists($licensePath)) 'Catalog builder retained license is missing.'
+    $licenseHash = [string](Get-PshProperty $license 'vendoredSha256')
+    Assert-PshSha256 -Hash $licenseHash -Description 'Catalog builder retained license SHA-256'
+    Assert-PshCondition ((Get-PshSha256File -Path $licensePath) -ceq $licenseHash.ToLowerInvariant()) 'Catalog builder retained license SHA-256 differs from the lock.'
+    Assert-PshCondition ([int64]([IO.FileInfo]$licensePath).Length -eq [int64](Get-PshProperty $license 'vendoredSize')) 'Catalog builder retained license size differs from the lock.'
+    Assert-PshHttpsPinnedUrl -Url ([string](Get-PshProperty $license 'fixedSourceUrl')) -Description 'Catalog builder fixed license URL'
+    Assert-PshSha256 -Hash ([string](Get-PshProperty $license 'fixedSourceSha256')) -Description 'Catalog builder fixed license SHA-256'
+
+    $files = Get-PshArrayProperty -InputObject $dependency -Name 'files'
+    Assert-PshCondition ($files.Count -eq 4) 'Catalog builder lock must contain exactly four vendored Arcade files.'
+    $expectedNames = @('CatalogBuilder.cs', 'CatalogEntry.cs', 'CatalogMemberEncoder.cs', 'CatalogOids.cs')
+    for ($index = 0; $index -lt $expectedNames.Count; $index++) {
+        $file = $files[$index]
+        Assert-PshCondition ([string](Get-PshProperty $file 'name') -ceq $expectedNames[$index]) "Catalog builder file order changed at index $index."
+        Assert-PshRelativePath -Path ([string](Get-PshProperty $file 'upstreamPath')) -Description 'Catalog builder upstream path'
+        Assert-PshSha256 -Hash ([string](Get-PshProperty $file 'upstreamSha256')) -Description 'Catalog builder upstream SHA-256'
+        $vendoredRelativePath = [string](Get-PshProperty $file 'vendoredPath')
+        $vendoredPath = Resolve-PshRepositoryPath -RepositoryRootPath $RepositoryRootPath -RelativePath $vendoredRelativePath -Description 'Catalog builder vendored source'
+        Assert-PshCondition ([IO.File]::Exists($vendoredPath)) "Catalog builder vendored source is missing: $vendoredRelativePath"
+        $vendoredHash = [string](Get-PshProperty $file 'vendoredSha256')
+        Assert-PshSha256 -Hash $vendoredHash -Description 'Catalog builder vendored SHA-256'
+        Assert-PshCondition ((Get-PshSha256File -Path $vendoredPath) -ceq $vendoredHash.ToLowerInvariant()) "Catalog builder vendored SHA-256 differs: $vendoredRelativePath"
+        Assert-PshCondition ([int64]([IO.FileInfo]$vendoredPath).Length -eq [int64](Get-PshProperty $file 'vendoredSize')) "Catalog builder vendored size differs: $vendoredRelativePath"
+        Assert-PshCondition ([bool](Get-PshProperty $file 'modified')) "Catalog builder source is not marked modified: $vendoredRelativePath"
+    }
+
+    $modifications = Get-PshArrayProperty -InputObject $dependency -Name 'modifications'
+    Assert-PshCondition ($modifications.Count -eq 4) 'Catalog builder modification record count is not four.'
+    $provenancePath = Resolve-PshRepositoryPath -RepositoryRootPath $RepositoryRootPath -RelativePath ([string](Get-PshProperty $dependency 'provenancePath')) -Description 'Catalog builder provenance'
+    Assert-PshCondition ([IO.File]::Exists($provenancePath)) 'Catalog builder provenance file is missing.'
+    return $dependency
+}
+
 function Get-PshDocumentIdentity {
     param(
         [Parameter(Mandatory = $true)][object]$Manifest,
         [Parameter(Mandatory = $true)][string]$NativeLockText,
-        [Parameter(Mandatory = $true)][string]$InteractiveLockText
+        [Parameter(Mandatory = $true)][string]$InteractiveLockText,
+        [Parameter(Mandatory = $true)][string]$CatalogBuilderLockText
     )
 
     $nativeInput = (ConvertTo-PshLf $NativeLockText).TrimEnd([char]0x0A)
     $interactiveInput = (ConvertTo-PshLf $InteractiveLockText).TrimEnd([char]0x0A)
+    $catalogBuilderInput = (ConvertTo-PshLf $CatalogBuilderLockText).TrimEnd([char]0x0A)
     $summaryText = @(
-        'generator=psh-supply-chain-generator/2'
+        'generator=psh-supply-chain-generator/3'
         'native-tools.lock.json'
         $nativeInput
         'interactive.lock.json'
         $interactiveInput
+        'arcade.lock.json'
+        $catalogBuilderInput
         ''
     ) -join "`n"
     $summaryHash = Get-PshSha256Text -Text $summaryText
@@ -463,6 +521,7 @@ function New-PshThirdPartyNotices {
     param(
         [Parameter(Mandatory = $true)][object]$Lock,
         [Parameter(Mandatory = $true)][object]$InteractiveLock,
+        [Parameter(Mandatory = $true)][object]$CatalogBuilderLock,
         [Parameter(Mandatory = $true)][object]$Identity
     )
 
@@ -473,7 +532,7 @@ function New-PshThirdPartyNotices {
     [void]$lines.Add('<!-- SPDX-License-Identifier: GPL-3.0-or-later -->')
     [void]$lines.Add('<!-- Generated by scripts/Generate-SupplyChainArtifacts.ps1. Do not edit. -->')
     [void]$lines.Add('')
-    [void]$lines.Add('This file is generated from `tools/native-tools.lock.json` and the pinned PSReadLine lock.')
+    [void]$lines.Add('This file is generated from `tools/native-tools.lock.json`, the pinned PSReadLine lock, and `src/catalog-builder/arcade.lock.json`.')
     [void]$lines.Add(('Lock manifest created: `{0}`.' -f (ConvertTo-PshUtcTimestamp (Get-PshProperty $manifest 'created'))))
     [void]$lines.Add(('Lock namespace seed: `{0}`; deterministic summary SHA256: `{1}`.' -f [string](Get-PshProperty $manifest 'namespaceSeed'), [string]$Identity.SummarySha256))
     [void]$lines.Add('Source repository, release tag, and resolved commit are provenance records. The GitHub release objects were observed with `immutable=false`; numeric asset IDs and SHA256 values pin the selected bytes as far as the upstream metadata permits. No reproducible-build claim is made.')
@@ -489,6 +548,29 @@ function New-PshThirdPartyNotices {
     [void]$lines.Add(('- Version: `{0}`; source repository: <{1}>; tag: `{2}`; commit: `{3}`' -f [string](Get-PshProperty $component 'version'), [string](Get-PshProperty $repository 'url'), [string](Get-PshProperty $repository 'tag'), [string](Get-PshProperty $repository 'commit')))
     [void]$lines.Add(('- Declared SPDX: `{0}`; vendored license path: `{1}`; vendored SHA256: `{2}`; fixed source URL: <{3}>; fixed source SHA256: `{4}`' -f [string](Get-PshProperty $componentLicense 'spdxId'), [string](Get-PshProperty $componentLicense 'vendoredPath'), [string](Get-PshProperty $componentLicense 'sha256'), [string](Get-PshProperty $componentLicense 'fixedSourceUrl'), [string](Get-PshProperty $componentLicense 'fixedSourceSha256')))
     [void]$lines.Add(('- Package provenance: <{0}>; package SHA256: `{1}`.' -f [string](Get-PshProperty $package 'downloadUrl'), [string](Get-PshProperty $package 'sha256')))
+    [void]$lines.Add('')
+    [void]$lines.Add('## Build-time vendored source')
+    [void]$lines.Add('')
+    $catalogDependency = Get-PshProperty $CatalogBuilderLock 'dependency'
+    $catalogSource = Get-PshProperty $catalogDependency 'source'
+    $catalogLicense = Get-PshProperty $catalogDependency 'license'
+    [void]$lines.Add('### dotnet/arcade managed FileCatalog')
+    [void]$lines.Add('')
+    [void]$lines.Add(('- Scope: `{0}`; source repository: <{1}>; commit: `{2}`' -f [string](Get-PshProperty $catalogDependency 'scope'), [string](Get-PshProperty $catalogSource 'repository'), [string](Get-PshProperty $catalogSource 'commit')))
+    [void]$lines.Add(('- Declared SPDX: `{0}`; retained license: `{1}`; vendored SHA256: `{2}`; fixed source SHA256: `{3}`' -f [string](Get-PshProperty $catalogLicense 'spdxId'), [string](Get-PshProperty $catalogLicense 'retainedPath'), [string](Get-PshProperty $catalogLicense 'vendoredSha256'), [string](Get-PshProperty $catalogLicense 'fixedSourceSha256')))
+    [void]$lines.Add(('- License byte note: {0}' -f (ConvertTo-PshMarkdownCell ([string](Get-PshProperty $catalogLicense 'vendoredDifference')))))
+    [void]$lines.Add('')
+    [void]$lines.Add('| Vendored file | Upstream path | Upstream SHA256 | Vendored SHA256 |')
+    [void]$lines.Add('| --- | --- | --- | --- |')
+    foreach ($catalogFile in (Get-PshArrayProperty -InputObject $catalogDependency -Name 'files')) {
+        [void]$lines.Add(('| `{0}` | `{1}` | `{2}` | `{3}` |' -f [string](Get-PshProperty $catalogFile 'vendoredPath'), [string](Get-PshProperty $catalogFile 'upstreamPath'), [string](Get-PshProperty $catalogFile 'upstreamSha256'), [string](Get-PshProperty $catalogFile 'vendoredSha256')))
+    }
+    [void]$lines.Add('')
+    [void]$lines.Add('Psh modifications:')
+    [void]$lines.Add('')
+    foreach ($modification in (Get-PshArrayProperty -InputObject $catalogDependency -Name 'modifications')) {
+        [void]$lines.Add(('- {0}' -f (ConvertTo-PshMarkdownCell ([string]$modification))))
+    }
     [void]$lines.Add('')
     [void]$lines.Add('## Native tools')
     [void]$lines.Add('')
@@ -556,6 +638,7 @@ function New-PshSpdxDocument {
     param(
         [Parameter(Mandatory = $true)][object]$Lock,
         [Parameter(Mandatory = $true)][object]$InteractiveLock,
+        [Parameter(Mandatory = $true)][object]$CatalogBuilderLock,
         [Parameter(Mandatory = $true)][object]$Identity,
         [Parameter(Mandatory = $true)][string]$RepositoryRootPath
     )
@@ -600,6 +683,32 @@ function New-PshSpdxDocument {
     $psSourceInfo = 'Source tag {0} resolves to commit {1}; this package describes the selected vendored runtime subset recorded in interactive.lock.json.' -f [string](Get-PshProperty (Get-PshProperty $psComponent 'repository') 'tag'), [string](Get-PshProperty (Get-PshProperty $psComponent 'repository') 'commit')
     $psComment = 'PowerShell Gallery package SHA256 {0}; retained files {1}; vendored license SHA256 {2}; fixed source license URL {3} has SHA256 {4}.' -f [string](Get-PshProperty $psPackage 'sha256'), $psFileIds.Count, [string](Get-PshProperty $psLicense 'sha256'), [string](Get-PshProperty $psLicense 'fixedSourceUrl'), [string](Get-PshProperty $psLicense 'fixedSourceSha256')
     [void]$packages.Add((New-PshSpdxPackage -Name 'PSReadLine' -Version ([string](Get-PshProperty $psComponent 'version')) -License ([string](Get-PshProperty $psLicense 'spdxId')) -DownloadLocation ([string](Get-PshProperty $psPackage 'downloadUrl')) -SourceInfo $psSourceInfo -Comment $psComment -FileIds $psFileIds.ToArray() -VerificationCode $psVerificationCode))
+
+    $catalogDependency = Get-PshProperty $CatalogBuilderLock 'dependency'
+    $catalogSource = Get-PshProperty $catalogDependency 'source'
+    $catalogLicense = Get-PshProperty $catalogDependency 'license'
+    $catalogFileIds = New-Object 'System.Collections.Generic.List[string]'
+    $catalogVerificationPaths = New-Object 'System.Collections.Generic.List[string]'
+    $catalogLicenseRelativePath = [string](Get-PshProperty $catalogLicense 'retainedPath')
+    $catalogLicensePath = Resolve-PshRepositoryPath -RepositoryRootPath $RepositoryRootPath -RelativePath $catalogLicenseRelativePath -Description 'Catalog builder SPDX license path'
+    $catalogLicenseFileId = ConvertTo-PshSpdxId -Value ('dotnet-arcade-license-' + [string](Get-PshProperty $catalogDependency 'version'))
+    [void]$files.Add((New-PshSpdxFile -Path $catalogLicenseRelativePath -Hash ([string](Get-PshProperty $catalogLicense 'vendoredSha256')) -License ([string](Get-PshProperty $catalogLicense 'spdxId')) -Id $catalogLicenseFileId))
+    [void]$catalogFileIds.Add($catalogLicenseFileId)
+    [void]$catalogVerificationPaths.Add($catalogLicensePath)
+    $catalogUpstreamHashes = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($catalogFile in (Get-PshArrayProperty -InputObject $catalogDependency -Name 'files')) {
+        $catalogVendoredRelativePath = [string](Get-PshProperty $catalogFile 'vendoredPath')
+        $catalogVendoredPath = Resolve-PshRepositoryPath -RepositoryRootPath $RepositoryRootPath -RelativePath $catalogVendoredRelativePath -Description 'Catalog builder SPDX source path'
+        $catalogVendoredFileId = ConvertTo-PshSpdxId -Value ('dotnet-arcade-source-' + [string](Get-PshProperty $catalogFile 'name'))
+        [void]$files.Add((New-PshSpdxFile -Path $catalogVendoredRelativePath -Hash ([string](Get-PshProperty $catalogFile 'vendoredSha256')) -License ([string](Get-PshProperty $catalogLicense 'spdxId')) -Id $catalogVendoredFileId))
+        [void]$catalogFileIds.Add($catalogVendoredFileId)
+        [void]$catalogVerificationPaths.Add($catalogVendoredPath)
+        [void]$catalogUpstreamHashes.Add(('{0}={1}' -f [string](Get-PshProperty $catalogFile 'name'), [string](Get-PshProperty $catalogFile 'upstreamSha256')))
+    }
+    $catalogVerificationCode = Get-PshPackageVerificationCode -Paths $catalogVerificationPaths.ToArray()
+    $catalogSourceInfo = 'Vendored from exact dotnet/arcade commit {0}; original source hashes are recorded in arcade.lock.json.' -f [string](Get-PshProperty $catalogSource 'commit')
+    $catalogComment = 'Build-time source modified for PowerShell-compatible FilePath membership and path-aware deterministic sorting/deduplication. Fixed-source license SHA256 {0}; vendored license SHA256 {1}. Upstream files: {2}.' -f [string](Get-PshProperty $catalogLicense 'fixedSourceSha256'), [string](Get-PshProperty $catalogLicense 'vendoredSha256'), ($catalogUpstreamHashes -join ', ')
+    [void]$packages.Add((New-PshSpdxPackage -Name ([string](Get-PshProperty $catalogDependency 'name')) -Version ([string](Get-PshProperty $catalogDependency 'version')) -License ([string](Get-PshProperty $catalogLicense 'spdxId')) -DownloadLocation ('{0}/tree/{1}' -f [string](Get-PshProperty $catalogSource 'repository'), [string](Get-PshProperty $catalogSource 'commit')) -SourceInfo $catalogSourceInfo -Comment $catalogComment -FileIds $catalogFileIds.ToArray() -VerificationCode $catalogVerificationCode))
 
     foreach ($tool in (Get-PshArrayProperty -InputObject $Lock -Name 'tools')) {
         $name = [string](Get-PshProperty $tool 'name')
@@ -665,11 +774,11 @@ function New-PshSpdxDocument {
         spdxVersion = 'SPDX-2.3'
         dataLicense = 'CC0-1.0'
         SPDXID = $documentId
-        name = 'Psh Goal 4 Full Tools Supply Chain'
+        name = 'Psh release dependency supply chain'
         documentNamespace = [string]$Identity.Namespace
         creationInfo = [ordered]@{
             created = (ConvertTo-PshUtcTimestamp (Get-PshProperty $manifest 'created'))
-            creators = @('Tool: psh-supply-chain-generator/2')
+            creators = @('Tool: psh-supply-chain-generator/3')
             licenseListVersion = '3.26'
         }
         comment = ('Deterministic lock summary SHA256: {0}. No reproducible-build claim; GitHub release objects observed immutable=false.' -f [string]$Identity.SummarySha256)
@@ -690,6 +799,7 @@ function ConvertTo-PshJsonText {
 $repositoryRootPath = [IO.Path]::GetFullPath($RepositoryRoot)
 if ([string]::IsNullOrWhiteSpace($LockPath)) { $LockPath = Join-Path $repositoryRootPath 'tools/native-tools.lock.json' }
 if ([string]::IsNullOrWhiteSpace($InteractiveLockPath)) { $InteractiveLockPath = Join-Path $repositoryRootPath 'src/Psh/Dependencies/interactive.lock.json' }
+if ([string]::IsNullOrWhiteSpace($CatalogBuilderLockPath)) { $CatalogBuilderLockPath = Join-Path $repositoryRootPath 'src/catalog-builder/arcade.lock.json' }
 if ([string]::IsNullOrWhiteSpace($NoticesPath)) { $NoticesPath = Join-Path $repositoryRootPath 'THIRD_PARTY_NOTICES.md' }
 if ([string]::IsNullOrWhiteSpace($SbomPath)) { $SbomPath = Join-Path $repositoryRootPath 'sbom.spdx.json' }
 
@@ -711,9 +821,15 @@ $psReadLineLicenseHash = [string](Get-PshProperty $psReadLineLicense 'sha256')
 Assert-PshSha256 -Hash $psReadLineLicenseHash -Description 'PSReadLine vendored license SHA-256'
 Assert-PshCondition ((Get-PshSha256File -Path $psReadLineLicensePath) -ceq $psReadLineLicenseHash.ToLowerInvariant()) 'PSReadLine vendored license SHA-256 does not match the retained file.'
 Assert-PshSha256 -Hash ([string](Get-PshProperty $psReadLineLicense 'fixedSourceSha256')) -Description 'PSReadLine fixed source license SHA-256'
-$identity = Get-PshDocumentIdentity -Manifest $validated.Manifest -NativeLockText $lockText -InteractiveLockText $interactiveText
-$notices = New-PshThirdPartyNotices -Lock $lock -InteractiveLock $interactiveLock -Identity $identity
-$sbom = ConvertTo-PshJsonText -Object (New-PshSpdxDocument -Lock $lock -InteractiveLock $interactiveLock -Identity $identity -RepositoryRootPath $repositoryRootPath)
+
+$catalogBuilderLockText = Get-PshStrictUtf8Text -Path ([IO.Path]::GetFullPath($CatalogBuilderLockPath))
+try { $catalogBuilderLock = $catalogBuilderLockText | ConvertFrom-Json -ErrorAction Stop }
+catch { Throw-PshSupplyChainError ('Catalog builder lock JSON is invalid: {0}' -f $_.Exception.Message) }
+[void](Assert-PshCatalogBuilderLock -CatalogLock $catalogBuilderLock -RepositoryRootPath $repositoryRootPath)
+
+$identity = Get-PshDocumentIdentity -Manifest $validated.Manifest -NativeLockText $lockText -InteractiveLockText $interactiveText -CatalogBuilderLockText $catalogBuilderLockText
+$notices = New-PshThirdPartyNotices -Lock $lock -InteractiveLock $interactiveLock -CatalogBuilderLock $catalogBuilderLock -Identity $identity
+$sbom = ConvertTo-PshJsonText -Object (New-PshSpdxDocument -Lock $lock -InteractiveLock $interactiveLock -CatalogBuilderLock $catalogBuilderLock -Identity $identity -RepositoryRootPath $repositoryRootPath)
 
 if ($Check) {
     foreach ($pair in @(

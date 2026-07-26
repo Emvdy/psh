@@ -298,6 +298,13 @@ try {
 
     $attributesText = Get-PshGoal6StrictText -Path (Join-Path $repositoryRootPath '.gitattributes')
     Assert-PshGoal6Quality ([regex]::Matches($attributesText, '(?m)^scripts/goal6/licenses/\*\* binary\r?$').Count -eq 1) 'Goal 6 retained licenses are not covered by exactly one binary Git attribute rule.'
+    Assert-PshGoal6Quality ([regex]::Matches($attributesText, '(?m)^licenses/dotnet-arcade-3169db019485/LICENSE\.TXT binary\r?$').Count -eq 1) 'The retained Arcade license is not covered by exactly one binary Git attribute rule.'
+    Assert-PshGoal6Quality ([regex]::Matches($attributesText, '(?m)^src/catalog-builder/\*\*/\*\.cs text eol=lf\r?$').Count -eq 1 -and [regex]::Matches($attributesText, '(?m)^src/catalog-builder/\*\.csproj text eol=lf\r?$').Count -eq 1) 'Catalog builder source line endings are not fixed to LF.'
+    $catalogLockPath = Join-Path $repositoryRootPath 'src/catalog-builder/arcade.lock.json'
+    $catalogLock = (Get-PshGoal6StrictText -Path $catalogLockPath) | ConvertFrom-Json -ErrorAction Stop
+    Assert-PshGoal6Quality ([int]$catalogLock.schemaVersion -eq 1 -and [string]$catalogLock.dependency.source.commit -ceq '3169db01948537e61a9102477fab4a39663ba79d' -and @($catalogLock.dependency.files).Count -eq 4) 'The fixed Arcade catalog source lock changed.'
+    $catalogProjectText = Get-PshGoal6StrictText -Path (Join-Path $repositoryRootPath 'src/catalog-builder/Psh.CatalogBuilder.csproj')
+    Assert-PshGoal6Quality ($catalogProjectText -match '<TargetFramework>net10\.0</TargetFramework>' -and $catalogProjectText -notmatch '(?i)PackageReference|packages\.config|NuGet') 'The catalog builder target or no-package contract changed.'
     $gitCommand = @(Get-Command -Name git -CommandType Application -ErrorAction Stop)[0]
     foreach ($dependency in @($lock.dependencies)) {
         $licenseRelativePath = [string]$dependency.license.retainedPath
@@ -365,7 +372,8 @@ try {
     $secretCaptureReportRoot = Join-Path $secretCaptureRoot 'reports'
     foreach ($path in @($secretFixtureRoot, $secretDependencyRoot)) { [void][IO.Directory]::CreateDirectory($path) }
     [IO.File]::Copy($secretScriptPath, (Join-Path $secretFixtureRoot 'Invoke-Goal6SecretScan.ps1'))
-    Write-PshGoal6Text -Path (Join-Path $secretFixtureRoot 'Goal6.Common.ps1') -Text @'
+    $gitleaksStubFileName = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'gitleaks-stub.cmd' } else { 'gitleaks-stub.ps1' }
+    $secretCommonFixtureText = @'
 function Assert-PshGoal6Condition {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) { throw $Message }
@@ -389,7 +397,7 @@ function Read-PshGoal6DependencyLock {
             id = 'gitleaks'
             version = '8.30.1'
             package = [pscustomobject]@{
-                installedRelativePath = 'gitleaks-stub.ps1'
+                installedRelativePath = '__GITLEAKS_STUB_FILE_NAME__'
                 installedSha256 = 'fixture-sha256'
                 peMachine = 'fixture-machine'
             }
@@ -424,7 +432,34 @@ function Assert-PshGoal6RemoteRefCoverage {
     }
 }
 '@
-    Write-PshGoal6Text -Path (Join-Path $secretDependencyRoot 'gitleaks-stub.ps1') -Text @'
+    $secretCommonFixtureText = $secretCommonFixtureText.Replace('__GITLEAKS_STUB_FILE_NAME__', $gitleaksStubFileName)
+    Write-PshGoal6Text -Path (Join-Path $secretFixtureRoot 'Goal6.Common.ps1') -Text $secretCommonFixtureText
+
+    $gitleaksStubPath = Join-Path $secretDependencyRoot $gitleaksStubFileName
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $gitleaksStubText = (@(
+                '@echo off',
+                'setlocal EnableExtensions DisableDelayedExpansion',
+                'if /I "%~1"=="version" (',
+                '  echo gitleaks version 8.30.1',
+                '  exit /b 0',
+                ')',
+                ':parse_arguments',
+                'if "%~1"=="" goto missing_report_path',
+                'if "%~1"=="--report-path" goto write_report',
+                'shift',
+                'goto parse_arguments',
+                ':write_report',
+                'if "%~2"=="" goto missing_report_path',
+                '>"%~2" echo []',
+                'exit /b 0',
+                ':missing_report_path',
+                '>&2 echo fixture gitleaks invocation omitted --report-path',
+                'exit /b 2'
+            ) -join "`r`n") + "`r`n"
+    }
+    else {
+        $gitleaksStubText = @'
 $arguments = @($args | ForEach-Object { [string]$_ })
 if ($arguments.Count -eq 1 -and $arguments[0] -ceq 'version') {
     Write-Output 'gitleaks version 8.30.1'
@@ -436,6 +471,8 @@ if ($reportIndex -lt 0 -or $reportIndex + 1 -ge $arguments.Count) { throw 'fixtu
 [IO.File]::WriteAllText($arguments[$reportIndex + 1], "[]`n", (New-Object Text.UTF8Encoding($false)))
 $global:LASTEXITCODE = 0
 '@
+    }
+    Write-PshGoal6Text -Path $gitleaksStubPath -Text $gitleaksStubText
 
     $gitFixtureCommands = @(
         @('init', '--bare', $secretRemoteRoot),
@@ -462,15 +499,45 @@ $global:LASTEXITCODE = 0
     }
 
     $secretFixtureScriptPath = Join-Path $secretFixtureRoot 'Invoke-Goal6SecretScan.ps1'
-    $secretFixtureOutput = @(& $secretFixtureScriptPath -DependencyRoot $secretDependencyRoot -ReportRoot $secretCaptureReportRoot -RepositoryRoot $secretWorktreeRoot -LockPath (Join-Path $secretFixtureRoot 'fixture.lock.json'))
+    $secretFixtureOutput = @()
+    $secretFixtureFailure = $null
+    try {
+        $secretFixtureOutput = @(& $secretFixtureScriptPath -DependencyRoot $secretDependencyRoot -ReportRoot $secretCaptureReportRoot -RepositoryRoot $secretWorktreeRoot -LockPath (Join-Path $secretFixtureRoot 'fixture.lock.json') 2>&1)
+    }
+    catch { $secretFixtureFailure = $_ }
     $secretFixtureExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
     $global:LASTEXITCODE = 0
-    Assert-PshGoal6Quality ($secretFixtureExitCode -eq 0 -and ($secretFixtureOutput -join "`n") -match 'passed for full Git history and worktree scans') 'Secret scan did not survive singleton, empty, and multi-line Git capture output.'
-    $secretCaptureSummary = (Get-PshGoal6StrictText -Path (Join-Path $secretCaptureReportRoot 'gitleaks-summary.json')) | ConvertFrom-Json -ErrorAction Stop
+    $secretCaptureSummaryPath = Join-Path $secretCaptureReportRoot 'gitleaks-summary.json'
+    $secretCaptureSummary = $null
+    $secretCaptureSummaryFailure = $null
+    if ([IO.File]::Exists($secretCaptureSummaryPath)) {
+        try { $secretCaptureSummary = (Get-PshGoal6StrictText -Path $secretCaptureSummaryPath) | ConvertFrom-Json -ErrorAction Stop }
+        catch { $secretCaptureSummaryFailure = $_ }
+    }
+    $secretCaptureScans = if ($null -eq $secretCaptureSummary) { @() } else { @($secretCaptureSummary.scans) }
+    $secretFixtureDiagnostics = New-Object System.Collections.Generic.List[string]
+    $secretFixtureDiagnostics.Add("lastNativeExitCode=$secretFixtureExitCode")
+    if ($null -ne $secretFixtureFailure) { $secretFixtureDiagnostics.Add("scriptError=$($secretFixtureFailure.Exception.Message)") }
+    if ($null -ne $secretCaptureSummaryFailure) { $secretFixtureDiagnostics.Add("summaryError=$($secretCaptureSummaryFailure.Exception.Message)") }
+    elseif ($null -eq $secretCaptureSummary) { $secretFixtureDiagnostics.Add('summary=missing') }
+    else {
+        $secretFixtureDiagnostics.Add("summaryStatus=$([string]$secretCaptureSummary.status)")
+        if (-not [string]::IsNullOrWhiteSpace([string]$secretCaptureSummary.error)) { $secretFixtureDiagnostics.Add("summaryError=$([string]$secretCaptureSummary.error)") }
+        foreach ($scan in $secretCaptureScans) {
+            $scanLogName = [string]$scan.log
+            $scanLogPath = Join-Path $secretCaptureReportRoot $scanLogName
+            $scanLogText = if ([IO.File]::Exists($scanLogPath)) { (Get-PshGoal6StrictText -Path $scanLogPath).Trim() } else { '<missing>' }
+            $scanLogText = ($scanLogText -replace '\r?\n', ' | ')
+            if ($scanLogText.Length -gt 512) { $scanLogText = $scanLogText.Substring($scanLogText.Length - 512) }
+            $secretFixtureDiagnostics.Add(('{0}:exit={1},status={2},log={3},tail={4}' -f [string]$scan.mode, [int]$scan.exitCode, [string]$scan.status, $scanLogName, $scanLogText))
+        }
+    }
+    $secretFixtureDiagnosticText = [string]::Join('; ', $secretFixtureDiagnostics.ToArray())
+    Assert-PshGoal6Quality ($null -eq $secretFixtureFailure -and $secretFixtureExitCode -eq 0 -and ($secretFixtureOutput -join "`n") -match 'passed for full Git history and worktree scans') "Secret scan did not survive singleton, empty, and multi-line Git capture output. $secretFixtureDiagnosticText"
+    Assert-PshGoal6Quality ($null -ne $secretCaptureSummary) "Secret scan cardinality regression did not retain a readable inner summary. $secretFixtureDiagnosticText"
     Assert-PshGoal6Quality ([string]$secretCaptureSummary.status -ceq 'passed' -and $null -eq $secretCaptureSummary.error) 'Secret scan cardinality regression did not produce a passing summary.'
     Assert-PshGoal6Quality ([int]$secretCaptureSummary.remoteRefCoverage.remoteRefCount -eq 2 -and [int]$secretCaptureSummary.remoteRefCoverage.branchCount -eq 2 -and [int]$secretCaptureSummary.remoteRefCoverage.tagCount -eq 0 -and [string]$secretCaptureSummary.remoteRefCoverage.parity -ceq 'exact') 'Secret scan did not preserve exact remote-ref coverage for multi-line branches and empty tags.'
-    $secretCaptureScans = @($secretCaptureSummary.scans)
-    Assert-PshGoal6Quality ($secretCaptureScans.Count -eq 2 -and (@($secretCaptureScans | ForEach-Object { [string]$_.mode }) -join '|') -ceq 'git|dir' -and @($secretCaptureScans | Where-Object { [string]$_.status -cne 'passed' -or [int]$_.findingCount -ne 0 }).Count -eq 0) 'Secret scan cardinality regression did not preserve both zero-finding gitleaks scans.'
+    Assert-PshGoal6Quality ($secretCaptureScans.Count -eq 2 -and (@($secretCaptureScans | ForEach-Object { [string]$_.mode }) -join '|') -ceq 'git|dir' -and @($secretCaptureScans | Where-Object { [int]$_.exitCode -ne 0 -or [string]$_.status -cne 'passed' -or [int]$_.findingCount -ne 0 }).Count -eq 0) "Secret scan cardinality regression did not preserve both zero-finding native gitleaks scans. $secretFixtureDiagnosticText"
 
     $leafTraversalLock = New-PshGoal6QualityLockCopy -Name 'package-file-name-traversal' -Mutation {
         param($value)

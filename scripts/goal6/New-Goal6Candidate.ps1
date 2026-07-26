@@ -13,7 +13,8 @@ param(
     [Parameter(Mandatory = $true)][string] $ReleaseNotesPath,
     [Parameter(Mandatory = $true)][string] $ReleaseNotesZhCnPath,
     [string] $RepositoryRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
-    [AllowNull()][string] $WorkingRoot
+    [AllowNull()][string] $WorkingRoot,
+    [AllowNull()][string] $CatalogBuilderPath
 )
 
 Set-StrictMode -Version 2.0
@@ -348,7 +349,8 @@ function Invoke-PshGoal6CandidatePublishedCleanup {
 
 function Invoke-PshGoal6CandidateCatalogBuild {
     param(
-        [Parameter(Mandatory = $true)][object] $CatalogCommand,
+        [Parameter(Mandatory = $true)][string] $CatalogHostPath,
+        [Parameter(Mandatory = $true)][string] $CatalogBuilderPath,
         [Parameter(Mandatory = $true)][string] $ContentRoot,
         [Parameter(Mandatory = $true)][object[]] $Members,
         [Parameter(Mandatory = $true)][string] $CatalogPath,
@@ -364,6 +366,10 @@ function Invoke-PshGoal6CandidateCatalogBuild {
         Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCatalogMember' -Message "$Description content root is unsafe: $ContentRoot"
     }
     $expectedNames = New-Object System.Collections.Generic.List[string]
+    $catalogArguments = New-Object System.Collections.Generic.List[string]
+    $catalogArguments.Add($CatalogBuilderPath)
+    $catalogArguments.Add('--output')
+    $catalogArguments.Add($CatalogPath)
     foreach ($member in $Members) {
         $name = [string]$member.Name
         if ([string]::IsNullOrWhiteSpace($name) -or [IO.Path]::GetFileName($name) -cne $name -or $expectedNames.Contains($name)) {
@@ -371,11 +377,36 @@ function Invoke-PshGoal6CandidateCatalogBuild {
         }
         $expectedNames.Add($name)
         $source = Resolve-PshGoal6CandidateFile -Path ([string]$member.SourcePath) -Description "$Description member '$name'"
-        [IO.File]::Copy($source, (Join-Path $ContentRoot $name), $false)
+        $stagedSource = Join-Path $ContentRoot $name
+        [IO.File]::Copy($source, $stagedSource, $false)
+        $catalogArguments.Add('--member')
+        $catalogArguments.Add($name)
+        $catalogArguments.Add($stagedSource)
     }
     Assert-PshGoal6CandidateExactFileSet -Root $ContentRoot -ExpectedNames $expectedNames.ToArray() -Description "$Description content root"
-    try { [void](& $CatalogCommand -Path $ContentRoot -CatalogFilePath $CatalogPath -CatalogVersion 2.0 -ErrorAction Stop) }
-    catch { Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCatalogCreate' -Message "Unable to create ${Description}." -InnerException $_.Exception }
+    $catalogOutput = @()
+    $catalogExitCode = 1
+    $catalogInvocationError = $null
+    [string[]]$catalogArgumentArray = $catalogArguments.ToArray()
+    $oldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $catalogOutput = @(& $CatalogHostPath @catalogArgumentArray 2>&1)
+        $catalogExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    }
+    catch { $catalogInvocationError = $_ }
+    finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+        $global:LASTEXITCODE = 0
+    }
+    if ($null -ne $catalogInvocationError) {
+        Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCatalogCreate' -Message "Unable to launch the deterministic builder for ${Description}." -InnerException $catalogInvocationError.Exception
+    }
+    if ($catalogExitCode -ne 0) {
+        $catalogDiagnostic = @($catalogOutput | ForEach-Object { [string]$_ }) -join ' '
+        $inner = New-Object Exception("Deterministic catalog builder exited with code ${catalogExitCode}: $catalogDiagnostic")
+        Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCatalogCreate' -Message "Unable to create ${Description}." -InnerException $inner
+    }
     $catalogEntry = Get-PshLifecyclePathEntry -Path $CatalogPath -Description $Description
     if (-not [bool]$catalogEntry.IsRegularFile -or [bool]$catalogEntry.IsReparsePoint -or ([IO.FileInfo]$CatalogPath).Length -le 0) {
         Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateCatalogCreate' -Message "$Description was not created as a non-empty regular file: $CatalogPath"
@@ -468,11 +499,24 @@ if ($Version -ceq '0.0.1-test') {
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     Invoke-PshGoal6CandidateFailure -ExitCode 4 -ErrorId 'PshGoal6CandidateCatalogUnavailable' -Message 'Goal 6 candidate creation requires Windows file-catalog APIs.'
 }
-$newCatalogCommand = Get-Command -Name New-FileCatalog -CommandType Cmdlet -ErrorAction SilentlyContinue
 $testCatalogCommand = Get-Command -Name Test-FileCatalog -CommandType Cmdlet -ErrorAction SilentlyContinue
-if ($null -eq $newCatalogCommand -or $null -eq $testCatalogCommand) {
-    Invoke-PshGoal6CandidateFailure -ExitCode 4 -ErrorId 'PshGoal6CandidateCatalogUnavailable' -Message 'New-FileCatalog and Test-FileCatalog are required on this Windows runtime.'
+$dotnetCommands = @(Get-Command -Name dotnet -CommandType Application -ErrorAction SilentlyContinue)
+$dotnetCommand = if ($dotnetCommands.Count -eq 0) { $null } else { $dotnetCommands[0] }
+if ([string]::IsNullOrWhiteSpace($CatalogBuilderPath)) {
+    $CatalogBuilderPath = Join-Path $RepositoryRoot 'src/catalog-builder/bin/Release/net10.0/Psh.CatalogBuilder.dll'
 }
+try {
+    $CatalogBuilderPath = Assert-PshLifecycleNoReparseAncestors -Path $CatalogBuilderPath -Description 'deterministic catalog builder'
+    $catalogBuilderEntry = Get-PshLifecyclePathEntry -Path $CatalogBuilderPath -Description 'deterministic catalog builder'
+}
+catch {
+    Invoke-PshGoal6CandidateFailure -ExitCode 4 -ErrorId 'PshGoal6CandidateCatalogUnavailable' -Message "The deterministic catalog builder path is unsafe or unavailable: $CatalogBuilderPath" -InnerException $_.Exception
+}
+if ($null -eq $dotnetCommand -or $null -eq $testCatalogCommand -or -not [bool]$catalogBuilderEntry.Exists -or
+    -not [bool]$catalogBuilderEntry.IsRegularFile -or [bool]$catalogBuilderEntry.IsReparsePoint -or ([IO.FileInfo]$CatalogBuilderPath).Length -le 0) {
+    Invoke-PshGoal6CandidateFailure -ExitCode 4 -ErrorId 'PshGoal6CandidateCatalogUnavailable' -Message 'dotnet, the deterministic catalog builder, and Test-FileCatalog are required on this Windows runtime.'
+}
+$catalogHostPath = [string]$dotnetCommand.Source
 
 $inputs = [ordered]@{
     OnlineInstaller = Resolve-PshGoal6CandidateFile -Path (Join-Path $RepositoryRoot 'src/install/install.ps1') -Description 'online installer'
@@ -574,7 +618,7 @@ try {
             Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidatePackageContract' -Message "Package pre-sign build is missing the exact slot '$expectedPackageName'."
         }
         $manifestPath = Join-Path $preSignOutputRoot (Join-Path ([string]$packageMatches[0].stagingRelativePath) 'package.manifest.json')
-        [void](Invoke-PshGoal6CandidateCatalogBuild -CatalogCommand $newCatalogCommand -ContentRoot (Join-Path $packageCatalogInputRoot $expectedPackageName) -Members @(
+        [void](Invoke-PshGoal6CandidateCatalogBuild -CatalogHostPath $catalogHostPath -CatalogBuilderPath $CatalogBuilderPath -ContentRoot (Join-Path $packageCatalogInputRoot $expectedPackageName) -Members @(
                 [pscustomobject]@{ Name = 'package.manifest.json'; SourcePath = $manifestPath }
             ) -CatalogPath (Join-Path $packageCatalogRoot ($expectedPackageName + '.manifest.cat')) -Description "package catalog '$expectedPackageName'")
     }
@@ -596,7 +640,7 @@ try {
         Invoke-PshGoal6CandidateFailure -ExitCode 5 -ErrorId 'PshGoal6CandidateIndex' -Message 'Initial release index generation returned an unexpected phase or code.'
     }
     $releaseCatalogPath = Join-Path $WorkingRoot "psh-release-$Version.cat"
-    [void](Invoke-PshGoal6CandidateCatalogBuild -CatalogCommand $newCatalogCommand -ContentRoot (Join-Path $WorkingRoot 'release-catalog-input') -Members @(
+    [void](Invoke-PshGoal6CandidateCatalogBuild -CatalogHostPath $catalogHostPath -CatalogBuilderPath $CatalogBuilderPath -ContentRoot (Join-Path $WorkingRoot 'release-catalog-input') -Members @(
             [pscustomobject]@{ Name = "psh-release-$Version.json"; SourcePath = (Join-Path $releaseAssetsRoot "psh-release-$Version.json") },
             [pscustomobject]@{ Name = 'SHA256SUMS'; SourcePath = (Join-Path $releaseAssetsRoot 'SHA256SUMS') }
         ) -CatalogPath $releaseCatalogPath -Description 'release catalog')

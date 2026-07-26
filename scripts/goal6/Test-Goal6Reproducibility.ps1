@@ -11,7 +11,8 @@ param(
     [Parameter(Mandatory = $true)][string]$ReleaseNotesPath,
     [Parameter(Mandatory = $true)][string]$ReleaseNotesZhCnPath,
     [string]$RepositoryRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
-    [string]$MSBuildPath
+    [string]$MSBuildPath,
+    [AllowNull()][string]$CatalogBuilderPath
 )
 
 Set-StrictMode -Version 2.0
@@ -171,7 +172,8 @@ function Invoke-PshGoal6IndependentCandidateBuild {
         [Parameter(Mandatory = $true)][string]$EnglishReleaseNotes,
         [Parameter(Mandatory = $true)][string]$ChineseReleaseNotes,
         [Parameter(Mandatory = $true)][string]$CandidateScriptPath,
-        [AllowNull()][string]$RequestedMSBuildPath
+        [AllowNull()][string]$RequestedMSBuildPath,
+        [AllowNull()][string]$RequestedCatalogBuilderPath
     )
 
     Assert-PshGoal6Condition (-not [IO.File]::Exists($RunRoot) -and -not [IO.Directory]::Exists($RunRoot)) "Independent candidate run root already exists: $RunRoot"
@@ -218,6 +220,7 @@ function Invoke-PshGoal6IndependentCandidateBuild {
         RepositoryRoot = $RepositoryRootPath
         WorkingRoot = $candidateWorkingRootPath
     }
+    if (-not [string]::IsNullOrWhiteSpace($RequestedCatalogBuilderPath)) { $candidateParameters['CatalogBuilderPath'] = $RequestedCatalogBuilderPath }
     $candidateOutput = @()
     $candidateFailure = $null
     $candidateCleanupFailure = $null
@@ -456,7 +459,7 @@ function Invoke-PshGoal6NonWindowsBoundary {
     if (-not $boundaryVerified -or -not $outputsAbsent) {
         Invoke-PshGoal6ReproducibilityFailure -ExitCode 5 -ErrorId 'PshGoal6ReproducibilityBoundary' -Message "Non-Windows candidate boundary did not return clean code 4 evidence. See $summaryPath" -InnerException $(if ($null -eq $boundaryFailure) { $null } else { $boundaryFailure.Exception })
     }
-    Invoke-PshGoal6ReproducibilityFailure -ExitCode 4 -ErrorId 'PshGoal6ReproducibilityCatalogUnavailable' -Message "Reproducibility candidate builds require Windows New-FileCatalog/Test-FileCatalog APIs. Boundary evidence: $summaryPath" -InnerException $boundaryFailure.Exception
+    Invoke-PshGoal6ReproducibilityFailure -ExitCode 4 -ErrorId 'PshGoal6ReproducibilityCatalogUnavailable' -Message "Reproducibility candidate builds require the deterministic catalog builder and Windows Test-FileCatalog API. Boundary evidence: $summaryPath" -InnerException $boundaryFailure.Exception
 }
 
 $repositoryRootPath = [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
@@ -489,12 +492,12 @@ $script:PshGoal6ReproWorkingRootCleanupCount = 0
 
 try {
     Assert-PshGoal6Condition (-not [IO.File]::Exists($sharedCandidateWorkingRoot) -and -not [IO.Directory]::Exists($sharedCandidateWorkingRoot)) "Shared candidate working root already exists: $sharedCandidateWorkingRoot"
-    $firstRun = Invoke-PshGoal6IndependentCandidateBuild -RunRoot (Join-Path $outputRootPath 'run-1') -CandidateWorkingRoot $sharedCandidateWorkingRoot -RepositoryRootPath $repositoryRootPath -PackageVersion $Version -Commit $SourceCommit -EnglishReleaseNotes $releaseNotesPathFull -ChineseReleaseNotes $releaseNotesZhCnPathFull -CandidateScriptPath $candidateScriptPath -RequestedMSBuildPath $MSBuildPath
+    $firstRun = Invoke-PshGoal6IndependentCandidateBuild -RunRoot (Join-Path $outputRootPath 'run-1') -CandidateWorkingRoot $sharedCandidateWorkingRoot -RepositoryRootPath $repositoryRootPath -PackageVersion $Version -Commit $SourceCommit -EnglishReleaseNotes $releaseNotesPathFull -ChineseReleaseNotes $releaseNotesZhCnPathFull -CandidateScriptPath $candidateScriptPath -RequestedMSBuildPath $MSBuildPath -RequestedCatalogBuilderPath $CatalogBuilderPath
     $manifestOne = Get-PshGoal6CandidateManifest -RunName 'run-1' -CandidateRoot ([string]$firstRun.candidateRoot) -CandidateReport $firstRun.candidateReport -PackageVersion $Version
     Write-PshGoal6Json -Path (Join-Path $outputRootPath 'build-1.manifest.json') -InputObject $manifestOne
 
     Assert-PshGoal6Condition (-not [IO.File]::Exists($sharedCandidateWorkingRoot) -and -not [IO.Directory]::Exists($sharedCandidateWorkingRoot)) "Shared candidate working root retained state after the first build: $sharedCandidateWorkingRoot"
-    $secondRun = Invoke-PshGoal6IndependentCandidateBuild -RunRoot (Join-Path $outputRootPath 'run-2') -CandidateWorkingRoot $sharedCandidateWorkingRoot -RepositoryRootPath $repositoryRootPath -PackageVersion $Version -Commit $SourceCommit -EnglishReleaseNotes $releaseNotesPathFull -ChineseReleaseNotes $releaseNotesZhCnPathFull -CandidateScriptPath $candidateScriptPath -RequestedMSBuildPath $MSBuildPath
+    $secondRun = Invoke-PshGoal6IndependentCandidateBuild -RunRoot (Join-Path $outputRootPath 'run-2') -CandidateWorkingRoot $sharedCandidateWorkingRoot -RepositoryRootPath $repositoryRootPath -PackageVersion $Version -Commit $SourceCommit -EnglishReleaseNotes $releaseNotesPathFull -ChineseReleaseNotes $releaseNotesZhCnPathFull -CandidateScriptPath $candidateScriptPath -RequestedMSBuildPath $MSBuildPath -RequestedCatalogBuilderPath $CatalogBuilderPath
     $manifestTwo = Get-PshGoal6CandidateManifest -RunName 'run-2' -CandidateRoot ([string]$secondRun.candidateRoot) -CandidateReport $secondRun.candidateReport -PackageVersion $Version
     Write-PshGoal6Json -Path (Join-Path $outputRootPath 'build-2.manifest.json') -InputObject $manifestTwo
     Assert-PshGoal6Condition (-not [IO.File]::Exists($sharedCandidateWorkingRoot) -and -not [IO.Directory]::Exists($sharedCandidateWorkingRoot)) "Shared candidate working root retained state after the second build: $sharedCandidateWorkingRoot"

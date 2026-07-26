@@ -263,6 +263,7 @@ $repositoryRootPath = [IO.Path]::GetFullPath($RepositoryRoot)
 $lockPath = Join-Path $repositoryRootPath 'tools/native-tools.lock.json'
 $generatorPath = Join-Path $repositoryRootPath 'scripts/Generate-SupplyChainArtifacts.ps1'
 $interactiveLockPath = Join-Path $repositoryRootPath 'src/Psh/Dependencies/interactive.lock.json'
+$catalogBuilderLockPath = Join-Path $repositoryRootPath 'src/catalog-builder/arcade.lock.json'
 $workflowPath = Join-Path $repositoryRootPath '.github/workflows/goal4.yml'
 $workflowText = Get-PshGoal4StrictText -Path $workflowPath
 Assert-PshGoal4 ([regex]::Matches($workflowText, [regex]::Escape('-Architecture all')).Count -eq 2) 'Goal 4 workflow does not verify all native architectures in both Windows jobs.'
@@ -361,13 +362,23 @@ $sbomText = Get-PshGoal4StrictText -Path $sbomPath
 try { $sbom = $sbomText | ConvertFrom-Json -ErrorAction Stop }
 catch { throw 'Goal 4 acceptance failed: sbom.spdx.json is not valid JSON.' }
 Assert-PshGoal4 ([string]$sbom.spdxVersion -ceq 'SPDX-2.3') 'SBOM has the wrong SPDX version.'
-Assert-PshGoal4 (@($sbom.creationInfo.creators).Count -eq 1 -and [string]$sbom.creationInfo.creators[0] -ceq 'Tool: psh-supply-chain-generator/2') 'SBOM has the wrong generator identity.'
+Assert-PshGoal4 (@($sbom.creationInfo.creators).Count -eq 1 -and [string]$sbom.creationInfo.creators[0] -ceq 'Tool: psh-supply-chain-generator/3') 'SBOM has the wrong generator identity.'
 $psPackage = @($sbom.packages | Where-Object { [string]$_.name -ceq 'PSReadLine' })[0]
 Assert-PshGoal4 ($null -ne $psPackage) 'SBOM is missing the PSReadLine package.'
 $psSbomFile = @($sbom.files | Where-Object { [string]$_.fileName -ceq [string]$psLicense.vendoredPath })[0]
 Assert-PshGoal4 ($null -ne $psSbomFile) 'SBOM is missing the PSReadLine vendored license file.'
 Assert-PshGoal4 ([string]$psSbomFile.checksums[0].checksumValue -ceq ([string]$psLicense.sha256).ToLowerInvariant()) 'SBOM uses the wrong PSReadLine license checksum.'
 Assert-PshGoal4PackageContents -Package $psPackage -ExpectedFileNames $psExpectedFileNames.ToArray() -Sbom $sbom -Root $repositoryRootPath
+$catalogBuilderLock = (Get-PshGoal4StrictText -Path $catalogBuilderLockPath) | ConvertFrom-Json -ErrorAction Stop
+$catalogBuilderDependency = Get-PshGoal4Property $catalogBuilderLock 'dependency'
+$catalogBuilderPackage = @($sbom.packages | Where-Object { [string]$_.name -ceq [string](Get-PshGoal4Property $catalogBuilderDependency 'name') })[0]
+Assert-PshGoal4 ($null -ne $catalogBuilderPackage -and [string]$catalogBuilderPackage.licenseDeclared -ceq 'MIT') 'SBOM is missing the MIT-licensed Arcade catalog source package.'
+$catalogBuilderExpectedFiles = New-Object 'System.Collections.Generic.List[string]'
+[void]$catalogBuilderExpectedFiles.Add([string](Get-PshGoal4Property (Get-PshGoal4Property $catalogBuilderDependency 'license') 'retainedPath'))
+foreach ($catalogBuilderFile in (Get-PshGoal4Array -InputObject $catalogBuilderDependency -Name 'files')) {
+    [void]$catalogBuilderExpectedFiles.Add([string](Get-PshGoal4Property $catalogBuilderFile 'vendoredPath'))
+}
+Assert-PshGoal4PackageContents -Package $catalogBuilderPackage -ExpectedFileNames $catalogBuilderExpectedFiles.ToArray() -Sbom $sbom -Root $repositoryRootPath
 foreach ($tool in $tools) {
     $name = [string](Get-PshGoal4Property $tool 'name')
     $package = @($sbom.packages | Where-Object { [string]$_.name -ceq $name })[0]

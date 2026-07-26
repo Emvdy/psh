@@ -6,7 +6,8 @@
 [CmdletBinding()]
 param(
     [string] $RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
-    [AllowNull()][string] $ReportRoot
+    [AllowNull()][string] $ReportRoot,
+    [AllowNull()][string] $CatalogBuilderPath
 )
 
 Set-StrictMode -Version 2.0
@@ -128,20 +129,51 @@ function Copy-PshGoal6CandidateTestRoot {
 
 function Invoke-PshGoal6CandidateTestCatalogCreation {
     param(
-        [Parameter(Mandatory = $true)][object] $CatalogCommand,
+        [Parameter(Mandatory = $true)][string] $CatalogHostPath,
+        [Parameter(Mandatory = $true)][string] $CatalogBuilderPath,
         [Parameter(Mandatory = $true)][object[]] $Members,
         [Parameter(Mandatory = $true)][string] $ContentRoot,
         [Parameter(Mandatory = $true)][string] $CatalogPath
     )
 
     [void](Initialize-PshGoal6CandidateTestDirectory -Path $ContentRoot)
+    $catalogArguments = New-Object System.Collections.Generic.List[string]
+    $catalogArguments.Add($CatalogBuilderPath)
+    $catalogArguments.Add('--output')
+    $catalogArguments.Add($CatalogPath)
     foreach ($member in $Members) {
         $name = [string]$member.Name
         $source = [IO.Path]::GetFullPath([string]$member.SourcePath)
         Assert-PshGoal6CandidateTest ([IO.Path]::GetFileName($name) -ceq $name -and [IO.File]::Exists($source)) "Catalog test member is unsafe or missing: $name"
-        [IO.File]::Copy($source, (Join-Path $ContentRoot $name), $false)
+        $stagedSource = Join-Path $ContentRoot $name
+        [IO.File]::Copy($source, $stagedSource, $false)
+        $catalogArguments.Add('--member')
+        $catalogArguments.Add($name)
+        $catalogArguments.Add($stagedSource)
     }
-    [void](& $CatalogCommand -Path $ContentRoot -CatalogFilePath $CatalogPath -CatalogVersion 2.0 -ErrorAction Stop)
+    [string[]]$catalogArgumentArray = $catalogArguments.ToArray()
+    $catalogOutput = @()
+    $catalogExitCode = 1
+    $catalogInvocationError = $null
+    $oldErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $catalogOutput = @(& $CatalogHostPath @catalogArgumentArray 2>&1)
+        $catalogExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    }
+    catch { $catalogInvocationError = $_ }
+    finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+        $global:LASTEXITCODE = 0
+    }
+    if ($null -ne $catalogInvocationError) {
+        $cleanupError = $null
+        try { Invoke-PshGoal6CandidateTestTreeCleanup -Path $ContentRoot }
+        catch { $cleanupError = $_ }
+        $cleanupDiagnostic = if ($null -eq $cleanupError) { '' } else { " Staging cleanup also failed: $($cleanupError.Exception.Message)" }
+        Assert-PshGoal6CandidateTest $false ("Unable to launch the catalog test builder: {0}{1}" -f $catalogInvocationError.Exception.Message, $cleanupDiagnostic)
+    }
+    Assert-PshGoal6CandidateTest ($catalogExitCode -eq 0) ("Catalog test builder failed with code {0}: {1}" -f $catalogExitCode, (@($catalogOutput | ForEach-Object { [string]$_ }) -join ' '))
     Assert-PshGoal6CandidateTest ([IO.File]::Exists($CatalogPath) -and ([IO.FileInfo]$CatalogPath).Length -gt 0) "Catalog test output is missing or empty: $CatalogPath"
     return $CatalogPath
 }
@@ -437,6 +469,23 @@ $driverParameters = @{
     RepositoryRoot = $RepositoryRoot
     WorkingRoot = $workingRoot
 }
+if (-not [string]::IsNullOrWhiteSpace($CatalogBuilderPath)) { $driverParameters['CatalogBuilderPath'] = $CatalogBuilderPath }
+
+$missingHostContentRoot = Join-Path $ReportRoot 'missing-catalog-host-input'
+$missingHostCatalogPath = Join-Path $ReportRoot 'missing-catalog-host.cat'
+$missingHostParameters = @{
+    CatalogHostPath = Join-Path $ReportRoot 'missing-catalog-host.exe'
+    CatalogBuilderPath = Join-Path $ReportRoot 'missing-catalog-builder.dll'
+    Members = @([pscustomobject]@{ Name = 'RELEASE_NOTES.md'; SourcePath = $releaseNotesPath })
+    ContentRoot = $missingHostContentRoot
+    CatalogPath = $missingHostCatalogPath
+}
+$missingHostFailure = $null
+try { [void](Invoke-PshGoal6CandidateTestCatalogCreation @missingHostParameters) }
+catch { $missingHostFailure = $_ }
+Assert-PshGoal6CandidateTest ($null -ne $missingHostFailure -and [string]$missingHostFailure.Exception.Message -match 'Unable to launch the catalog test builder') 'Missing catalog host did not produce the normalized launch failure.'
+Assert-PshGoal6CandidateTest (-not [IO.File]::Exists($missingHostCatalogPath) -and -not [IO.Directory]::Exists($missingHostCatalogPath) -and
+    -not [IO.File]::Exists($missingHostContentRoot) -and -not [IO.Directory]::Exists($missingHostContentRoot)) 'Missing catalog host retained CAT or staging output.'
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     Assert-PshGoal6CandidateFailure -Label 'non-Windows candidate creation' -ExitCode 4 -ErrorId 'PshGoal6CandidateCatalogUnavailable' -Action {
@@ -462,9 +511,28 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     return
 }
 
-$catalogCommand = Get-Command -Name New-FileCatalog -CommandType Cmdlet -ErrorAction Stop
+$originalPath = [Environment]::GetEnvironmentVariable('PATH', 'Process')
+try {
+    [Environment]::SetEnvironmentVariable('PATH', '', 'Process')
+    Assert-PshGoal6CandidateFailure -Label 'missing dotnet candidate creation' -ExitCode 4 -ErrorId 'PshGoal6CandidateCatalogUnavailable' -Action {
+        & $candidateScript @driverParameters
+    }
+}
+finally {
+    [Environment]::SetEnvironmentVariable('PATH', $originalPath, 'Process')
+}
+Assert-PshGoal6CandidateTest (-not [IO.File]::Exists($candidateRoot) -and -not [IO.Directory]::Exists($candidateRoot) -and
+    -not [IO.File]::Exists($candidateReportPath) -and -not [IO.Directory]::Exists($candidateReportPath)) 'Missing-dotnet boundary created candidate output.'
+
+$catalogHostCommand = @(Get-Command -Name dotnet -CommandType Application -ErrorAction Stop)[0]
 $catalogTestCommand = Get-Command -Name Test-FileCatalog -CommandType Cmdlet -ErrorAction Stop
-Assert-PshGoal6CandidateTest ($null -ne $catalogCommand -and $null -ne $catalogTestCommand) 'Windows catalog commands are unavailable.'
+if ([string]::IsNullOrWhiteSpace($CatalogBuilderPath)) {
+    $CatalogBuilderPath = Join-Path $RepositoryRoot 'src/catalog-builder/bin/Release/net10.0/Psh.CatalogBuilder.dll'
+    $driverParameters['CatalogBuilderPath'] = $CatalogBuilderPath
+}
+$CatalogBuilderPath = [IO.Path]::GetFullPath($CatalogBuilderPath)
+Assert-PshGoal6CandidateTest ($null -ne $catalogHostCommand -and $null -ne $catalogTestCommand -and [IO.File]::Exists($CatalogBuilderPath) -and ([IO.FileInfo]$CatalogBuilderPath).Length -gt 0) 'Windows catalog builder or Test-FileCatalog is unavailable.'
+$catalogHostPath = [string]$catalogHostCommand.Source
 $driverResult = @(& $candidateScript @driverParameters)[-1]
 Assert-PshGoal6CandidateTest ([int]$driverResult.code -eq 0 -and [string]$driverResult.phase -ceq 'candidate-verified') 'Candidate driver returned an unexpected phase or code.'
 Assert-PshGoal6CandidateTest ([bool]$driverResult.catalogMembershipVerified -and [int]$driverResult.assetCount -eq 13 -and [int]$driverResult.packageCount -eq 3) 'Candidate driver did not enforce the exact catalog/asset/package contract.'
@@ -496,7 +564,7 @@ $wrongReleaseRoot = Join-Path $ReportRoot 'negative-release-catalog'
 Copy-PshGoal6CandidateTestRoot -Source $candidateRoot -Destination $wrongReleaseRoot
 [IO.File]::Delete((Join-Path $wrongReleaseRoot "psh-release-$version.cat"))
 $wrongReleaseCatalog = Join-Path $ReportRoot 'wrong-release.cat'
-[void](Invoke-PshGoal6CandidateTestCatalogCreation -CatalogCommand $catalogCommand -Members @(
+[void](Invoke-PshGoal6CandidateTestCatalogCreation -CatalogHostPath $catalogHostPath -CatalogBuilderPath $CatalogBuilderPath -Members @(
         [pscustomobject]@{ Name = "psh-release-$version.json"; SourcePath = (Join-Path $wrongReleaseRoot "psh-release-$version.json") }
     ) -ContentRoot (Join-Path $ReportRoot 'wrong-release-input') -CatalogPath $wrongReleaseCatalog)
 Assert-PshGoal6CandidateFailure -Label 'release index finalize catalog membership mismatch' -ExitCode 5 -ErrorId 'PshReleaseCatalogMembership' -Action {
@@ -522,7 +590,7 @@ $x64CatalogBytes = Get-PshGoal6CandidateZipEntryContent -Path (Join-Path $wrongP
 Invoke-PshGoal6CandidateZipEntryRewrite -Path (Join-Path $wrongPackageRoot $coreZipName) -EntryName 'package.manifest.cat' -Bytes $x64CatalogBytes
 Write-PshGoal6CandidateMutationState -Root $wrongPackageRoot -Version $version -AssetName $coreZipName
 $replacementReleaseCatalog = Join-Path $ReportRoot 'replacement-release.cat'
-[void](Invoke-PshGoal6CandidateTestCatalogCreation -CatalogCommand $catalogCommand -Members @(
+[void](Invoke-PshGoal6CandidateTestCatalogCreation -CatalogHostPath $catalogHostPath -CatalogBuilderPath $CatalogBuilderPath -Members @(
         [pscustomobject]@{ Name = "psh-release-$version.json"; SourcePath = (Join-Path $wrongPackageRoot "psh-release-$version.json") },
         [pscustomobject]@{ Name = 'SHA256SUMS'; SourcePath = (Join-Path $wrongPackageRoot 'SHA256SUMS') }
     ) -ContentRoot (Join-Path $ReportRoot 'replacement-release-input') -CatalogPath $replacementReleaseCatalog)

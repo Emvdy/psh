@@ -69,12 +69,14 @@ catch {
 $generatorPath = Join-Path $repositoryRootPath 'scripts/Generate-SupplyChainArtifacts.ps1'
 $interactiveCheckerPath = Join-Path $repositoryRootPath 'scripts/Test-InteractiveDependencies.ps1'
 $nativeCheckerPath = Join-Path $repositoryRootPath 'scripts/Test-NativeTools.ps1'
+$catalogBuilderCheckerPath = Join-Path $repositoryRootPath 'scripts/Test-CatalogBuilderSource.ps1'
 $regeneratedNotices = Join-Path $regeneratedRoot 'THIRD_PARTY_NOTICES.md'
 $regeneratedSbom = Join-Path $regeneratedRoot 'sbom.spdx.json'
 $steps.Add((Invoke-PshGoal6SupplyChainStep -Name 'regenerate-release-notices-and-sbom' -ScriptPath $generatorPath -Parameters @{ RepositoryRoot = $repositoryRootPath; NoticesPath = $regeneratedNotices; SbomPath = $regeneratedSbom } -LogPath (Join-Path $reportRootPath 'supply-chain-regenerate.log')))
 $steps.Add((Invoke-PshGoal6SupplyChainStep -Name 'check-release-notices-and-sbom' -ScriptPath $generatorPath -Parameters @{ RepositoryRoot = $repositoryRootPath; Check = $true } -LogPath (Join-Path $reportRootPath 'supply-chain-check.log')))
 $steps.Add((Invoke-PshGoal6SupplyChainStep -Name 'check-interactive-dependencies' -ScriptPath $interactiveCheckerPath -Parameters @{ RepositoryRoot = $repositoryRootPath } -LogPath (Join-Path $reportRootPath 'interactive-dependencies.log')))
 $steps.Add((Invoke-PshGoal6SupplyChainStep -Name 'check-native-tools-and-licenses' -ScriptPath $nativeCheckerPath -Parameters @{ RepositoryRoot = $repositoryRootPath; Architecture = 'all' } -LogPath (Join-Path $reportRootPath 'native-tools.log')))
+$steps.Add((Invoke-PshGoal6SupplyChainStep -Name 'check-catalog-builder-source-and-license' -ScriptPath $catalogBuilderCheckerPath -Parameters @{ RepositoryRoot = $repositoryRootPath } -LogPath (Join-Path $reportRootPath 'catalog-builder-source.log')))
 
 $releaseArtifactError = $null
 $releaseArtifactDetails = $null
@@ -92,7 +94,9 @@ try {
     Assert-PshGoal6Condition ($checkedSbomSha256 -ceq $regeneratedSbomSha256) 'Regenerated SPDX SBOM differs from the checked-in file.'
     $sbom = (Get-PshGoal6StrictText -Path $checkedSbom) | ConvertFrom-Json -ErrorAction Stop
     Assert-PshGoal6Condition ([string]$sbom.spdxVersion -ceq 'SPDX-2.3') 'Release SBOM is not SPDX 2.3.'
-    Assert-PshGoal6Condition (@($sbom.packages).Count -eq 5) 'Release SBOM must describe PSReadLine plus four native tools.'
+    Assert-PshGoal6Condition (@($sbom.packages).Count -eq 6) 'Release SBOM must describe PSReadLine, the Arcade catalog source, and four native tools.'
+    $catalogPackages = @($sbom.packages | Where-Object { [string]$_.name -ceq 'dotnet/arcade managed FileCatalog source' })
+    Assert-PshGoal6Condition ($catalogPackages.Count -eq 1 -and [string]$catalogPackages[0].licenseDeclared -ceq 'MIT') 'Release SBOM does not contain the exact MIT-licensed Arcade catalog source package.'
     $releaseArtifactDetails = [pscustomobject][ordered]@{
         noticesSha256 = $checkedNoticesSha256
         regeneratedNoticesSha256 = $regeneratedNoticesSha256
@@ -113,10 +117,11 @@ $summary = [pscustomobject][ordered]@{
     releaseArtifacts = $releaseArtifactDetails
     ciDependencies = $ciDependencies
     ciDependencySbomPolicy = 'CI-only tools are retained and verified separately; they are not shipped and therefore are excluded from the release SBOM.'
+    catalogBuilderSbomPolicy = 'The deterministic catalog builder is build-time vendored source; its modified Arcade files and retained MIT license are included in the release SBOM for source provenance even though the CLI binary is not shipped.'
     steps = $steps.ToArray()
     failedStepCount = $failedSteps.Count
 }
 $summaryPath = Join-Path $reportRootPath 'dependency-license-sbom-summary.json'
 Write-PshGoal6Json -Path $summaryPath -InputObject $summary
 if ($failedSteps.Count -gt 0) { throw "Dependency/license/SBOM gate failed in $($failedSteps.Count) step(s). See $summaryPath" }
-Write-Output ('Dependency/license/SBOM gate passed: release artifacts regenerated and checked; {0} CI-only dependencies retain verified licenses and provenance.' -f $ciDependencies.Count)
+Write-Output ('Dependency/license/SBOM gate passed: release artifacts regenerated with the Arcade catalog source; {0} CI-only dependencies retain verified licenses and provenance.' -f $ciDependencies.Count)

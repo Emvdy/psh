@@ -257,7 +257,8 @@ param(
     [string]$SourceCommit,
     [string]$ReleaseNotesPath,
     [string]$ReleaseNotesZhCnPath,
-    [string]$RepositoryRoot
+    [string]$RepositoryRoot,
+    [string]$CatalogBuilderPath
 )
 $exception = New-Object Exception('workflow primary smoke')
 $exception.Data['PshExitCode'] = 5
@@ -426,10 +427,15 @@ Assert-PshGoal6WorkflowMatch $matrixJob '(?ms)^          - name: AMD64 PowerShel
 Assert-PshGoal6WorkflowMatch $matrixJob '(?ms)^          - name: ARM64 Windows PowerShell 5\.1\s*\n            runtime_id: arm64-winps51\s*\n            runner: windows-11-arm\s*\n            shell: powershell\s*\n            architecture: ARM64\s*\n            expected_edition: Desktop\s*\n            expected_major: 5\s*\n            expected_minor: 1\s*$' 'ARM64 Windows PowerShell 5.1 matrix entry' 1 1
 Assert-PshGoal6WorkflowMatch $matrixJob '(?ms)^          - name: ARM64 PowerShell 7\s*\n            runtime_id: arm64-pwsh7\s*\n            runner: windows-11-arm\s*\n            shell: pwsh\s*\n            architecture: ARM64\s*\n            expected_edition: Core\s*\n            expected_major: 7\s*\n            expected_minor: 0\s*$' 'ARM64 PowerShell 7 matrix entry' 1 1
 Assert-PshGoal6WorkflowNoMatch $matrixJob '(?i)optional|experimental|allow[_-]?failure|continue-on-error' 'Every ARM64 and AMD64 runtime entry must be mandatory.'
-Assert-PshGoal6WorkflowMatch $matrixJob "if: \$\{\{ matrix\.expected_edition == 'Desktop' \}\}" 'Windows PowerShell matrix dispatch' 1 1
-Assert-PshGoal6WorkflowMatch $matrixJob "if: \$\{\{ matrix\.expected_edition == 'Core' \}\}" 'PowerShell 7 matrix dispatch' 1 1
+Assert-PshGoal6WorkflowMatch $matrixJob "if: \$\{\{ matrix\.expected_edition == 'Desktop' \}\}" 'Windows PowerShell matrix dispatch' 2 2
+Assert-PshGoal6WorkflowMatch $matrixJob "if: \$\{\{ matrix\.expected_edition == 'Core' \}\}" 'PowerShell 7 matrix dispatch' 2 2
 Assert-PshGoal6WorkflowMatch $matrixJob '(?ms)Run exactly 27 Pester 5\.9\.0 cases in Windows PowerShell 5\.1.*?shell: powershell' 'native Windows PowerShell test step' 1 1
 Assert-PshGoal6WorkflowMatch $matrixJob '(?ms)Run exactly 27 Pester 5\.9\.0 cases in PowerShell 7.*?shell: pwsh' 'native PowerShell 7 test step' 1 1
+Assert-PshGoal6WorkflowMatch $matrixJob '(?ms)Validate deterministic Windows V2 catalogs in Windows PowerShell 5\.1.*?shell: powershell' 'Windows PowerShell catalog test step' 1 1
+Assert-PshGoal6WorkflowMatch $matrixJob '(?ms)Validate deterministic Windows V2 catalogs in PowerShell 7.*?shell: pwsh' 'PowerShell 7 catalog test step' 1 1
+Assert-PshGoal6WorkflowMatch $matrixJob 'src/catalog-builder/Psh\.CatalogBuilder\.csproj' 'matrix catalog builder project' 1 1
+Assert-PshGoal6WorkflowMatch $matrixJob 'tests/Goal6\.CatalogBuilder\.ps1' 'matrix deterministic catalog gate' 2 2
+Assert-PshGoal6WorkflowMatch $matrixJob '(?m)^          dotnet-version: 10\.0\.100\s*$' 'matrix pinned .NET 10 SDK' 1 1
 
 $attestNeeds = @([regex]::Matches($attestJob, '(?m)^      - (?<job>[a-z][a-z0-9-]+)\s*$') | ForEach-Object { [string]$_.Groups['job'].Value })
 Assert-PshGoal6Workflow (($attestNeeds -join '|') -ceq 'gnu-goldens|quality|windows-matrix|candidate') 'Attestation must depend on every pre-provenance gate.'
@@ -485,6 +491,8 @@ foreach ($runtimeId in @('amd64-winps51', 'amd64-pwsh7', 'arm64-winps51', 'arm64
 Assert-PshGoal6WorkflowMatch $candidateJob '(?m)^    runs-on: windows-2022\s*$' 'canonical candidate AMD64 runner' 1 1
 Assert-PshGoal6WorkflowMatch $candidateJob 'PSH_SOURCE_COMMIT: \$\{\{ github\.sha \}\}' 'candidate source commit binding' 1 1
 Assert-PshGoal6WorkflowMatch $candidateJob 'scripts/Build-PshBootstrapper\.ps1' 'real bootstrapper build' 1 1
+Assert-PshGoal6WorkflowMatch $candidateJob 'src/catalog-builder/Psh\.CatalogBuilder\.csproj' 'candidate catalog builder project' 1 1
+Assert-PshGoal6WorkflowMatch $candidateJob '(?m)^          dotnet-version: 10\.0\.100\s*$' 'candidate pinned .NET 10 SDK' 1 1
 Assert-PshGoal6WorkflowMatch $candidateJob 'scripts/goal6/New-Goal6Candidate\.ps1' 'canonical candidate driver' 1 1
 Assert-PshGoal6WorkflowMatch $candidateJob 'Join-Path \$env:GITHUB_WORKSPACE ''RELEASE_NOTES\.md''' 'versioned English release notes input' 2 2
 Assert-PshGoal6WorkflowMatch $candidateJob 'Join-Path \$env:GITHUB_WORKSPACE ''RELEASE_NOTES\.zh-CN\.md''' 'versioned Simplified Chinese release notes input' 2 2
@@ -492,6 +500,7 @@ Assert-PshGoal6WorkflowNoMatch $candidateJob '(?i)englishNotes|chineseNotes|goal
 Assert-PshGoal6WorkflowMatch $candidateJob 'tests/Goal6\.CandidateArtifacts\.ps1' 'candidate catalog contract regression' 1 1
 Assert-PshGoal6WorkflowMatch $candidateJob 'scripts/goal6/Invoke-Goal6DefenderScan\.ps1' 'Defender or SHA inventory gate' 1 1
 Assert-PshGoal6WorkflowMatch $candidateJob 'scripts/goal6/Test-Goal6Reproducibility\.ps1' 'two-build reproducibility gate' 1 1
+Assert-PshGoal6WorkflowMatch $candidateJob '-CatalogBuilderPath' 'deterministic catalog builder path propagation' 3 3
 Assert-PshGoal6WorkflowMatch $candidateJob 'candidate-verified' 'candidate verified phase assertion' 2 -1
 Assert-PshGoal6WorkflowMatch $candidateJob 'exact-13-public-assets-before-provenance-attestation' 'exact pre-provenance asset contract' 1 -1
 Assert-PshGoal6WorkflowMatch $candidateJob 'catalogMembershipVerified' 'candidate catalog membership assertion' 2 -1
@@ -586,6 +595,7 @@ foreach ($retainedPath in @(
         'docs/compatibility.md',
         'generated/commands.json',
         'goal6-pester-summary.json',
+        'catalog-builder-summary.json',
         'workflow-contract-summary.json',
         'psscriptanalyzer-summary.json',
         'dependency-license-sbom-summary.json',
@@ -599,6 +609,13 @@ foreach ($retainedPath in @(
 }
 Assert-PshGoal6WorkflowMatch $evidenceJob 'goal6-complete-evidence' 'complete evidence artifact' 1 1
 Assert-PshGoal6WorkflowMatch $evidenceJob 'workflowContractSummary\.independentFromPester' 'retained standalone workflow contract validation' 1 1
+Assert-PshGoal6WorkflowMatch $evidenceJob 'catalogSummary\.deterministicAcrossAbsoluteRoots' 'retained deterministic catalog validation' 1 1
+Assert-PshGoal6WorkflowMatch $evidenceJob "catalogSummary\.hashAlgorithm -cne 'SHA256'" 'retained catalog SHA256 validation' 1 1
+Assert-PshGoal6WorkflowMatch $evidenceJob 'catalogRuntimeContracts = \[ordered\]@\{' 'retained catalog runtime identity contracts' 1 1
+Assert-PshGoal6WorkflowMatch $evidenceJob 'catalogSummary\.runtime\.edition -cne' 'retained catalog runtime edition validation' 1 1
+Assert-PshGoal6WorkflowMatch $evidenceJob 'catalogSummary\.runtime\.architecture -cne' 'retained catalog runtime architecture validation' 1 1
+Assert-PshGoal6WorkflowMatch $evidenceJob 'runtimeContract\.edition -ceq ''Desktop'' -and \$runtimeVersion\.Minor -ne 1' 'retained exact Windows PowerShell 5.1 validation' 1 1
+Assert-PshGoal6WorkflowMatch $evidenceJob 'catalogHashes \| Sort-Object -Unique' 'retained cross-runtime catalog byte identity validation' 1 1
 Assert-PshGoal6WorkflowMatch $evidenceJob 'candidateContractSummary\.assetCount -ne 13' 'retained candidate contract asset-count validation' 1 1
 Assert-PshGoal6WorkflowMatch $evidenceJob 'candidateContractSummary\.catalogMembershipVerified' 'retained candidate contract catalog validation' 1 1
 Assert-PshGoal6WorkflowMatch $evidenceJob "candidateContractSummary\.provenanceAttestation -cne 'not-created-by-this-gate'" 'retained candidate contract external-provenance validation' 1 1
@@ -607,6 +624,7 @@ $allowedActions = @{
     'actions/checkout' = 'df4cb1c069e1874edd31b4311f1884172cec0e10'
     'actions/download-artifact' = 'd3f86a106a0bac45b974a628896c90dbdf5c8093'
     'actions/upload-artifact' = 'ea165f8d65b6e75b540449e92b4886f43607fa02'
+    'actions/setup-dotnet' = '26b0ec14cb23fa6904739307f278c14f94c95bf1'
     'actions/attest-build-provenance' = '0f67c3f4856b2e3261c31976d6725780e5e4c373'
 }
 $actionBlocks = @(Get-PshGoal6ActionBlock -Text $workflowText)
@@ -624,8 +642,12 @@ foreach ($actionBlock in $actionBlocks) {
     if ($actionName -ceq 'actions/upload-artifact') {
         Assert-PshGoal6Workflow ([string]$actionBlock.Text -match '(?m)^          if-no-files-found: error\s*$') "Artifact upload at line $($actionBlock.Line) does not fail on missing files."
     }
+    if ($actionName -ceq 'actions/setup-dotnet') {
+        Assert-PshGoal6Workflow ([string]$actionBlock.Text -match '(?m)^          dotnet-version: 10\.0\.100\s*$') "setup-dotnet at line $($actionBlock.Line) does not install exact SDK 10.0.100."
+    }
 }
 Assert-PshGoal6Workflow (@($actionBlocks | Where-Object { [string]$_.Uses -like 'actions/checkout@*' }).Count -eq 5) 'Workflow must contain exactly five full-history checkout action definitions.'
+Assert-PshGoal6Workflow (@($actionBlocks | Where-Object { [string]$_.Uses -like 'actions/setup-dotnet@*' }).Count -eq 2) 'Workflow must contain exactly two pinned setup-dotnet action definitions.'
 Assert-PshGoal6Workflow (@($actionBlocks | Where-Object { [string]$_.Uses -like 'actions/attest-build-provenance@*' }).Count -eq 1) 'Workflow must contain exactly one provenance action.'
 
 Assert-PshGoal6WorkflowNoMatch $workflowText '(?im)^\s*continue-on-error\s*:' 'Workflow must not continue after any failed gate.'

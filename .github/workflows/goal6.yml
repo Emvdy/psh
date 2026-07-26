@@ -16,6 +16,9 @@ concurrency:
 
 env:
   PSH_GOAL6_VERSION: 0.1.0
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: 1
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
 
 jobs:
   gnu-goldens:
@@ -257,6 +260,24 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install pinned .NET 10 SDK for catalog validation
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.100
+
+      - name: Build deterministic catalog builder for this runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projectPath = Join-Path $env:GITHUB_WORKSPACE 'src/catalog-builder/Psh.CatalogBuilder.csproj'
+          $outputRoot = Join-Path $env:RUNNER_TEMP ('goal6-catalog-builder-' + $env:PSH_RUNTIME_ID)
+          & dotnet build $projectPath --configuration Release --output $outputRoot --nologo
+          if ([int]$LASTEXITCODE -ne 0) { throw 'The deterministic catalog builder failed to compile.' }
+          $builderPath = Join-Path $outputRoot 'Psh.CatalogBuilder.dll'
+          if (-not [IO.File]::Exists($builderPath) -or (Get-Item -LiteralPath $builderPath).Length -le 0) {
+              throw 'The deterministic catalog builder output is missing or empty.'
+          }
+
       - name: Download GNU goldens
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -310,6 +331,26 @@ jobs:
               -GoldenRoot $env:PSH_GOLDEN_ROOT `
               -ReportRoot $reportRoot `
               -ExpectedArchitecture $env:PSH_EXPECTED_ARCHITECTURE
+
+      - name: Validate deterministic Windows V2 catalogs in Windows PowerShell 5.1
+        if: ${{ matrix.expected_edition == 'Desktop' }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'tests/Goal6.CatalogBuilder.ps1') `
+              -CatalogBuilderPath (Join-Path (Join-Path $env:RUNNER_TEMP ('goal6-catalog-builder-' + $env:PSH_RUNTIME_ID)) 'Psh.CatalogBuilder.dll') `
+              -RepositoryRoot $env:GITHUB_WORKSPACE `
+              -ReportRoot (Join-Path $env:RUNNER_TEMP ('goal6-runtime-' + $env:PSH_RUNTIME_ID))
+
+      - name: Validate deterministic Windows V2 catalogs in PowerShell 7
+        if: ${{ matrix.expected_edition == 'Core' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'tests/Goal6.CatalogBuilder.ps1') `
+              -CatalogBuilderPath (Join-Path (Join-Path $env:RUNNER_TEMP ('goal6-catalog-builder-' + $env:PSH_RUNTIME_ID)) 'Psh.CatalogBuilder.dll') `
+              -RepositoryRoot $env:GITHUB_WORKSPACE `
+              -ReportRoot (Join-Path $env:RUNNER_TEMP ('goal6-runtime-' + $env:PSH_RUNTIME_ID))
 
       - name: Validate exact runtime summary
         shell: powershell
@@ -373,6 +414,24 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install pinned .NET 10 SDK for candidate catalogs
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: 10.0.100
+
+      - name: Build deterministic candidate catalog builder
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $projectPath = Join-Path $env:GITHUB_WORKSPACE 'src/catalog-builder/Psh.CatalogBuilder.csproj'
+          $outputRoot = Join-Path $env:RUNNER_TEMP 'goal6-catalog-builder'
+          & dotnet build $projectPath --configuration Release --output $outputRoot --nologo
+          if ([int]$LASTEXITCODE -ne 0) { throw 'The deterministic candidate catalog builder failed to compile.' }
+          $builderPath = Join-Path $outputRoot 'Psh.CatalogBuilder.dll'
+          if (-not [IO.File]::Exists($builderPath) -or (Get-Item -LiteralPath $builderPath).Length -le 0) {
+              throw 'The deterministic candidate catalog builder output is missing or empty.'
+          }
+
       - name: Build real deterministic bootstrapper
         shell: powershell
         run: |
@@ -409,7 +468,8 @@ jobs:
                   -ReleaseNotesPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.md') `
                   -ReleaseNotesZhCnPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.zh-CN.md') `
                   -RepositoryRoot $env:GITHUB_WORKSPACE `
-                  -WorkingRoot $candidateWorkingRoot)
+                  -WorkingRoot $candidateWorkingRoot `
+                  -CatalogBuilderPath (Join-Path (Join-Path $env:RUNNER_TEMP 'goal6-catalog-builder') 'Psh.CatalogBuilder.dll'))
           $candidateResults = @($candidateOutput | Where-Object { $null -ne $_.PSObject.Properties['phase'] -and [string]$_.phase -ceq 'candidate-verified' })
           if ($candidateResults.Count -ne 1 -or [int]$candidateResults[0].code -ne 0 -or
               [int]$candidateResults[0].assetCount -ne 13 -or -not [bool]$candidateResults[0].catalogMembershipVerified) {
@@ -468,7 +528,8 @@ jobs:
           $contractRoot = Join-Path $env:RUNNER_TEMP 'goal6-candidate-contract'
           & (Join-Path $env:GITHUB_WORKSPACE 'tests/Goal6.CandidateArtifacts.ps1') `
               -RepositoryRoot $env:GITHUB_WORKSPACE `
-              -ReportRoot $contractRoot
+              -ReportRoot $contractRoot `
+              -CatalogBuilderPath (Join-Path (Join-Path $env:RUNNER_TEMP 'goal6-catalog-builder') 'Psh.CatalogBuilder.dll')
           $retainedRoot = Join-Path (Join-Path $env:RUNNER_TEMP 'goal6-candidate-reports') 'candidate-contract'
           [void][IO.Directory]::CreateDirectory($retainedRoot)
           foreach ($relativePath in @('Goal6.CandidateArtifacts.summary.json', 'candidate-report.json')) {
@@ -513,7 +574,8 @@ jobs:
                   -SourceCommit $env:PSH_SOURCE_COMMIT `
                   -ReleaseNotesPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.md') `
                   -ReleaseNotesZhCnPath (Join-Path $env:GITHUB_WORKSPACE 'RELEASE_NOTES.zh-CN.md') `
-                  -RepositoryRoot $env:GITHUB_WORKSPACE
+                  -RepositoryRoot $env:GITHUB_WORKSPACE `
+                  -CatalogBuilderPath (Join-Path (Join-Path $env:RUNNER_TEMP 'goal6-catalog-builder') 'Psh.CatalogBuilder.dll')
           }
           catch {
               $gateFailure = $_
@@ -799,9 +861,13 @@ jobs:
               'specification/docs/compatibility.md',
               'specification/generated/commands.json',
               'reports/runtime/amd64-winps51/goal6-pester-summary.json',
+              'reports/runtime/amd64-winps51/catalog-builder-summary.json',
               'reports/runtime/amd64-pwsh7/goal6-pester-summary.json',
+              'reports/runtime/amd64-pwsh7/catalog-builder-summary.json',
               'reports/runtime/arm64-winps51/goal6-pester-summary.json',
+              'reports/runtime/arm64-winps51/catalog-builder-summary.json',
               'reports/runtime/arm64-pwsh7/goal6-pester-summary.json',
+              'reports/runtime/arm64-pwsh7/catalog-builder-summary.json',
               'reports/quality/workflow-contract-summary.json',
               'reports/quality/psscriptanalyzer/psscriptanalyzer-summary.json',
               'reports/quality/supply-chain/dependency-license-sbom-summary.json',
@@ -822,6 +888,33 @@ jobs:
           $workflowContractSummary = Get-Content -LiteralPath (Join-Path $evidenceRoot 'reports/quality/workflow-contract-summary.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
           if ([string]$workflowContractSummary.status -cne 'passed' -or -not [bool]$workflowContractSummary.independentFromPester) {
               throw 'The retained workflow contract summary did not pass independently from Pester.'
+          }
+          $catalogRuntimeContracts = [ordered]@{
+              'amd64-winps51' = [pscustomobject]@{ edition = 'Desktop'; major = 5; minimumMinor = 1; architecture = 'X64' }
+              'amd64-pwsh7' = [pscustomobject]@{ edition = 'Core'; major = 7; minimumMinor = 0; architecture = 'X64' }
+              'arm64-winps51' = [pscustomobject]@{ edition = 'Desktop'; major = 5; minimumMinor = 1; architecture = 'Arm64' }
+              'arm64-pwsh7' = [pscustomobject]@{ edition = 'Core'; major = 7; minimumMinor = 0; architecture = 'Arm64' }
+          }
+          $catalogHashes = New-Object System.Collections.Generic.List[string]
+          foreach ($runtimeId in $catalogRuntimeContracts.Keys) {
+              $catalogSummaryPath = Join-Path $evidenceRoot ("reports/runtime/{0}/catalog-builder-summary.json" -f $runtimeId)
+              $catalogSummary = Get-Content -LiteralPath $catalogSummaryPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+              $runtimeContract = $catalogRuntimeContracts[$runtimeId]
+              $runtimeVersion = [version][string]$catalogSummary.runtime.version
+              if ([string]$catalogSummary.status -cne 'passed' -or -not [bool]$catalogSummary.deterministicAcrossAbsoluteRoots -or
+                  [string]$catalogSummary.hashAlgorithm -cne 'SHA256' -or
+                  [string]$catalogSummary.runtime.edition -cne [string]$runtimeContract.edition -or
+                  [string]$catalogSummary.runtime.architecture -cne [string]$runtimeContract.architecture -or
+                  $runtimeVersion.Major -ne [int]$runtimeContract.major -or
+                  ([string]$runtimeContract.edition -ceq 'Desktop' -and $runtimeVersion.Minor -ne 1) -or
+                  ([string]$runtimeContract.edition -ceq 'Core' -and $runtimeVersion.Minor -lt [int]$runtimeContract.minimumMinor) -or
+                  [string]$catalogSummary.catalogSha256 -notmatch '\A[0-9A-Fa-f]{64}\z') {
+                  throw "The retained catalog builder summary did not pass for $runtimeId."
+              }
+              $catalogHashes.Add(([string]$catalogSummary.catalogSha256).ToLowerInvariant())
+          }
+          if (@($catalogHashes | Sort-Object -Unique).Count -ne 1) {
+              throw 'The four retained runtime catalog summaries do not prove identical catalog bytes.'
           }
           $candidateContractSummary = Get-Content -LiteralPath (Join-Path $evidenceRoot 'reports/candidate/candidate-contract/Goal6.CandidateArtifacts.summary.json') -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
           if ([string]$candidateContractSummary.status -cne 'passed' -or [string]$candidateContractSummary.platform -cne 'windows' -or
