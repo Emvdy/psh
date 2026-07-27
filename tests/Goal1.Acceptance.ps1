@@ -604,8 +604,30 @@ $pathComparison = [StringComparison]::Ordinal
 if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
     $pathComparison = [StringComparison]::OrdinalIgnoreCase
 }
+$catalogBuilderOutputRoots = @(
+    (Join-Path $RepositoryRoot 'src/catalog-builder/bin'),
+    (Join-Path $RepositoryRoot 'src/catalog-builder/obj')
+)
+$catalogBuilderOutputPrefixes = @(
+    $catalogBuilderOutputRoots |
+        ForEach-Object {
+        [IO.Path]::GetFullPath($_).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+    }
+)
+$binarySourceFiles = @(
+    $sourceFiles | Where-Object {
+        $isCatalogBuilderOutput = $false
+        foreach ($outputPrefix in $catalogBuilderOutputPrefixes) {
+            if ($_.FullName.StartsWith($outputPrefix, $pathComparison)) {
+                $isCatalogBuilderOutput = $true
+                break
+            }
+        }
+        return -not $isCatalogBuilderOutput
+    }
+)
 $unexpectedBinaries = @(
-    $sourceFiles |
+    $binarySourceFiles |
         Where-Object {
             if ($_.Extension -in @('.exe', '.com', '.msi')) {
                 return $true
