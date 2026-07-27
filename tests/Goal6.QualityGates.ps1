@@ -336,6 +336,7 @@ try {
     Assert-PshGoal6Quality ($secretGateText -match [regex]::Escape('--log-opts=--all') -and $secretGateText -match '\bAssert-PshGoal6RemoteRefCoverage\b') 'The secret gate no longer explicitly scans all refs after remote parity validation.'
     Assert-PshGoal6Quality ($secretGateText -match '\bGITLEAKS_CONFIG\b' -and $secretGateText -match '\bGITLEAKS_CONFIG_TOML\b' -and $secretGateText -match [regex]::Escape('--gitleaks-ignore-path')) 'The secret gate no longer rejects inherited gitleaks configuration or fixes the ignore root.'
     Assert-PshGoal6Quality ($secretGateText -match 'ConvertFrom-Json -InputObject \$reportText' -and $secretGateText -match '\$parsedReport \| ForEach-Object') 'The secret gate no longer normalizes empty JSON arrays across Windows PowerShell and PowerShell 7.'
+    Assert-PshGoal6Quality ($secretGateText -match '\$ErrorActionPreference\s*=\s*''Continue''' -and $secretGateText -match '\$global:LASTEXITCODE = 0' -and $secretGateText -match '\blaunchError\b') 'The secret gate no longer isolates native gitleaks stderr, launch errors, or LASTEXITCODE state.'
 
     $secretScriptPath = Join-Path $repositoryRootPath 'scripts/goal6/Invoke-Goal6SecretScan.ps1'
     $zeroRuleConfigPath = Join-Path $testRoot 'zero-rule-gitleaks.toml'
@@ -425,6 +426,11 @@ function Assert-PshGoal6RemoteRefCoverage {
     $remoteTags = @($RemoteLines | Where-Object { $_ -match '\srefs/tags/' })
     $localBranches = @($LocalBranchLines | Where-Object { $_ -match '\srefs/remotes/origin/' -and $_ -notmatch '\srefs/remotes/origin/HEAD$' })
     if ($remoteBranches.Count -ne $localBranches.Count -or $remoteTags.Count -ne $LocalTagLines.Count) { throw 'fixture remote-ref parity failed' }
+    if ([Environment]::GetEnvironmentVariable('PSH_GOAL6_GITLEAKS_FIXTURE_MODE', [EnvironmentVariableTarget]::Process) -ceq 'launch-error') {
+        $executablePath = [Environment]::GetEnvironmentVariable('PSH_GOAL6_GITLEAKS_FIXTURE_EXECUTABLE', [EnvironmentVariableTarget]::Process)
+        if ([string]::IsNullOrWhiteSpace($executablePath)) { throw 'fixture launch-error executable path is missing' }
+        [IO.File]::Delete($executablePath)
+    }
     return [pscustomobject][ordered]@{
         remoteRefCount = $RemoteLines.Count
         branchCount = $remoteBranches.Count
@@ -442,6 +448,7 @@ function Assert-PshGoal6RemoteRefCoverage {
                 '@echo off',
                 'setlocal EnableExtensions DisableDelayedExpansion',
                 'if /I "%~1"=="version" (',
+                '  >&2 echo fixture gitleaks version progress',
                 '  echo gitleaks version 8.30.1',
                 '  exit /b 0',
                 ')',
@@ -453,6 +460,11 @@ function Assert-PshGoal6RemoteRefCoverage {
                 ':write_report',
                 'if "%~2"=="" goto missing_report_path',
                 '>"%~2" echo []',
+                '>&2 echo fixture gitleaks scan progress',
+                'if /I "%PSH_GOAL6_GITLEAKS_FIXTURE_MODE%"=="nonzero" (',
+                '  >&2 echo fixture gitleaks forced scanner error',
+                '  exit /b 2',
+                ')',
                 'exit /b 0',
                 ':missing_report_path',
                 '>&2 echo fixture gitleaks invocation omitted --report-path',
@@ -470,7 +482,11 @@ if ($arguments.Count -eq 1 -and $arguments[0] -ceq 'version') {
 $reportIndex = [Array]::IndexOf($arguments, '--report-path')
 if ($reportIndex -lt 0 -or $reportIndex + 1 -ge $arguments.Count) { throw 'fixture gitleaks invocation omitted --report-path' }
 [IO.File]::WriteAllText($arguments[$reportIndex + 1], "[]`n", (New-Object Text.UTF8Encoding($false)))
-$global:LASTEXITCODE = 0
+if ([Environment]::GetEnvironmentVariable('PSH_GOAL6_GITLEAKS_FIXTURE_MODE', [EnvironmentVariableTarget]::Process) -ceq 'nonzero') {
+    Write-Error 'fixture gitleaks forced scanner error' -ErrorAction Continue
+    $global:LASTEXITCODE = 2
+}
+else { $global:LASTEXITCODE = 0 }
 '@
     }
     Write-PshGoal6Text -Path $gitleaksStubPath -Text $gitleaksStubText
@@ -500,6 +516,12 @@ $global:LASTEXITCODE = 0
     }
 
     $secretFixtureScriptPath = Join-Path $secretFixtureRoot 'Invoke-Goal6SecretScan.ps1'
+    $gitleaksFixtureModeName = 'PSH_GOAL6_GITLEAKS_FIXTURE_MODE'
+    $gitleaksFixtureExecutableName = 'PSH_GOAL6_GITLEAKS_FIXTURE_EXECUTABLE'
+    $originalGitleaksFixtureMode = [Environment]::GetEnvironmentVariable($gitleaksFixtureModeName, [EnvironmentVariableTarget]::Process)
+    $originalGitleaksFixtureExecutable = [Environment]::GetEnvironmentVariable($gitleaksFixtureExecutableName, [EnvironmentVariableTarget]::Process)
+    Remove-Item -LiteralPath ("Env:$gitleaksFixtureModeName") -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath ("Env:$gitleaksFixtureExecutableName") -ErrorAction SilentlyContinue
     $secretFixtureOutput = @()
     $secretFixtureFailure = $null
     try {
@@ -539,6 +561,41 @@ $global:LASTEXITCODE = 0
     Assert-PshGoal6Quality ([string]$secretCaptureSummary.status -ceq 'passed' -and $null -eq $secretCaptureSummary.error) 'Secret scan cardinality regression did not produce a passing summary.'
     Assert-PshGoal6Quality ([int]$secretCaptureSummary.remoteRefCoverage.remoteRefCount -eq 2 -and [int]$secretCaptureSummary.remoteRefCoverage.branchCount -eq 2 -and [int]$secretCaptureSummary.remoteRefCoverage.tagCount -eq 0 -and [string]$secretCaptureSummary.remoteRefCoverage.parity -ceq 'exact') 'Secret scan did not preserve exact remote-ref coverage for multi-line branches and empty tags.'
     Assert-PshGoal6Quality ($secretCaptureScans.Count -eq 2 -and (@($secretCaptureScans | ForEach-Object { [string]$_.mode }) -join '|') -ceq 'git|dir' -and @($secretCaptureScans | Where-Object { [int]$_.exitCode -ne 0 -or [string]$_.status -cne 'passed' -or [int]$_.findingCount -ne 0 }).Count -eq 0) "Secret scan cardinality regression did not preserve both zero-finding native gitleaks scans. $secretFixtureDiagnosticText"
+    Assert-PshGoal6Quality ($ErrorActionPreference -ceq 'Stop' -and $secretFixtureExitCode -eq 0) 'Successful native gitleaks capture polluted PowerShell preference or LASTEXITCODE state.'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $windowsScanLogs = @($secretCaptureScans | ForEach-Object { Get-PshGoal6StrictText -Path (Join-Path $secretCaptureReportRoot ([string]$_.log)) })
+        Assert-PshGoal6Quality ($windowsScanLogs.Count -eq 2 -and @($windowsScanLogs | Where-Object { $_ -notmatch 'fixture gitleaks scan progress' }).Count -eq 0 -and [string]$secretCaptureSummary.scannerVersion -match 'fixture gitleaks version progress') 'Windows PowerShell did not preserve benign gitleaks stderr while accepting exit code 0.'
+    }
+
+    [Environment]::SetEnvironmentVariable($gitleaksFixtureModeName, 'nonzero', [EnvironmentVariableTarget]::Process)
+    $secretNonzeroReportRoot = Join-Path $secretCaptureRoot 'reports-nonzero'
+    $secretNonzeroFailure = $null
+    try { $null = & $secretFixtureScriptPath -DependencyRoot $secretDependencyRoot -ReportRoot $secretNonzeroReportRoot -RepositoryRoot $secretWorktreeRoot -LockPath (Join-Path $secretFixtureRoot 'fixture.lock.json') }
+    catch { $secretNonzeroFailure = [string]$_.Exception.Message }
+    $secretNonzeroExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    $secretNonzeroSummary = (Get-PshGoal6StrictText -Path (Join-Path $secretNonzeroReportRoot 'gitleaks-summary.json')) | ConvertFrom-Json -ErrorAction Stop
+    $secretNonzeroScans = @($secretNonzeroSummary.scans)
+    Assert-PshGoal6Quality ($secretNonzeroFailure -match 'detected secrets or scanner errors' -and [string]$secretNonzeroSummary.status -ceq 'failed' -and $null -eq $secretNonzeroSummary.error) 'Secret scan did not retain native nonzero exits as scanner failures.'
+    Assert-PshGoal6Quality ($secretNonzeroScans.Count -eq 2 -and @($secretNonzeroScans | Where-Object { [int]$_.exitCode -ne 2 -or [string]$_.status -cne 'scanner-error' -or [int]$_.findingCount -ne 0 }).Count -eq 0) 'Secret scan did not preserve native exit code 2 independently from an empty JSON report.'
+    Assert-PshGoal6Quality ($ErrorActionPreference -ceq 'Stop' -and $secretNonzeroExitCode -eq 0) 'Failed native gitleaks scans polluted PowerShell preference or LASTEXITCODE state.'
+
+    [Environment]::SetEnvironmentVariable($gitleaksFixtureModeName, 'launch-error', [EnvironmentVariableTarget]::Process)
+    [Environment]::SetEnvironmentVariable($gitleaksFixtureExecutableName, $gitleaksStubPath, [EnvironmentVariableTarget]::Process)
+    $secretLaunchReportRoot = Join-Path $secretCaptureRoot 'reports-launch-error'
+    $secretLaunchFailure = $null
+    try { $null = & $secretFixtureScriptPath -DependencyRoot $secretDependencyRoot -ReportRoot $secretLaunchReportRoot -RepositoryRoot $secretWorktreeRoot -LockPath (Join-Path $secretFixtureRoot 'fixture.lock.json') }
+    catch { $secretLaunchFailure = [string]$_.Exception.Message }
+    $secretLaunchExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    $secretLaunchSummary = (Get-PshGoal6StrictText -Path (Join-Path $secretLaunchReportRoot 'gitleaks-summary.json')) | ConvertFrom-Json -ErrorAction Stop
+    Assert-PshGoal6Quality ($secretLaunchFailure -match 'gitleaks git launch failed' -and [string]$secretLaunchSummary.status -ceq 'failed' -and [string]$secretLaunchSummary.error -match 'gitleaks git launch failed') 'Secret scan did not report a native gitleaks launch failure separately.'
+    Assert-PshGoal6Quality (@($secretLaunchSummary.scans).Count -eq 0 -and -not [IO.File]::Exists($gitleaksStubPath)) 'Secret scan continued after the fixture removed gitleaks before the first scan.'
+    Assert-PshGoal6Quality ($ErrorActionPreference -ceq 'Stop' -and $secretLaunchExitCode -eq 0) 'Native gitleaks launch failure polluted PowerShell preference or LASTEXITCODE state.'
+
+    if ($null -eq $originalGitleaksFixtureMode) { Remove-Item -LiteralPath ("Env:$gitleaksFixtureModeName") -ErrorAction SilentlyContinue }
+    else { [Environment]::SetEnvironmentVariable($gitleaksFixtureModeName, $originalGitleaksFixtureMode, [EnvironmentVariableTarget]::Process) }
+    if ($null -eq $originalGitleaksFixtureExecutable) { Remove-Item -LiteralPath ("Env:$gitleaksFixtureExecutableName") -ErrorAction SilentlyContinue }
+    else { [Environment]::SetEnvironmentVariable($gitleaksFixtureExecutableName, $originalGitleaksFixtureExecutable, [EnvironmentVariableTarget]::Process) }
+    $global:LASTEXITCODE = 0
 
     $leafTraversalLock = New-PshGoal6QualityLockCopy -Name 'package-file-name-traversal' -Mutation {
         param($value)

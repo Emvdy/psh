@@ -35,6 +35,35 @@ function Assert-PshGoal6GitleaksEnvironment {
     }
 }
 
+function Invoke-PshGoal6GitleaksNativeCapture {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExecutablePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+
+    $output = @()
+    $exitCode = $null
+    $launchError = $null
+    $oldErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        try {
+            $output = @(& $ExecutablePath @Arguments 2>&1)
+            $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+        }
+        catch { $launchError = [string]$_.Exception.Message }
+    }
+    finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+        $global:LASTEXITCODE = 0
+    }
+    return [pscustomobject][ordered]@{
+        output = @($output | ForEach-Object { [string]$_ })
+        exitCode = $exitCode
+        launchError = $launchError
+    }
+}
+
 function Invoke-PshGoal6GitleaksScan {
     param(
         [Parameter(Mandatory = $true)][string]$ExecutablePath,
@@ -59,9 +88,12 @@ function Invoke-PshGoal6GitleaksScan {
     )
     if ($Mode -ceq 'git') { $arguments += '--log-opts=--all' }
     $arguments += $RepositoryRootPath
-    $output = @(& $ExecutablePath @arguments 2>&1)
-    $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
-    Write-PshGoal6Text -Path $LogPath -Text ((@($output | ForEach-Object { [string]$_ }) -join "`n") + "`n")
+    $capture = Invoke-PshGoal6GitleaksNativeCapture -ExecutablePath $ExecutablePath -Arguments $arguments
+    $logLines = @($capture.output | ForEach-Object { [string]$_ })
+    if ($null -ne $capture.launchError) { $logLines += "launch error: $([string]$capture.launchError)" }
+    Write-PshGoal6Text -Path $LogPath -Text (($logLines -join "`n") + "`n")
+    Assert-PshGoal6Condition ($null -eq $capture.launchError) "gitleaks $Mode launch failed: $([string]$capture.launchError)"
+    $exitCode = [int]$capture.exitCode
     if (-not [IO.File]::Exists($ReportPath)) { Write-PshGoal6Text -Path $ReportPath -Text "[]`n" }
     $reportText = Get-PshGoal6StrictText -Path $ReportPath
     try {
@@ -107,8 +139,10 @@ try {
     Assert-PshGoal6Condition ((Get-PshGoal6Sha256 -Path $executablePath) -ceq [string]$dependency.package.installedSha256) 'gitleaks executable SHA256 mismatches.'
     Assert-PshGoal6Condition ((Get-PshGoal6PeMachine -Path $executablePath) -ceq [string]$dependency.package.peMachine) 'gitleaks executable architecture mismatches.'
 
-    $versionOutput = @(& $executablePath version 2>&1)
-    $versionExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    $versionCapture = Invoke-PshGoal6GitleaksNativeCapture -ExecutablePath $executablePath -Arguments @('version')
+    Assert-PshGoal6Condition ($null -eq $versionCapture.launchError) "gitleaks version probe launch failed: $([string]$versionCapture.launchError)"
+    $versionOutput = @($versionCapture.output | ForEach-Object { [string]$_ })
+    $versionExitCode = [int]$versionCapture.exitCode
     Assert-PshGoal6Condition ($versionExitCode -eq 0) "gitleaks version probe failed: $($versionOutput -join ' ')"
     $version = (($versionOutput | ForEach-Object { [string]$_ }) -join "`n").Trim()
     Assert-PshGoal6Condition ($version -match ('(?m)\b' + [regex]::Escape([string]$dependency.version) + '\b')) "gitleaks version probe did not report $($dependency.version)."
