@@ -569,6 +569,8 @@ $lockedParentScript = Get-PshGoal5EmbeddedShellScript -Text $shellText -Marker '
 [void](Assert-PshGoal5PowerShellParses -Text $tempScript -Label 'Shell Windows TEMP creator')
 [void](Assert-PshGoal5PowerShellParses -Text $cleanupScript -Label 'Shell Windows TEMP cleanup')
 $lockedParentAst = Assert-PshGoal5PowerShellParses -Text $lockedParentScript -Label 'Shell locked parent'
+Assert-PshGoal5Entry ($lockedParentScript.Contains('function Test-PshShellWindowsExecutableImage') -and
+    $lockedParentScript.Contains('Test-PshShellWindowsExecutableImage -Path $childPath')) 'Shell locked parent does not verify the Windows PowerShell child executable image before launch.'
 Assert-PshGoal5Entry (@([regex]::Matches($shellText, 'PshShellLockedParent')).Count -eq 1) 'Shell entry does not contain exactly one locked parent flow.'
 Assert-PshGoal5Entry ($lockedParentScript -match '\[IO\.FileAccess\]::Read' -and $lockedParentScript -match '\[IO\.FileShare\]::Read' -and
     @([regex]::Matches($lockedParentScript, 'ComputeHash\(')).Count -eq 2) 'Shell locked parent does not retain one read/share-read entry handle across both authenticated hashes.'

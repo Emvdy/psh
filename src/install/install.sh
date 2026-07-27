@@ -372,6 +372,19 @@ function ConvertTo-PshShellProcessArgument {
     return $builder.ToString()
 }
 
+function Test-PshShellWindowsExecutableImage {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = $null
+    try {
+        $stream = New-Object IO.FileStream($Path, ([IO.FileMode]::Open), ([IO.FileAccess]::Read), ([IO.FileShare]::Read))
+        if ($stream.Length -lt 2) { return $false }
+        return ($stream.ReadByte() -eq 0x4d -and $stream.ReadByte() -eq 0x5a)
+    }
+    catch { return $false }
+    finally { if ($null -ne $stream) { $stream.Dispose() } }
+}
+
 try {
     $mode = [string]$env:PSH_SHELL_FLOW_MODE
     if ($mode -cnotin @("online", "offline")) { Throw-PshShellParentFailure 3 "PshShellParentInput" "Io" "The shell parent flow mode is invalid." "Run the installer again." }
@@ -454,7 +467,9 @@ try {
     }
 
     $childPath = [IO.Path]::GetFullPath([string]$env:PSH_SHELL_POWERSHELL_PATH)
-    if (-not [IO.File]::Exists($childPath)) { Throw-PshShellParentFailure 3 "PshShellChildStart" "Io" "The Windows PowerShell child executable was not found." "Verify Windows PowerShell 5.1 and run the installer again." }
+    if (-not [IO.File]::Exists($childPath) -or -not (Test-PshShellWindowsExecutableImage -Path $childPath)) {
+        Throw-PshShellParentFailure 3 "PshShellChildStart" "Io" "The Windows PowerShell child executable is missing or invalid." "Verify Windows PowerShell 5.1 and run the installer again."
+    }
     $childArguments = New-Object System.Collections.Generic.List[string]
     foreach ($value in @("-NoLogo", "-NoProfile", "-File", $entryPath, "-Edition", [string]$env:PSH_SHELL_EDITION, "-Version", [string]$env:PSH_SHELL_VERSION)) { [void]$childArguments.Add($value) }
     if ($mode -ceq "offline") {

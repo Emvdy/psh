@@ -475,6 +475,9 @@ foreach ($pesterScope in @($pesterRunnerText, $acceptanceText, $installerEdgesTe
     Assert-PshGoal6Workflow (-not $pesterScope.Contains('Goal6.WorkflowContract.ps1')) 'The standalone workflow contract became part of the fixed Pester matrix.'
 }
 Assert-PshGoal6WorkflowMatch $pesterRunnerText 'TotalCount -ne 27' 'fixed 27-case Pester runner assertion' 1 1
+Assert-PshGoal6WorkflowMatch $pesterRunnerText '\$PSVersionTable\.ContainsKey\(''PSEdition''\)' 'Pester runner reads the PSEdition hashtable key' 1 1
+Assert-PshGoal6WorkflowMatch $pesterRunnerText '\$PSVersionTable\[''PSEdition''\]' 'Pester runner serializes the PSEdition hashtable value' 1 1
+Assert-PshGoal6WorkflowNoMatch $pesterRunnerText '\$PSVersionTable\.PSObject\.Properties\[''PSEdition''\]' 'Pester runner must not read PSEdition as a PSObject property.'
 Assert-PshGoal6WorkflowMatch $matrixJob "-PesterVersion '5\.9\.0'" 'exact Pester runner version' 2 2
 Assert-PshGoal6WorkflowMatch $matrixJob '\[int\]\$summary\.totalCount -ne 27' 'workflow 27-case summary assertion' 1 1
 Assert-PshGoal6WorkflowMatch $matrixJob '\[int\]\$summary\.passedCount -ne 27' 'workflow 27-passed assertion' 1 1

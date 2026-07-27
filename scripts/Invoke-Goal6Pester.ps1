@@ -121,6 +121,7 @@ $oldExpectedArchitecture = [Environment]::GetEnvironmentVariable('PSH_GOAL6_EXPE
 $startedUtc = [DateTime]::UtcNow
 $result = $null
 $invocationFailure = $null
+$runtimeEdition = if ($PSVersionTable.ContainsKey('PSEdition')) { [string]$PSVersionTable['PSEdition'] } else { 'Desktop' }
 try {
     [Environment]::SetEnvironmentVariable('PSH_GOAL6_REPOSITORY_ROOT', $RepositoryRoot, 'Process')
     [Environment]::SetEnvironmentVariable('PSH_GOAL6_GOLDEN_ROOT', $GoldenRoot, 'Process')
@@ -161,7 +162,7 @@ finally {
         pesterVersion = $PesterVersion
         runtime = [pscustomobject][ordered]@{
             version = [string]$PSVersionTable.PSVersion
-            edition = if ($null -ne $PSVersionTable.PSObject.Properties['PSEdition']) { [string]$PSVersionTable.PSEdition } else { 'Desktop' }
+            edition = $runtimeEdition
             is64BitProcess = [Environment]::Is64BitProcess
             expectedArchitecture = $ExpectedArchitecture
             processArchitecture = $processArchitecture
