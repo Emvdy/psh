@@ -308,7 +308,7 @@ function Assert-PshNativeLockShape {
         }
         $source = Get-PshNativePropertyValue $tool 'source'
         foreach ($field in @('repository', 'tag', 'commit')) {
-            if ($source -eq $null -or [string]::IsNullOrWhiteSpace([string](Get-PshNativePropertyValue $source $field))) {
+            if ($null -eq $source -or [string]::IsNullOrWhiteSpace([string](Get-PshNativePropertyValue $source $field))) {
                 throw ('native-tools lock tool {0} source.{1} is missing.' -f $name, $field)
             }
         }
@@ -563,8 +563,8 @@ function Resolve-PshPinnedNativeTool {
             })
         }
         $actualMachine = Get-PshNativePeMachine -Path $resolvedPath
-        $isWindows = Test-PshNativeWindowsPlatform
-        if ($isWindows -and [string]::IsNullOrWhiteSpace([string]$actualMachine)) {
+        $runningOnWindows = Test-PshNativeWindowsPlatform
+        if ($runningOnWindows -and [string]::IsNullOrWhiteSpace([string]$actualMachine)) {
             return [PSCustomObject]([ordered]@{
                 Code = 5; Message = ('the pinned {0} executable is not a valid PE image.' -f $normalizedName); Path = $null
                 Name = $normalizedName; Version = [string]$tool.version; Sha256 = [string]$artifact.installedSha256

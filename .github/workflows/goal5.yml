@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - 'goal5/**'
+      - 'goal6/**'
   pull_request:
 
 permissions:
@@ -460,7 +461,7 @@ jobs:
               throw ('Goal 5 test failures: {0}' -f ($failures.ToArray() -join '; '))
           }
 
-      - name: Validate retained pre-sign reports
+      - name: Validate retained pre-sign and catalog reports
         if: ${{ always() }}
         shell: powershell
         run: |
@@ -572,22 +573,66 @@ jobs:
               [string]$packageBuildReport.preSignRoot -cne [IO.Path]::GetFullPath($env:PSH_GOAL5_PRE_SIGN_ROOT) -or
               [int]$packageBuildReport.deterministicPackages -ne 3 -or [int]$packageBuildReport.publicPackages -ne 3 -or
               [string]$packageBuildReport.indexPhase -cne 'catalog-deferred' -or
-              [string]$packageBuildReport.artifactPhase -cne 'static-verified-signatures-deferred') {
-              throw 'The package build report does not match the retained pre-sign staging contract.'
+              [string]$packageBuildReport.artifactPhase -cne 'static-verified-catalog-membership-deferred' -or
+              [string]$packageBuildReport.finalIndexPhase -cne 'finalized-with-verified-catalog-membership' -or
+              [string]$packageBuildReport.finalArtifactPhase -cne 'release-catalog-membership-verified' -or
+              -not [bool]$packageBuildReport.catalogMembershipVerified) {
+              throw 'The package build report does not match the retained pre-sign and finalized catalog contracts.'
           }
           $releaseArtifactsReport = Get-PshGoal5NonEmptyJson -Path (Join-Path $env:PSH_GOAL5_REPORT_ROOT 'release-artifacts-report.json')
-          if ([string]$releaseArtifactsReport.phase -cne 'static-verified-signatures-deferred' -or
-              [int]$releaseArtifactsReport.code -ne 4 -or [int]$releaseArtifactsReport.packageCount -ne 3) {
+          if ([string]$releaseArtifactsReport.phase -cne 'static-verified-catalog-membership-deferred' -or
+              [int]$releaseArtifactsReport.code -ne 4 -or [int]$releaseArtifactsReport.assetCount -ne 12 -or
+              [int]$releaseArtifactsReport.packageCount -ne 3 -or [bool]$releaseArtifactsReport.catalogMembershipVerified) {
               throw 'The release artifact report is not the expected build-stage/code-4 handoff.'
+          }
+          $finalReleaseArtifactsReport = Get-PshGoal5NonEmptyJson -Path (Join-Path $env:PSH_GOAL5_REPORT_ROOT 'release-artifacts-final-report.json')
+          if ([string]$finalReleaseArtifactsReport.phase -cne 'release-catalog-membership-verified' -or
+              [int]$finalReleaseArtifactsReport.code -ne 0 -or [int]$finalReleaseArtifactsReport.assetCount -ne 13 -or
+              [int]$finalReleaseArtifactsReport.packageCount -ne 3 -or -not [bool]$finalReleaseArtifactsReport.catalogMembershipVerified) {
+              throw 'The final release artifact report did not verify the exact 13-asset catalog membership contract.'
+          }
+
+          $releaseAssetsRoot = [IO.Path]::GetFullPath([string]$packageBuildReport.releaseAssetsRoot)
+          if (-not (Test-Path -LiteralPath $releaseAssetsRoot -PathType Container)) {
+              throw 'The finalized release asset root is missing.'
+          }
+          $expectedReleaseAssetNames = @(
+              'install.ps1',
+              'install.sh',
+              'psh-installer.exe',
+              ('psh-{0}-core.zip' -f [string]$packageBuildReport.version),
+              ('psh-{0}-full-win-x64.zip' -f [string]$packageBuildReport.version),
+              ('psh-{0}-full-win-arm64.zip' -f [string]$packageBuildReport.version),
+              'sbom.spdx.json',
+              'THIRD_PARTY_NOTICES.md',
+              'RELEASE_NOTES.md',
+              'RELEASE_NOTES.zh-CN.md',
+              ('psh-release-{0}.json' -f [string]$packageBuildReport.version),
+              'SHA256SUMS',
+              ('psh-release-{0}.cat' -f [string]$packageBuildReport.version)
+          )
+          $releaseAssetEntries = @(Get-ChildItem -LiteralPath $releaseAssetsRoot -Force)
+          if ($releaseAssetEntries.Count -ne 13 -or
+              @($releaseAssetEntries | Where-Object { $_.PSIsContainer -or (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) }).Count -ne 0) {
+              throw 'The finalized release asset root does not contain exactly 13 regular non-reparse files.'
+          }
+          foreach ($expectedAssetName in $expectedReleaseAssetNames) {
+              if (@($releaseAssetEntries | Where-Object { [string]$_.Name -ceq $expectedAssetName }).Count -ne 1) {
+                  throw ('The finalized release asset root is missing exact asset: {0}' -f $expectedAssetName)
+              }
           }
           $validationReport = [ordered]@{
               schemaVersion = 1
               runtime = $env:PSH_GOAL5_RUNTIME
-              phase = 'pre-sign-validated'
+              phase = 'pre-sign-and-catalog-membership-validated'
               code = 0
               packageCount = $packageRecords.Count
               manifestCount = $manifestFiles.Count
               zipCount = $zipFiles.Count
+              releaseAssetCount = $releaseAssetEntries.Count
+              finalIndexPhase = [string]$packageBuildReport.finalIndexPhase
+              finalArtifactPhase = [string]$finalReleaseArtifactsReport.phase
+              catalogMembershipVerified = [bool]$finalReleaseArtifactsReport.catalogMembershipVerified
           }
           $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList @($false, $true)
           [IO.File]::WriteAllText((Join-Path $env:PSH_GOAL5_REPORT_ROOT 'workflow-validation-report.json'), (($validationReport | ConvertTo-Json -Depth 5) + "`n"), $utf8)

@@ -91,10 +91,42 @@ $publicFunctions = @(
     'Write-PshCanonicalJsonAtomic', 'Enter-PshInstallRootLock', 'Exit-PshInstallRootLock',
     'Read-PshOwnershipState', 'Write-PshOwnershipState', 'Remove-PshOwnershipState',
     'Read-PshTransactionState', 'Write-PshTransactionState', 'Remove-PshTransactionState',
-    'Get-PshRecoveryDecision', 'Get-PshLifecycleErrorMetadata'
+    'Get-PshRecoveryDecision', 'Get-PshLifecycleErrorMetadata',
+    'Test-PshLifecycleCatalogValidationStatus'
 )
 foreach ($name in $publicFunctions) {
     Assert-PshGoal5 ($null -ne (Get-Command $name -CommandType Function -ErrorAction SilentlyContinue)) "Public helper is missing: $name"
+}
+
+Assert-PshGoal5 (Test-PshLifecycleCatalogValidationStatus -Status 'Valid') 'The official Test-FileCatalog success status was rejected.'
+foreach ($invalidCatalogStatus in @('ValidationPassed', 'ValidationFailed', 'valid', '')) {
+    Assert-PshGoal5 (-not (Test-PshLifecycleCatalogValidationStatus -Status $invalidCatalogStatus)) "Invalid catalog status was accepted: '$invalidCatalogStatus'"
+}
+Assert-PshGoal5 (-not (Test-PshLifecycleCatalogValidationStatus -Status $null)) 'A null catalog status was accepted.'
+
+foreach ($catalogCallsite in @(
+        [pscustomobject]@{ RelativePath = 'scripts/Build-PshPackages.ps1'; ExpectedCalls = 1 },
+        [pscustomobject]@{ RelativePath = 'scripts/Generate-PshReleaseIndex.ps1'; ExpectedCalls = 1 },
+        [pscustomobject]@{ RelativePath = 'scripts/Test-PshReleaseArtifacts.ps1'; ExpectedCalls = 1 },
+        [pscustomobject]@{ RelativePath = 'src/install/ReleaseTrust.ps1'; ExpectedCalls = 2 }
+    )) {
+    $callsitePath = Join-Path $RepositoryRoot ([string]$catalogCallsite.RelativePath)
+    $callsiteTokens = $null
+    $callsiteErrors = $null
+    $callsiteAst = [Management.Automation.Language.Parser]::ParseFile($callsitePath, [ref]$callsiteTokens, [ref]$callsiteErrors)
+    Assert-PshGoal5 (@($callsiteErrors).Count -eq 0) "Catalog validation callsite has parser errors: $($catalogCallsite.RelativePath)"
+    $helperCalls = @($callsiteAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.CommandAst] -and
+                [string]$node.GetCommandName() -ceq 'Test-PshLifecycleCatalogValidationStatus'
+            }, $true))
+    Assert-PshGoal5 ($helperCalls.Count -eq [int]$catalogCallsite.ExpectedCalls) "Catalog validation helper call count changed in $($catalogCallsite.RelativePath)."
+    $legacyStatuses = @($callsiteAst.FindAll({
+                param($node)
+                $node -is [Management.Automation.Language.StringConstantExpressionAst] -and
+                [string]$node.Value -ceq 'ValidationPassed'
+            }, $true))
+    Assert-PshGoal5 ($legacyStatuses.Count -eq 0) "Legacy catalog success status remains in $($catalogCallsite.RelativePath)."
 }
 
 $unicodeChinese = ([string][char]0x4E2D) + ([string][char]0x6587)

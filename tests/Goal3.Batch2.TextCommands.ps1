@@ -26,6 +26,8 @@ $aliasBaseline = [ordered]@{}
 $linkedRgRoot = $null
 $testFailure = $null
 
+. (Join-Path -Path $PSScriptRoot -ChildPath 'TestHelpers/GoldenNormalization.ps1')
+
 function Assert-PshBatch2 {
     param(
         [Parameter(Mandatory = $true)]
@@ -39,7 +41,7 @@ function Assert-PshBatch2 {
     $script:assertionCount++
 }
 
-function New-PshBatch2NativeTool {
+function Get-PshBatch2NativeToolRecord {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string]$InstalledPath,
@@ -72,7 +74,7 @@ function New-PshBatch2NativeTool {
     }
 }
 
-function New-PshBatch2WindowsNativeTool {
+function Build-PshBatch2WindowsNativeTool {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
         [Parameter(Mandatory = $true)][string]$Name
@@ -181,6 +183,7 @@ function Invoke-PshBatch2Command {
         [switch]$ExpectTerminatingError
     )
 
+    [void]$PipelineInput
     $module = Get-Module -Name Psh -ErrorAction Stop
     & $module {
         if ($null -ne $script:PshRawByteSink) { $script:PshRawByteSink.Dispose() }
@@ -264,14 +267,6 @@ function Test-PshByteSequence {
     return $true
 }
 
-function Normalize-PshBatch2Text {
-    param([AllowNull()][string]$Text)
-    if ($null -eq $Text) { return '' }
-    $value = $Text.Replace("`r`n", "`n").Replace("`r", "`n").Replace('\', '/')
-    if ($value.EndsWith("`n")) { $value = $value.Substring(0, $value.Length - 1) }
-    return $value
-}
-
 function Compare-PshBatch2Golden {
     param(
         [Parameter(Mandatory = $true)][string]$Id,
@@ -279,9 +274,9 @@ function Compare-PshBatch2Golden {
     )
     $path = Join-Path $GoldenRoot ($Id + '.txt')
     Assert-PshBatch2 ([IO.File]::Exists($path)) ('GNU golden is missing: {0}' -f $path)
-    $expected = Normalize-PshBatch2Text ([IO.File]::ReadAllText($path, $utf8NoBom))
-    $actualText = Normalize-PshBatch2Text ($Actual -join "`n")
-    Assert-PshBatch2 ([string]::Equals($expected, $actualText, [StringComparison]::Ordinal)) ('GNU golden mismatch for {0}. Expected <{1}>, actual <{2}>.' -f $Id, $expected, $actualText)
+    $expected = ConvertTo-PshGoldenNormalizedText -Text ([IO.File]::ReadAllText($path, $utf8NoBom))
+    $actualText = ConvertTo-PshGoldenNormalizedText -Text ($Actual -join "`n")
+    Assert-PshBatch2 (Test-PshGoldenOrdinalEqual -Left $expected -Right $actualText) ('GNU golden mismatch for {0}. Expected <{1}>, actual <{2}>.' -f $Id, $expected, $actualText)
 }
 
 try {
@@ -318,7 +313,7 @@ try {
     Assert-PshBatch2 (($catText.Output -join "`n") -match '中文 line') 'cat lost Unicode text.'
     Assert-PshBatch2 (($catText.Output -join '') -like "     1`talpha*") 'cat numbering did not use a tab separator.'
     $catPipeline = Invoke-PshBatch2Command -Name cat -Arguments @('-s') -PipelineInput @('a', '', '', 'b') -UsePipeline
-    Assert-PshBatch2 ($catPipeline.ExitCode -eq 0 -and (Normalize-PshBatch2Text ($catPipeline.Output -join "`n")) -eq "a`n`nb") 'cat stdin squeeze behavior failed.'
+    Assert-PshBatch2 ($catPipeline.ExitCode -eq 0 -and (ConvertTo-PshGoldenNormalizedText -Text ($catPipeline.Output -join "`n")) -eq "a`n`nb") 'cat stdin squeeze behavior failed.'
     $catBinary = Invoke-PshBatch2Command -Name cat -Arguments @($binaryPath)
     Assert-PshBatch2 ($catBinary.ExitCode -eq 0 -and (Test-PshByteSequence $catBinary.RawBytes $binaryBytes)) 'cat did not preserve binary bytes through raw stdout.'
     $asciiByteChunks = New-Object object[] 2
@@ -336,17 +331,17 @@ try {
     Assert-PshBatch2 ($batInvalid.ExitCode -eq 2) 'Core bat accepted an unsupported color mode.'
 
     $headFile = Invoke-PshBatch2Command -Name head -Arguments @('-n', '2', $crlfPath)
-    Assert-PshBatch2 ($headFile.ExitCode -eq 0 -and (Normalize-PshBatch2Text ($headFile.Output -join "`n")) -eq "one`ntwo") 'head file line selection failed.'
+    Assert-PshBatch2 ($headFile.ExitCode -eq 0 -and (ConvertTo-PshGoldenNormalizedText -Text ($headFile.Output -join "`n")) -eq "one`ntwo") 'head file line selection failed.'
     $headPipeline = Invoke-PshBatch2Command -Name head -Arguments @('-n2') -PipelineInput @('one', 'two', 'three') -UsePipeline
-    Assert-PshBatch2 ($headPipeline.ExitCode -eq 0 -and (Normalize-PshBatch2Text ($headPipeline.Output -join "`n")) -eq "one`ntwo") 'head stdin selection failed.'
+    Assert-PshBatch2 ($headPipeline.ExitCode -eq 0 -and (ConvertTo-PshGoldenNormalizedText -Text ($headPipeline.Output -join "`n")) -eq "one`ntwo") 'head stdin selection failed.'
     $headBytes = Invoke-PshBatch2Command -Name head -Arguments @('-c', '4', $binaryPath)
     Assert-PshBatch2 ($headBytes.ExitCode -eq 0 -and (Test-PshByteSequence $headBytes.RawBytes ([byte[]](0, 1, 2, 3)))) 'head -c did not preserve raw bytes.'
     $headBinaryDownstream = Invoke-PshBatch2Command -Name head -Arguments @('-c1', $binaryPath) -UseDownstream
     Assert-PshBatch2 ($headBinaryDownstream.ExitCode -eq 2) 'head -c allowed NUL output into the object pipeline.'
     $tailFile = Invoke-PshBatch2Command -Name tail -Arguments @('-n', '2', $crlfPath)
-    Assert-PshBatch2 ($tailFile.ExitCode -eq 0 -and (Normalize-PshBatch2Text ($tailFile.Output -join "`n")) -eq "two`nthree") 'tail file line selection failed.'
+    Assert-PshBatch2 ($tailFile.ExitCode -eq 0 -and (ConvertTo-PshGoldenNormalizedText -Text ($tailFile.Output -join "`n")) -eq "two`nthree") 'tail file line selection failed.'
     $tailPipeline = Invoke-PshBatch2Command -Name tail -Arguments @('-n', '+2') -PipelineInput @('one', 'two', 'three') -UsePipeline
-    Assert-PshBatch2 ($tailPipeline.ExitCode -eq 0 -and (Normalize-PshBatch2Text ($tailPipeline.Output -join "`n")) -eq "two`nthree") 'tail stdin +N selection failed.'
+    Assert-PshBatch2 ($tailPipeline.ExitCode -eq 0 -and (ConvertTo-PshGoldenNormalizedText -Text ($tailPipeline.Output -join "`n")) -eq "two`nthree") 'tail stdin +N selection failed.'
     $tailBytes = Invoke-PshBatch2Command -Name tail -Arguments @('-c4', $binaryPath)
     Assert-PshBatch2 ($tailBytes.ExitCode -eq 0 -and (Test-PshByteSequence $tailBytes.RawBytes ([byte[]](252, 253, 254, 255)))) 'tail -c did not preserve raw bytes.'
     $followDecode = & (Get-Module -Name Psh -ErrorAction Stop) {
@@ -365,9 +360,9 @@ try {
     $cutFieldsPath = Join-Path $fixtureRoot 'fields.csv'
     [IO.File]::WriteAllText($cutFieldsPath, "one,two,three`nno-delimiter`n甲,乙,丙`n", $utf8NoBom)
     $cutFile = Invoke-PshBatch2Command -Name cut -Arguments @('-d,', '-f1,3', '-s', $cutFieldsPath)
-    Assert-PshBatch2 ($cutFile.ExitCode -eq 0 -and (Normalize-PshBatch2Text ($cutFile.Output -join "`n")) -eq "one,three`n甲,丙") 'cut field/file behavior failed.'
+    Assert-PshBatch2 ($cutFile.ExitCode -eq 0 -and (ConvertTo-PshGoldenNormalizedText -Text ($cutFile.Output -join "`n")) -eq "one,three`n甲,丙") 'cut field/file behavior failed.'
     $cutUnsuppressed = Invoke-PshBatch2Command -Name cut -Arguments @('-d,', '-f2', $cutFieldsPath)
-    Assert-PshBatch2 ($cutUnsuppressed.ExitCode -eq 0 -and (Normalize-PshBatch2Text ($cutUnsuppressed.Output -join "`n")) -eq "two`nno-delimiter`n乙") 'cut -f discarded a line without the delimiter.'
+    Assert-PshBatch2 ($cutUnsuppressed.ExitCode -eq 0 -and (ConvertTo-PshGoldenNormalizedText -Text ($cutUnsuppressed.Output -join "`n")) -eq "two`nno-delimiter`n乙") 'cut -f discarded a line without the delimiter.'
     $cutCharacters = Invoke-PshBatch2Command -Name cut -Arguments @('-c2') -PipelineInput @('A😀中') -UsePipeline
     Assert-PshBatch2 ($cutCharacters.ExitCode -eq 0 -and ($cutCharacters.Output -join '') -eq '😀') 'cut -c split a Unicode surrogate pair.'
     $cutBytes = Invoke-PshBatch2Command -Name cut -Arguments @('-b1-3', $binaryPath)
@@ -483,7 +478,8 @@ try {
     Assert-PshBatch2 ($printfEscapes.ExitCode -eq 0 -and [Text.Encoding]::UTF8.GetString($printfEscapes.RawBytes) -eq "a`nb") 'printf %b/\c behavior failed.'
     Remove-Variable -Name PshBatch2PrintfValue -Scope Global -Force -ErrorAction SilentlyContinue
     $printfVariable = Invoke-PshBatch2Command -Name printf -Arguments @('-v', 'PshBatch2PrintfValue', '%s-%d', 'value', '7')
-    Assert-PshBatch2 ($printfVariable.ExitCode -eq 0 -and $printfVariable.Output.Count -eq 0 -and $printfVariable.RawBytes.Length -eq 0 -and $global:PshBatch2PrintfValue -eq 'value-7') 'printf -v assignment failed.'
+    $printfAssignedValue = Get-Variable -Name PshBatch2PrintfValue -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    Assert-PshBatch2 ($printfVariable.ExitCode -eq 0 -and $printfVariable.Output.Count -eq 0 -and $printfVariable.RawBytes.Length -eq 0 -and $printfAssignedValue -eq 'value-7') 'printf -v assignment failed.'
     Remove-Variable -Name PshBatch2PrintfValue -Scope Global -Force
 
     $echoDefault = Invoke-PshBatch2Command -Name echo -Arguments @('hello', '中文')
@@ -619,9 +615,9 @@ printf '\n'
 exit 0
 '@
     if ($isWindowsPlatform) {
-        $rgCompiled = New-PshBatch2WindowsNativeTool -Root $helperRoot -Name 'rg'
-        $batCompiled = New-PshBatch2WindowsNativeTool -Root $helperRoot -Name 'bat'
-        $fdCompiled = New-PshBatch2WindowsNativeTool -Root $helperRoot -Name 'fd'
+        $rgCompiled = Build-PshBatch2WindowsNativeTool -Root $helperRoot -Name 'rg'
+        $batCompiled = Build-PshBatch2WindowsNativeTool -Root $helperRoot -Name 'bat'
+        $fdCompiled = Build-PshBatch2WindowsNativeTool -Root $helperRoot -Name 'fd'
         $compiledBytes = [IO.File]::ReadAllBytes($rgCompiled)
         $compiledPeOffset = [BitConverter]::ToInt32($compiledBytes, 0x3c)
         $compiledMachine = ('0x{0:X4}' -f [BitConverter]::ToUInt16($compiledBytes, $compiledPeOffset + 4))
@@ -651,10 +647,10 @@ exit 0
         schemaVersion = 1
         manifest = [ordered]@{ created = '2026-07-20T00:00:00Z'; namespaceSeed = 'goal4-full-tools-supply-chain-v1' }
         tools = @(
-            (New-PshBatch2NativeTool -Name 'bat' -InstalledPath $batToolRelativePath -InstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $batToolPath -Algorithm SHA256).Hash -ArmInstalledPath $batArmToolRelativePath -ArmInstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $batArmToolPath -Algorithm SHA256).Hash -AssetId 910000)
-            (New-PshBatch2NativeTool -Name 'fd' -InstalledPath $fdToolRelativePath -InstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $fdToolPath -Algorithm SHA256).Hash -ArmInstalledPath $fdArmToolRelativePath -ArmInstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $fdArmToolPath -Algorithm SHA256).Hash -AssetId 920000)
-            (New-PshBatch2NativeTool -Name 'jq' -InstalledPath 'win-x64/jq/jq.exe' -InstalledSha256 (('1' * 64) -join '') -ArmInstalledPath 'win-arm64/jq/jq.exe' -ArmInstalledSha256 (('2' * 64) -join '') -AssetId 925000)
-            (New-PshBatch2NativeTool -Name 'rg' -InstalledPath $rgToolRelativePath -InstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $rgToolPath -Algorithm SHA256).Hash -ArmInstalledPath $rgArmToolRelativePath -ArmInstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $rgArmToolPath -Algorithm SHA256).Hash -AssetId 930000)
+            (Get-PshBatch2NativeToolRecord -Name 'bat' -InstalledPath $batToolRelativePath -InstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $batToolPath -Algorithm SHA256).Hash -ArmInstalledPath $batArmToolRelativePath -ArmInstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $batArmToolPath -Algorithm SHA256).Hash -AssetId 910000)
+            (Get-PshBatch2NativeToolRecord -Name 'fd' -InstalledPath $fdToolRelativePath -InstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $fdToolPath -Algorithm SHA256).Hash -ArmInstalledPath $fdArmToolRelativePath -ArmInstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $fdArmToolPath -Algorithm SHA256).Hash -AssetId 920000)
+            (Get-PshBatch2NativeToolRecord -Name 'jq' -InstalledPath 'win-x64/jq/jq.exe' -InstalledSha256 (('1' * 64) -join '') -ArmInstalledPath 'win-arm64/jq/jq.exe' -ArmInstalledSha256 (('2' * 64) -join '') -AssetId 925000)
+            (Get-PshBatch2NativeToolRecord -Name 'rg' -InstalledPath $rgToolRelativePath -InstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $rgToolPath -Algorithm SHA256).Hash -ArmInstalledPath $rgArmToolRelativePath -ArmInstalledSha256 (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $rgArmToolPath -Algorithm SHA256).Hash -AssetId 930000)
         )
     }
     [IO.File]::WriteAllText((Join-Path $toolsRoot 'native-tools.lock.json'), ($lock | ConvertTo-Json -Depth 10), $utf8NoBom)

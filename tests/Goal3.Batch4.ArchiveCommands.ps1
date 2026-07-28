@@ -25,6 +25,8 @@ $archiveCommandNames = @('tar', 'zip', 'unzip', 'gzip', 'gunzip', 'sha256sum', '
 $nativeTarPath = $null
 $nativeGzipPath = $null
 
+. (Join-Path -Path $PSScriptRoot -ChildPath 'TestHelpers/GoldenNormalization.ps1')
+
 function Assert-PshBatch4Archive {
     param(
         [Parameter(Mandatory = $true)][bool]$Condition,
@@ -309,10 +311,9 @@ function Compare-PshBatch4Golden {
 
     $path = Join-Path -Path $GoldenRoot -ChildPath ($Id + '.txt')
     Assert-PshBatch4Archive ([IO.File]::Exists($path)) ('GNU golden is missing: {0}' -f $path)
-    $expected = [IO.File]::ReadAllText($path, $utf8NoBom).Replace("`r`n", "`n").Replace("`r", "`n")
-    if ($expected.EndsWith("`n")) { $expected = $expected.Substring(0, $expected.Length - 1) }
-    $actualText = ($Actual -join "`n").Replace("`r`n", "`n").Replace("`r", "`n")
-    Assert-PshBatch4Archive ([string]::Equals($actualText, $expected, [StringComparison]::Ordinal)) ('GNU golden mismatch for {0}. Expected <{1}>, actual <{2}>.' -f $Id, $expected, $actualText)
+    $expected = ConvertTo-PshGoldenNormalizedText -Text ([IO.File]::ReadAllText($path, $utf8NoBom))
+    $actualText = ConvertTo-PshGoldenNormalizedText -Text ($Actual -join "`n")
+    Assert-PshBatch4Archive (Test-PshGoldenOrdinalEqual -Left $actualText -Right $expected) ('GNU golden mismatch for {0}. Expected <{1}>, actual <{2}>.' -f $Id, $expected, $actualText)
 }
 
 function Test-PshBatch4RecognizedLinkCreationFailure {

@@ -112,7 +112,7 @@ namespace Psh.Bootstrapper
 
         private static int StartInstaller(string powershellPath, string scriptPath, BootstrapperArguments arguments)
         {
-            string[] forwarded = new string[PowerShellFileArguments.Length + 5];
+            string[] forwarded = new string[PowerShellFileArguments.Length + 9];
             int index = 0;
             forwarded[index++] = PowerShellFileArguments[0];
             forwarded[index++] = PowerShellFileArguments[1];
@@ -122,6 +122,14 @@ namespace Psh.Bootstrapper
             forwarded[index++] = arguments.Edition;
             forwarded[index++] = "-Version";
             forwarded[index++] = arguments.Version;
+
+            if (arguments.Offline)
+            {
+                forwarded[index++] = "-ArchivePath";
+                forwarded[index++] = arguments.ArchivePath;
+                forwarded[index++] = "-ArchiveSha256";
+                forwarded[index++] = arguments.ArchiveSha256;
+            }
 
             string[] effectiveArguments;
             if (arguments.NonInteractive)

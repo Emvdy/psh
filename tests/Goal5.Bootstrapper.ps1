@@ -252,6 +252,7 @@ Assert-PshGoal5Bootstrapper ($locatorText -match 'SysWOW64' -and $locatorText -m
 Assert-PshGoal5Bootstrapper ($allSourceText -notmatch 'catch\s*\([^)]*\)\s*when\s*\(') 'Bootstrapper source uses C# exception filters, which Windows PowerShell 5.1 Add-Type cannot compile.'
 Assert-PshGoal5Bootstrapper ($allSourceText -match 'Get-ExecutionPolicy\s+-List') 'Read-only execution-policy probe is missing.'
 Assert-PshGoal5Bootstrapper ($programText -match 'PowerShellFileArguments' -and $programText -match '"-NoLogo"' -and $programText -match '"-NoProfile"' -and $programText -match '"-File"') 'Installer launch does not use the required PowerShell file arguments.'
+Assert-PshGoal5Bootstrapper ($programText -match 'arguments\.Offline' -and $programText -match '"-ArchivePath"' -and $programText -match '"-ArchiveSha256"') 'Offline archive evidence is not forwarded through the bootstrapper.'
 Assert-PshGoal5Bootstrapper ($policyText -match '"-Command"' -and $policyText -match 'Get-ExecutionPolicy') 'The policy probe is not explicit and read-only.'
 Assert-PshGoal5Bootstrapper ($programText -notmatch '(?i)cmd\.exe|Invoke-Expression') 'Bootstrapper contains a shell or Invoke-Expression escape hatch.'
 Assert-PshGoal5Bootstrapper ($programText -notmatch '(?i)-ExecutionPolicy\s+Bypass') 'Bootstrapper attempts to bypass execution policy.'
@@ -352,15 +353,20 @@ foreach ($invalidProbe in @(
 }
 
 $defaults = $parserType::Parse([string[]]@())
-Assert-PshGoal5Bootstrapper (-not $defaults.Offline -and $defaults.Edition -ceq 'Core' -and $defaults.Version -ceq 'latest' -and -not $defaults.NonInteractive) 'Parser defaults do not select online Core latest.'
+Assert-PshGoal5Bootstrapper (-not $defaults.Offline -and $defaults.Edition -ceq 'Core' -and $defaults.Version -ceq 'latest' -and
+    $null -eq $defaults.ArchivePath -and $null -eq $defaults.ArchiveSha256 -and -not $defaults.NonInteractive) 'Parser defaults do not select online Core latest without archive evidence.'
 
-$parsed = $parserType::Parse([string[]]@('--offline', '--edition', 'full', '--version', '0.0.1-test', '--non-interactive'))
-Assert-PshGoal5Bootstrapper ($parsed.Offline -and $parsed.Edition -ceq 'Full' -and $parsed.Version -ceq '0.0.1-test' -and $parsed.NonInteractive) 'Parser did not normalize the public option set.'
+$parserUnicodePath = 'C:\Offline Packages\' + ([string][char]0x5305) + ([string][char]0x8DEF) + '\psh core.zip'
+$parserArchiveSha = 'A' * 64
+$parsed = $parserType::Parse([string[]]@('--offline', '--edition', 'full', '--version', '0.0.1-test', '--archive-path', $parserUnicodePath, '--archive-sha256', $parserArchiveSha, '--non-interactive'))
+Assert-PshGoal5Bootstrapper ($parsed.Offline -and $parsed.Edition -ceq 'Full' -and $parsed.Version -ceq '0.0.1-test' -and
+    $parsed.ArchivePath -ceq $parserUnicodePath -and $parsed.ArchiveSha256 -ceq ('a' * 64) -and $parsed.NonInteractive) 'Parser did not normalize the public offline archive-evidence option set.'
 $strictPrerelease = $parserType::Parse([string[]]@('--version', '1.2.3-alpha.1+build.01'))
 Assert-PshGoal5Bootstrapper ($strictPrerelease.Version -ceq '1.2.3-alpha.1+build.01') 'Parser rejected a valid strict prerelease and build version.'
 
-$slashParsed = $parserType::Parse([string[]]@('/offline', '-edition', 'Core', '/version', '1.2.3'))
-Assert-PshGoal5Bootstrapper ($slashParsed.Offline -and $slashParsed.Edition -ceq 'Core' -and $slashParsed.Version -ceq '1.2.3') 'Parser did not accept the documented slash/single-dash forms.'
+$slashParsed = $parserType::Parse([string[]]@('/offline', '-edition', 'Core', '/version', '1.2.3', '/archive-path', $parserUnicodePath, '-archive-sha256', ('b' * 64)))
+Assert-PshGoal5Bootstrapper ($slashParsed.Offline -and $slashParsed.Edition -ceq 'Core' -and $slashParsed.Version -ceq '1.2.3' -and
+    $slashParsed.ArchivePath -ceq $parserUnicodePath -and $slashParsed.ArchiveSha256 -ceq ('b' * 64)) 'Parser did not accept the documented slash/single-dash offline evidence forms.'
 
 $help = $parserType::Parse([string[]]@('--help'))
 Assert-PshGoal5Bootstrapper $help.Help 'Parser did not recognize --help.'
@@ -375,6 +381,15 @@ foreach ($invalidCase in @(
         @{ Arguments = @('--version', '1.2.3--'); Description = 'double hyphen prerelease' },
         @{ Arguments = @('--version', '1.2.3+build--1'); Description = 'double hyphen build identifier' },
         @{ Arguments = @('--version', '1.2.3-alpha..beta'); Description = 'empty prerelease identifier' },
+        @{ Arguments = @('--offline'); Description = 'offline without archive evidence' },
+        @{ Arguments = @('--offline', '--archive-path', $parserUnicodePath); Description = 'offline with only archive path' },
+        @{ Arguments = @('--offline', '--archive-sha256', ('a' * 64)); Description = 'offline with only archive SHA256' },
+        @{ Arguments = @('--archive-path', $parserUnicodePath, '--archive-sha256', ('a' * 64)); Description = 'online archive evidence' },
+        @{ Arguments = @('--offline', '--archive-path', $parserUnicodePath, '--archive-sha256', ('a' * 63)); Description = 'short archive SHA256' },
+        @{ Arguments = @('--offline', '--archive-path', $parserUnicodePath, '--archive-sha256', (('a' * 63) + 'z')); Description = 'nonhex archive SHA256' },
+        @{ Arguments = @('--offline', '--archive-path', $parserUnicodePath, '--archive-sha256', ('0' * 64)); Description = 'zero archive SHA256' },
+        @{ Arguments = @('--offline', '--archive-path', $parserUnicodePath, '--archive-path', 'C:\other.zip', '--archive-sha256', ('a' * 64)); Description = 'duplicate archive path' },
+        @{ Arguments = @('--offline', '--archive-path', $parserUnicodePath, '--archive-sha256', ('a' * 64), '--archive-sha256', ('b' * 64)); Description = 'duplicate archive SHA256' },
         @{ Arguments = @('--help', '--offline'); Description = 'combined help' },
         @{ Arguments = @('positional'); Description = 'positional argument' }
     )) {
@@ -620,8 +635,8 @@ exit 23
 '@
     $offlineScript = @'
 [CmdletBinding()]
-param([ValidateSet('Core','Full')][string]$Edition, [string]$Version, [switch]$NonInteractive)
-$payload = [ordered]@{ mode = 'offline'; edition = $Edition; version = $Version; nonInteractive = [bool]$NonInteractive }
+    param([ValidateSet('Core','Full')][string]$Edition, [string]$Version, [switch]$NonInteractive, [string]$ArchivePath, [string]$ArchiveSha256)
+    $payload = [ordered]@{ mode = 'offline'; edition = $Edition; version = $Version; nonInteractive = [bool]$NonInteractive; archivePath = $ArchivePath; archiveSha256 = $ArchiveSha256 }
 $encoding = New-Object System.Text.UTF8Encoding -ArgumentList @($false)
 [IO.File]::WriteAllText($env:PSH_BOOTSTRAPPER_CAPTURE, ($payload | ConvertTo-Json -Compress), $encoding)
 exit 29
@@ -672,10 +687,13 @@ exit 29
     $onlineModulePath = [string]$onlinePayload.psModulePath
     Assert-PshGoal5Bootstrapper (-not [string]::IsNullOrWhiteSpace($onlineModulePath) -and $onlineModulePath.IndexOf($poisonModuleRoot, [StringComparison]::OrdinalIgnoreCase) -lt 0) 'Online installer inherited the poisoned parent PSModulePath instead of reconstructing Windows PowerShell defaults.'
 
-    $offlineResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--offline', '--edition', 'Core', '--version', 'latest')
+    $runtimeArchivePath = Join-Path $runtimeRoot (('offline ' + [string][char]0x5305 + [string][char]0x8DEF) + '.zip')
+    $runtimeArchiveSha = 'A' * 64
+    $offlineResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @('--offline', '--edition', 'Core', '--version', 'latest', '--archive-path', $runtimeArchivePath, '--archive-sha256', $runtimeArchiveSha)
     Assert-PshGoal5Bootstrapper ($offlineResult.ExitCode -eq 29) ('Offline script exit code was not passed through: {0}; output={1}' -f $offlineResult.ExitCode, (Format-PshBootstrapperOutput -Output $offlineResult.Output))
     $offlinePayload = Get-Content -LiteralPath $capturePath -Raw -Encoding UTF8 | ConvertFrom-Json
-    Assert-PshGoal5Bootstrapper ($offlinePayload.mode -ceq 'offline' -and $offlinePayload.edition -ceq 'Core' -and $offlinePayload.version -ceq 'latest') 'Offline forwarding payload was incorrect.'
+    Assert-PshGoal5Bootstrapper ($offlinePayload.mode -ceq 'offline' -and $offlinePayload.edition -ceq 'Core' -and $offlinePayload.version -ceq 'latest' -and
+        $offlinePayload.archivePath -ceq $runtimeArchivePath -and $offlinePayload.archiveSha256 -ceq ('a' * 64)) 'Offline archive path/SHA forwarding payload was incorrect.'
 
     [IO.File]::AppendAllText($runtimeOnline, "`n# tamper`n", $utf8NoBom)
     $integrityResult = Invoke-PshBootstrapperProcess -Executable $runtimeOutput -Arguments @()

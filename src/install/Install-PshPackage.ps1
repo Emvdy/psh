@@ -1020,6 +1020,7 @@ $oldOwnership = $null
 $oldOwnershipBytes = New-Object byte[] 0
 $oldOwnershipSha256 = $null
 $oldCurrent = $null
+$lifecycleSnapshotCaptured = $false
 $stageRoot = $null
 $versionRoot = $null
 $profileInstalled = $false
@@ -1064,6 +1065,15 @@ try {
 
     $lock = Enter-PshInstallRootLock -InstallRoot $script:LifecycleInstallRoot
     Assert-PshInstallNoPendingTransaction -Root $script:LifecycleInstallRoot
+    $oldOwnershipSnapshot = Read-PshLifecycleStateSnapshot -InstallRoot $script:LifecycleInstallRoot -Kind ownership
+    if ($null -ne $oldOwnershipSnapshot) {
+        $oldOwnership = $oldOwnershipSnapshot.Document
+        [byte[]]$oldOwnershipBytes = [byte[]]$oldOwnershipSnapshot.Bytes
+        $oldOwnershipSha256 = [string]$oldOwnershipSnapshot.Sha256
+    }
+    $oldCurrent = Read-PshLifecycleCurrent -Root $script:LifecycleInstallRoot
+    $lifecycleSnapshotCaptured = $true
+
     $manifestPath = Join-Path $packageRootResolved 'package.manifest.json'
     if (-not [IO.File]::Exists($manifestPath)) { Stop-PshLifecycleInstall -Code 5 -Kind 'IntegrityFailure' -Message "Package manifest is missing: $manifestPath" }
     $manifestSnapshot = Read-PshStrictJsonSnapshot -Path $manifestPath -Description 'Package manifest'
@@ -1102,13 +1112,6 @@ try {
     $versionTreeSha = Get-PshPackageTreeDigest -Manifest ([pscustomobject]@{ files = $versionFiles.ToArray() })
     $publishedVersionEntryForChecks = [pscustomobject][ordered]@{ files = $versionFiles.ToArray(); treeSha256 = $versionTreeSha }
 
-    $oldOwnershipSnapshot = Read-PshLifecycleStateSnapshot -InstallRoot $script:LifecycleInstallRoot -Kind ownership
-    if ($null -ne $oldOwnershipSnapshot) {
-        $oldOwnership = $oldOwnershipSnapshot.Document
-        [byte[]]$oldOwnershipBytes = [byte[]]$oldOwnershipSnapshot.Bytes
-        $oldOwnershipSha256 = [string]$oldOwnershipSnapshot.Sha256
-    }
-    $oldCurrent = Read-PshLifecycleCurrent -Root $script:LifecycleInstallRoot
     $oldComponents = Get-PshInstallProperty $oldOwnership 'components'
     $profileWasInstalledBefore = [bool](Get-PshInstallProperty (Get-PshInstallProperty $oldComponents 'profile') 'installed')
     $projectionWasInstalledBefore = [bool](Get-PshInstallProperty (Get-PshInstallProperty $oldComponents 'psReadLineProjection') 'installed')
@@ -1339,6 +1342,8 @@ try {
 }
 catch {
     $failure = $_
+    if (-not $lifecycleSnapshotCaptured) { throw $failure }
+    $primaryFailureMetadata = Get-PshLifecycleErrorMetadata -ErrorRecord $failure
     $rollbackClean = $true
     $rollbackIntegrityConflict = $false
     $rollbackRestartRequired = $false
@@ -1571,10 +1576,10 @@ catch {
     }
     if (-not $rollbackClean) {
         $rollbackCode = if ($rollbackIntegrityConflict) { 5 } else { 3 }
-        $global:LASTEXITCODE = $rollbackCode
-        $failure.Exception.Data['PshExitCode'] = $rollbackCode
-        $failure.Exception.Data['PshErrorKind'] = if ($rollbackIntegrityConflict) { 'IntegrityFailure' } else { 'RuntimeError' }
-        $failure.Exception.Data['PshErrorId'] = 'PshLifecycle.RollbackIncomplete'
+        $global:LASTEXITCODE = [int]$primaryFailureMetadata.ExitCode
+        $failure.Exception.Data['PshRollbackExitCode'] = $rollbackCode
+        $failure.Exception.Data['PshRollbackErrorKind'] = if ($rollbackIntegrityConflict) { 'IntegrityFailure' } else { 'RuntimeError' }
+        $failure.Exception.Data['PshRollbackErrorId'] = 'PshLifecycle.RollbackIncomplete'
         $failure.Exception.Data['PshRollbackIncomplete'] = $true
         $failure.Exception.Data['PshRecoveryRequired'] = $true
         $failure.Exception.Data['PshRestartRequired'] = $rollbackRestartRequired

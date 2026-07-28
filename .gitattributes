@@ -9,6 +9,9 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 
+src/catalog-builder/**/*.cs text eol=lf
+src/catalog-builder/*.csproj text eol=lf
+
 *.dll binary
 *.exe binary
 *.gz binary
@@ -23,6 +26,7 @@ tools/win-arm64/**/*.exe binary
 
 # Vendored dependency and license bytes are verified against immutable package
 # hashes. Keep their upstream line endings unchanged on every checkout.
+scripts/goal6/licenses/** binary
 src/Psh/Dependencies/PSReadLine/2.4.5/** binary
 licenses/PSReadLine-2.4.5/LICENSE.txt binary
 licenses/bat-0.26.1/LICENSE-APACHE binary
@@ -34,6 +38,7 @@ licenses/jq-1.8.2/COPYING binary
 licenses/ripgrep-15.2.0/COPYING binary
 licenses/ripgrep-15.2.0/LICENSE-MIT binary
 licenses/ripgrep-15.2.0/UNLICENSE binary
+licenses/dotnet-arcade-3169db019485/LICENSE.TXT binary
 
 # Real-VM evidence hashes cover the original guest bytes, including CRLF.
 evidence/goal2/**/logs/*.json binary

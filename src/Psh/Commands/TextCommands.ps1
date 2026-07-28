@@ -3499,9 +3499,9 @@ function Set-PshTextFileAtomically {
         [string]$EncodingName
     )
 
-    $isWindows = $env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\'
+    $runningOnWindows = $env:OS -eq 'Windows_NT' -or [IO.Path]::DirectorySeparatorChar -eq '\'
     $encodedBytes = [byte[]](ConvertTo-PshEncodedTextBytes -Text $Text -EncodingName $EncodingName)
-    if ($isWindows) {
+    if ($runningOnWindows) {
         Set-PshWindowsTextFileAtomically -Path $Path -Bytes $encodedBytes
         return
     }

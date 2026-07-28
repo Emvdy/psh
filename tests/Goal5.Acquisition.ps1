@@ -232,7 +232,7 @@ $script:Goal5OriginalAcquisitionHttpRequest = (Get-Command Invoke-PshAcquisition
 $script:Goal5OriginalAcquisitionOneRequest = (Get-Command Invoke-PshAcquisitionOneRequest -CommandType Function).ScriptBlock
 $script:Goal5OriginalSaveTrustedReleaseAsset = (Get-Command Save-PshTrustedReleaseAsset -CommandType Function).ScriptBlock
 $script:Goal5OriginalAssertAcquisitionOwnedStageStable = (Get-Command Assert-PshAcquisitionOwnedStageStable -CommandType Function).ScriptBlock
-$script:Goal5OriginalProductionPublisherPolicy = (Get-Command Get-PshProductionPublisherPolicy -CommandType Function).ScriptBlock
+$script:Goal5OriginalAuthenticodePublisherPolicy = (Get-Command Get-PshAuthenticodePublisherPolicy -CommandType Function).ScriptBlock
 $script:Goal5OriginalWindowsCatalogTrustVerifier = (Get-Command Invoke-PshWindowsCatalogTrustVerifier -CommandType Function).ScriptBlock
 $testRoot = $null
 try {
@@ -320,7 +320,7 @@ try {
         return & $script:Goal5OriginalAssertAcquisitionOwnedStageStable -Path $Path -ExpectedState $ExpectedState
     }
 
-    function Get-PshProductionPublisherPolicy {
+    function Get-PshAuthenticodePublisherPolicy {
         [CmdletBinding()]
         param()
 
@@ -679,9 +679,9 @@ finally {
     try { Set-Item Function:Invoke-PshAcquisitionOneRequest -Value $script:Goal5OriginalAcquisitionOneRequest -ErrorAction Stop } catch { }
     try { Set-Item Function:Save-PshTrustedReleaseAsset -Value $script:Goal5OriginalSaveTrustedReleaseAsset -ErrorAction Stop } catch { }
     try { Set-Item Function:Assert-PshAcquisitionOwnedStageStable -Value $script:Goal5OriginalAssertAcquisitionOwnedStageStable -ErrorAction Stop } catch { }
-    try { Set-Item Function:Get-PshProductionPublisherPolicy -Value $script:Goal5OriginalProductionPublisherPolicy -ErrorAction Stop } catch { }
+    try { Set-Item Function:Get-PshAuthenticodePublisherPolicy -Value $script:Goal5OriginalAuthenticodePublisherPolicy -ErrorAction Stop } catch { }
     try { Set-Item Function:Invoke-PshWindowsCatalogTrustVerifier -Value $script:Goal5OriginalWindowsCatalogTrustVerifier -ErrorAction Stop } catch { }
-    Remove-Variable Goal5DirectCalls, Goal5DirectBytes, Goal5ExistingCalls, Goal5ConflictCalls, Goal5InitialUriCalls, Goal5OfflineCalls, Goal5RedirectCalls, Goal5RedirectBytes, Goal5LoopCalls, Goal5LimitCalls, Goal5RacePath, Goal5RaceBytes, Goal5RaceOwnerBytes, Goal5DestinationLinkCalls, Goal5StageRaceBytes, Goal5StageRacePath, Goal5StageRaceOriginal, Goal5StageRaceReplacement, Goal5AcquisitionTransport, Goal5AcquisitionStageObserver, Goal5AcquisitionFixturePolicy, Goal5OriginalAcquisitionHttpRequest, Goal5OriginalAcquisitionOneRequest, Goal5OriginalSaveTrustedReleaseAsset, Goal5OriginalAssertAcquisitionOwnedStageStable, Goal5OriginalProductionPublisherPolicy, Goal5OriginalWindowsCatalogTrustVerifier -Scope Script -ErrorAction SilentlyContinue
+    Remove-Variable Goal5DirectCalls, Goal5DirectBytes, Goal5ExistingCalls, Goal5ConflictCalls, Goal5InitialUriCalls, Goal5OfflineCalls, Goal5RedirectCalls, Goal5RedirectBytes, Goal5LoopCalls, Goal5LimitCalls, Goal5RacePath, Goal5RaceBytes, Goal5RaceOwnerBytes, Goal5DestinationLinkCalls, Goal5StageRaceBytes, Goal5StageRacePath, Goal5StageRaceOriginal, Goal5StageRaceReplacement, Goal5AcquisitionTransport, Goal5AcquisitionStageObserver, Goal5AcquisitionFixturePolicy, Goal5OriginalAcquisitionHttpRequest, Goal5OriginalAcquisitionOneRequest, Goal5OriginalSaveTrustedReleaseAsset, Goal5OriginalAssertAcquisitionOwnedStageStable, Goal5OriginalAuthenticodePublisherPolicy, Goal5OriginalWindowsCatalogTrustVerifier -Scope Script -ErrorAction SilentlyContinue
 }
 
 Write-Output "Goal 5 acquisition passed ($script:Goal5AcquisitionAssertions assertions)."
