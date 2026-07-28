@@ -14,7 +14,7 @@ condition has direct evidence.
 | Goal 3 | COMPLETE | `9254f3b` | Merged to `main` at `71fbda8`; final branch and `main` CI green |
 | Goal 4 | COMPLETE | `3289786` | Merged to `main`; Goal 4 `main` CI run `29758890021` and both x64 jobs green |
 | Goal 5 | COMPLETE | `50c7d3d` | Code accepted at `22de234`; fast-forward merged to `main` at `50c7d3d`; final branch and all seven `main` workflows green |
-| Goal 6 | IN_PROGRESS | `50c7d3d` | Started from the green Goal 5 `main` closeout |
+| Goal 6 | COMPLETE | `0fceab9` | Four-runtime Windows matrix, quality, reproducibility, provenance, and retained evidence green |
 | Goal 7 | PENDING | - | Blocked on Goal 6 DoneWhen |
 | Goal 8 | PENDING | - | Blocked on Goal 7 DoneWhen |
 
@@ -965,6 +965,7 @@ preserved at `22de234e01c6666c430fe5e5a054a58d4a573e78`.
 ## Goal 6: Tests And CI
 
 Started: 2026-07-22 (Asia/Shanghai)
+Completed: 2026-07-29 (Asia/Shanghai)
 
 ### Prerequisite
 
@@ -1002,29 +1003,74 @@ runners only if the evaluation below confirms they are usable.
 
 ### Execution Checklist
 
-- [ ] Preserve the Goals 3-6 VM prohibition throughout Goal 6: do not start,
+- [x] Preserve the Goals 3-6 VM prohibition throughout Goal 6: do not start,
   resume, or query the Parallels VM.
-- [ ] Convert or extend applicable Pester coverage into table-driven tests and
+- [x] Convert or extend applicable Pester coverage into table-driven tests and
   run the supported Windows x64 matrix under Windows PowerShell 5.1 and
   PowerShell 7.
-- [ ] Evaluate public GitHub `windows-11-arm` runner usability, record the
+- [x] Evaluate public GitHub `windows-11-arm` runner usability, record the
   result, and, when usable, add the available PS7 and PS5.1 ARM64 matrix.
-- [ ] Generate GNU Tier 1 golden output on Ubuntu and compare through shared
+- [x] Generate GNU Tier 1 golden output on Ubuntu and compare through shared
   path, line-ending, and `LC_ALL=C` normalization helpers; retain structural
   assertions for platform-shaped commands.
-- [ ] Cover non-admin installation, non-ASCII user paths, paths with spaces,
+- [x] Cover non-admin installation, non-ASCII user paths, paths with spaces,
   corrupted downloads, wrong architectures, Core without tools, missing Full
   tools, and profile conflicts.
-- [ ] Gate Actions with PSScriptAnalyzer, dependency and license checks, secret
+- [x] Gate Actions with PSScriptAnalyzer, dependency and license checks, secret
   scanning, checksums, SBOM generation, and build provenance attestation.
-- [ ] Run best-effort Defender scanning of release assets with `MpCmdRun -Scan`
+- [x] Run best-effort Defender scanning of release assets with `MpCmdRun -Scan`
   where available; otherwise record the hash-based lookup without failing only
   because Defender is unavailable.
-- [ ] Build twice and compare identical file manifests plus per-file SHA256
+- [x] Build twice and compare identical file manifests plus per-file SHA256
   values while excluding archive-container timestamp metadata.
-- [ ] Retain every automated report and the command compatibility matrix as
+- [x] Retain every automated report and the command compatibility matrix as
   workflow artifacts.
-- [ ] Audit the Goal 6 StopIf conditions and stop immediately if any supported
+- [x] Audit the Goal 6 StopIf conditions and stop immediately if any supported
   matrix fails, a secret is present, or a license file is missing.
-- [ ] Record direct CI and artifact evidence for every DoneWhen item before
+- [x] Record direct CI and artifact evidence for every DoneWhen item before
   marking Goal 6 complete or starting Goal 7.
+
+### StopIf Audit
+
+| Condition | State | Evidence / action |
+| --- | --- | --- |
+| Any supported matrix fails | NOT_HIT | Final Goal 6 run attempt 2 passed AMD64/ARM64 under Windows PowerShell 5.1 and PowerShell 7. |
+| A secret is present | NOT_HIT | The quality, supply-chain, and secret-gates job passed its all-ref gitleaks scan. |
+| A license file is missing | NOT_HIT | The locked dependency, license, checksum, and SBOM gate completed successfully. |
+
+### Evidence Collected
+
+- Accepted Goal 6 implementation head:
+  `0fceab942105967fd2eed253a5695efb0e9d9a4b`.
+- Final Goal 5 fixture validation:
+  [run `30370845249`](https://github.com/Emvdy/psh/actions/runs/30370845249),
+  conclusion `success` for both Windows PowerShell 5.1 x64 and PowerShell 7 x64.
+- Final Goal 6 required CI:
+  [run `30370845559`](https://github.com/Emvdy/psh/actions/runs/30370845559),
+  attempt 2, conclusion `success`.
+- The four supported Windows jobs each completed the exact Pester 5.9.0
+  matrix with `27` passed, `0` failed, and no skipped or incomplete tests:
+  AMD64 Windows PowerShell 5.1, AMD64 PowerShell 7, ARM64 Windows PowerShell
+  5.1, and ARM64 PowerShell 7.
+- The same Goal 6 run passed Ubuntu GNU goldens; quality, supply-chain, and
+  secret gates; canonical candidate reproducibility; GitHub provenance; and
+  retained-evidence aggregation.
+- Retained artifacts include `goal6-complete-evidence`,
+  `goal6-provenance-reports`, all four `goal6-runtime-*` reports,
+  `goal6-candidate-reports`, `goal6-candidate-exact-13`,
+  `goal6-quality-reports`, and `goal6-gnu-goldens`.
+- The child-start fixture repair remained test-only and preserved structured
+  exit code `3` when PowerShell is unavailable.
+
+### DoneWhen Audit
+
+- [x] All automated checks pass on the supported AMD64/ARM64 and
+  Windows PowerShell 5.1/PowerShell 7 matrix.
+- [x] Reports and the command compatibility matrix are retained as workflow
+  artifacts.
+
+### Remaining Work
+
+None. Goal 6 is complete at
+`0fceab942105967fd2eed253a5695efb0e9d9a4b`; Goal 7 may start only after this
+completion record is merged to `main` and the resulting `main` CI is green.
