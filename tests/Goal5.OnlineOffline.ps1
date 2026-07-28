@@ -1046,18 +1046,16 @@ export PATH
     $env:PSH_FAKE_RELEASE_METADATA = ConvertTo-PshGoal5BashPath -BashPath $bashPath -Path $shellReleaseMetadataPath
     $fakePowerShell = Join-Path $fakeBin 'powershell.exe'
     Write-PshGoal5Text -Path $fakePowerShell -Text @'
-#!/usr/bin/env bash
+MZ='' # Pass the image probe while remaining an invalid Windows executable.
 exec "$PSH_FAKE_REAL_POWERSHELL" "$@"
 '@
     $env:PSH_FAKE_REAL_POWERSHELL = $windowsPowerShellBashPath
     Assert-PshGoal5BashFixtureCommand -Name 'powershell.exe' -ExpectedPath ($fakeBinBashPath + '/powershell.exe')
     $shellChildStartError = Join-Path $script:TestRoot 'shell-child-start-error.log'
-    try {
-        $ErrorActionPreference = 'SilentlyContinue'
-        & $bashPath $shellScriptPath --version '1.2.3' 2>$shellChildStartError | Out-Null
-        $shellChildStartExit = [int]$LASTEXITCODE
-    }
-    finally { $ErrorActionPreference = $previousErrorActionPreference }
+    $shellChildStartArguments = [string]::Join(' ', @(@($shellScriptPath, '--version', '1.2.3') | ForEach-Object { ConvertTo-PshShellProcessArgument -Value ([string]$_) }))
+    $shellChildStartProcess = Start-Process -FilePath $bashPath -ArgumentList $shellChildStartArguments -NoNewWindow -Wait -PassThru -RedirectStandardError $shellChildStartError
+    try { $shellChildStartExit = [int]$shellChildStartProcess.ExitCode }
+    finally { $shellChildStartProcess.Dispose() }
     Assert-PshGoal5Entry ($shellChildStartExit -eq 3 -and [IO.File]::ReadAllText($shellChildStartError, $script:Utf8) -match 'PshShellChildStart') 'Shell child-start failure did not return structured IO exit code 3.'
     Assert-PshGoal5NoShellTempRoot -Label 'Child-start shell failure'
     [IO.File]::Delete($fakePowerShell)
@@ -1071,12 +1069,10 @@ exec "$PSH_FAKE_REAL_CYGPATH" "$@"
     $env:PSH_FAKE_REAL_CYGPATH = $realCygpathBashPath
     Assert-PshGoal5BashFixtureCommand -Name 'cygpath' -ExpectedPath ($fakeBinBashPath + '/cygpath')
     $shellMappingError = Join-Path $script:TestRoot 'shell-mapping-error.log'
-    try {
-        $ErrorActionPreference = 'SilentlyContinue'
-        & $bashPath $shellScriptPath --version '1.2.3' 2>$shellMappingError | Out-Null
-        $shellMappingExit = [int]$LASTEXITCODE
-    }
-    finally { $ErrorActionPreference = $previousErrorActionPreference }
+    $shellMappingArguments = [string]::Join(' ', @(@($shellScriptPath, '--version', '1.2.3') | ForEach-Object { ConvertTo-PshShellProcessArgument -Value ([string]$_) }))
+    $shellMappingProcess = Start-Process -FilePath $bashPath -ArgumentList $shellMappingArguments -NoNewWindow -Wait -PassThru -RedirectStandardError $shellMappingError
+    try { $shellMappingExit = [int]$shellMappingProcess.ExitCode }
+    finally { $shellMappingProcess.Dispose() }
     Assert-PshGoal5Entry ($shellMappingExit -eq 3 -and [IO.File]::ReadAllText($shellMappingError, $script:Utf8) -match 'PshShellPath') 'Shell Win32-to-Bash mapping failure did not return structured path exit code 3.'
     Assert-PshGoal5NoShellTempRoot -Label 'Win32 path-mapping shell failure'
 
