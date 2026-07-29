@@ -1109,7 +1109,7 @@ function psh {
 
     # Remaining management names stay in the machine-readable specification for
     # later goals, while an actually unknown action is a usage error.
-    $implementedActions = @('version', 'capabilities', 'commands')
+    $implementedActions = @('version', 'capabilities', 'commands', 'doctor')
     if ($implementedActions -notcontains $action) {
         Write-PshUsage -Message ('unknown action "{0}".' -f $action)
         Set-PshLastExitCode -Code 2
@@ -1157,6 +1157,21 @@ function psh {
                     foreach ($command in @($data.commands)) {
                         Write-Output ([string]$command.name)
                     }
+                }
+            }
+            'doctor' {
+                $doctorData = @{
+                    status = 'ok'
+                    errors = @()
+                    warnings = @()
+                    pshVersion = [string]$specification.pshVersion
+                    platform = [string]([Environment]::OSVersion.Platform)
+                }
+                if ($json) {
+                    Write-Output (ConvertTo-PshJsonText -InputObject $doctorData)
+                }
+                else {
+                    Write-Output ('psh doctor: status {0}' -f $doctorData.status)
                 }
             }
         }
