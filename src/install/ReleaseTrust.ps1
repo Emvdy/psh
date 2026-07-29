@@ -1437,7 +1437,20 @@ function Assert-PshTrustSnapshotContextStable {
         }
     }
     foreach ($record in @($Sources) + @((Get-PshLifecycleProperty $Context 'Files'))) {
-        [void](Assert-PshTrustLockedFileStable -Record $record)
+        $path = [string](Get-PshLifecycleProperty $record 'Path')
+        $expectedSha256 = [string](Get-PshLifecycleProperty $record 'Sha256')
+        if ([string]::IsNullOrWhiteSpace($path) -or [string]::IsNullOrWhiteSpace($expectedSha256)) { continue }
+        try {
+            $actualSha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+            if ($actualSha256 -cne $expectedSha256) {
+                Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshTrustSnapshotChanged' -Message "Trust snapshot file changed during verification: $path"
+            }
+        }
+        catch {
+            $metadata = Get-PshLifecycleErrorMetadata -ErrorRecord $_
+            if ([string]$metadata.ErrorId -ceq 'PshTrustSnapshotChanged') { throw }
+            Throw-PshReleaseTrustError -ExitCode 5 -ErrorId 'PshTrustSnapshotChanged' -Message "Trust snapshot file changed during verification: $path" -InnerException $_.Exception
+        }
     }
     return $true
 }
@@ -1496,6 +1509,7 @@ function Invoke-PshProductionCatalogMembershipVerifier {
         Offline = $true
     }
     try {
+        Close-PshTrustFileRecords -Records @((Get-PshLifecycleProperty $Context 'Files'))
         $results = @(Invoke-PshWindowsCatalogMembershipVerifier -Request $request)
     }
     catch {
