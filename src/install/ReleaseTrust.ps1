@@ -1467,6 +1467,7 @@ function Invoke-PshCatalogTrustVerifier {
         SnapshotFiles = $snapshotFiles
     }
     try {
+        Close-PshTrustFileRecords -Records @((Get-PshLifecycleProperty $Context 'Files'))
         $results = @(Invoke-PshWindowsCatalogTrustVerifier -Request $request)
     }
     catch {
