@@ -1304,7 +1304,7 @@ function New-PshTrustSnapshotFile {
     $fullPath = Assert-PshLifecycleNoReparseAncestors -Path $Path -Description $Description
     $stream = $null
     try {
-        $stream = New-Object IO.FileStream($fullPath, ([IO.FileMode]::CreateNew), ([IO.FileAccess]::ReadWrite), ([IO.FileShare]::Read))
+        $stream = New-Object IO.FileStream($fullPath, ([IO.FileMode]::CreateNew), ([IO.FileAccess]::ReadWrite), ([IO.FileShare]::ReadWrite))
         $stream.Write($Bytes, 0, $Bytes.Length)
         try { $stream.Flush($true) } catch { $stream.Flush() }
         $state = Get-PshTrustStreamState -Stream $stream -Description $Description
