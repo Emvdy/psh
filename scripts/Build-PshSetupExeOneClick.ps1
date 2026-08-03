@@ -1,4 +1,4 @@
-# Copyright (C) 2026 Emvdy
+﻿# Copyright (C) 2026 Emvdy
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Build-PshSetupExeOneClick.ps1 — 一键在 Windows 上构建 psh-setup.exe

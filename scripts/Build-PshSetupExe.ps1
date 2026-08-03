@@ -1,4 +1,4 @@
-# Copyright (C) 2026 Emvdy
+﻿# Copyright (C) 2026 Emvdy
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # Build-PshSetupExe.ps1 — 一键构建 psh-setup.exe 自包含安装器
