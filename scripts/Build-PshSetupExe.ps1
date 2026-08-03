@@ -158,9 +158,15 @@ Write-Ok "Build succeeded."
 
 Write-Step "Locating output exe ..."
 
-$exePath = Join-Path $RepositoryRoot 'src\setup-exe\bin\Release\psh-setup.exe'
+# 兼容旧 SDK（bin\Release\）和新 SDK（bin\Release\net472\）两种输出路径
+$exePath      = Join-Path $RepositoryRoot 'src\setup-exe\bin\Release\psh-setup.exe'
+$exePathAlt   = Join-Path $RepositoryRoot 'src\setup-exe\bin\Release\net472\psh-setup.exe'
 if (-not (Test-Path $exePath)) {
-    throw "Output exe not found at expected path: $exePath"
+    if (Test-Path $exePathAlt) {
+        $exePath = $exePathAlt
+    } else {
+        throw "Output exe not found at either expected path:`n  $exePath`n  $exePathAlt"
+    }
 }
 
 $size = (Get-Item $exePath).Length
