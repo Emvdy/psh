@@ -503,7 +503,11 @@ $testCatalogCommand = Get-Command -Name Test-FileCatalog -CommandType Cmdlet -Er
 $dotnetCommands = @(Get-Command -Name dotnet -CommandType Application -ErrorAction SilentlyContinue)
 $dotnetCommand = if ($dotnetCommands.Count -eq 0) { $null } else { $dotnetCommands[0] }
 if ([string]::IsNullOrWhiteSpace($CatalogBuilderPath)) {
-    $CatalogBuilderPath = Join-Path $RepositoryRoot 'src/catalog-builder/bin/Release/net10.0/Psh.CatalogBuilder.dll'
+    # Try net8.0 first (more compatible), then net10.0
+    $CatalogBuilderPath = Join-Path $RepositoryRoot 'src/catalog-builder/bin/Release/net8.0/Psh.CatalogBuilder.dll'
+    if (-not [IO.File]::Exists($CatalogBuilderPath)) {
+        $CatalogBuilderPath = Join-Path $RepositoryRoot 'src/catalog-builder/bin/Release/net10.0/Psh.CatalogBuilder.dll'
+    }
 }
 try {
     $CatalogBuilderPath = Assert-PshLifecycleNoReparseAncestors -Path $CatalogBuilderPath -Description 'deterministic catalog builder'
